@@ -1,17 +1,27 @@
 //! wayhint: keyboard hints for everything clickable on a Wayland desktop.
 //!
 //! `main` only turns the command line into a call and an error into an exit
-//! code. Each module owns one job; see the plan's module table.
+//! code. Each module owns one job:
+//!
+//! | Module      | Job                                                      |
+//! |-------------|----------------------------------------------------------|
+//! | `config`    | the settings file, validated once at start               |
+//! | `keys`      | physical keys, and decoding config characters            |
+//! | `desktop`   | Hyprland and the accessibility tree, behind a few calls  |
+//! | `snapshot`  | the scan's output: the seam every other part reads       |
+//! | `dump`      | `wayhint dump`, printing each seam as JSON               |
 
 mod cli;
 mod config;
 mod desktop;
+mod dump;
 mod geometry;
 mod keys;
+mod snapshot;
 
 use std::process::ExitCode;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::Parser as _;
 
 use crate::{
@@ -35,7 +45,7 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli) -> Result<()> {
     let config = || Config::load(cli.config.as_deref(), desktop::keyboard_layout);
-    match cli.command {
+    match &cli.command {
         None => {
             config()?;
             println!("wayhint: nothing to do yet");
@@ -45,31 +55,6 @@ fn run(cli: &Cli) -> Result<()> {
             print!("{}", config()?.render());
             Ok(())
         }
-        Some(Command::Dump { window: true }) => dump_window(),
-        Some(Command::Dump { window: false }) => {
-            anyhow::bail!("only `dump --window` exists so far")
-        }
+        Some(Command::Dump(args)) => dump::run(args),
     }
-}
-
-/// `wayhint dump --window`: the focused window and the monitor it's on.
-fn dump_window() -> Result<()> {
-    /// A struct only for printing. It borrows instead of owning, hence the
-    /// lifetime `'a`: it can't outlive the values it points at. Unlike
-    /// `serde_json::json!`, a struct keeps its fields in this order.
-    #[derive(serde::Serialize)]
-    struct Dump<'a> {
-        window: &'a desktop::Window,
-        monitor: Option<&'a desktop::Monitor>,
-    }
-
-    let window = desktop::focused_window()?.context("no window has focus")?;
-    let monitors = desktop::monitors()?;
-    let monitor = monitors.iter().find(|m| m.id == window.monitor);
-    let dump = Dump {
-        window: &window,
-        monitor,
-    };
-    println!("{}", serde_json::to_string_pretty(&dump)?);
-    Ok(())
 }
