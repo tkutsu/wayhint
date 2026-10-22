@@ -17,6 +17,7 @@ mod desktop;
 mod dump;
 mod geometry;
 mod keys;
+mod selection;
 mod snapshot;
 
 use std::process::ExitCode;
