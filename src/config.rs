@@ -92,16 +92,18 @@ pub enum After {
 }
 
 /// The verbs' default keys, as positions, so they sit in the same place on
-/// every layout, as the home row does. On US they print `r m 2 o [ ]`.
-/// Left has none: a bare tag left-clicks.
+/// every layout, as the home row does. On US they print `r m t o b n`:
+/// right, middle, twice, over, back, next. Mnemonic letters on the home row
+/// (`d`, `h`, `f`) would clash with the default alphabet. Left has none: a
+/// bare tag left-clicks.
 const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
     (Action::Left, None),
     (Action::Right, Some(KeyCode::from_evdev(19))),
     (Action::Middle, Some(KeyCode::from_evdev(50))),
-    (Action::Double, Some(KeyCode::from_evdev(3))),
+    (Action::Double, Some(KeyCode::from_evdev(20))),
     (Action::Hover, Some(KeyCode::from_evdev(24))),
-    (Action::Back, Some(KeyCode::from_evdev(26))),
-    (Action::Forward, Some(KeyCode::from_evdev(27))),
+    (Action::Back, Some(KeyCode::from_evdev(48))),
+    (Action::Forward, Some(KeyCode::from_evdev(49))),
 ];
 
 /// Keys every mode reads itself, so no verb may take them.
@@ -272,8 +274,8 @@ pub struct Verbs {
     default: Action,
     /// Each bound verb, its key, and the key as `wayhint config` prints it.
     keys: Vec<(Action, Key, String)>,
-    /// Verbs left without a key because their default key is one of the
-    /// file's tag keys, with that default, for `wayhint config`.
+    /// Verbs left without a key because their default key is a tag key,
+    /// with that default, for `wayhint config`.
     unbound: Vec<(Action, String)>,
 }
 
@@ -290,10 +292,10 @@ impl Verbs {
 
     /// Decodes the seven verb fields, fills in the defaults, checks them.
     ///
-    /// What the file says wins over a default: a verb the file doesn't
-    /// bind gets its default key only if that isn't one of `tag_keys`, the
-    /// file's own letters and aliases. A verb key the file does write takes
-    /// its letter out of the alphabet instead.
+    /// A default never takes a tag key: a verb the file doesn't bind gets
+    /// its default key only if that isn't one of `tag_keys`, the alphabet's
+    /// letters (yours, or the home row) and aliases. A verb key the file
+    /// does write takes its letter out of the alphabet instead.
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
         let mut defaults = Vec::new();
         let mut unbound = Vec::new();
@@ -634,7 +636,7 @@ mod tests {
         // `X` is shifted x: Shift on a tag letter is kept for Shift-click,
         // so the x position leaves the tags.
         let config = Config::parse(
-            "[keys]\nalphabet = \"asdx\"\nhover = \"X\"\nright = \"t\"",
+            "[keys]\nalphabet = \"asdx\"\nhover = \"X\"\nright = \"q\"",
             us,
         )
         .unwrap();
