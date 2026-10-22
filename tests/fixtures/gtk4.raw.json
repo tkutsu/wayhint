@@ -11,7 +11,8 @@
         "w": 2560,
         "h": 1402
       },
-      "monitor": 0
+      "monitor": 0,
+      "focused": false
     },
     "nodes": [
       {

@@ -37,6 +37,9 @@ pub struct Window {
     pub rect: Rect,
     /// Id of the monitor it's on, as in [`Monitor::id`].
     pub monitor: i64,
+    /// Whether it has focus. The scan trusts the app's "active" frame only
+    /// for the focused window (see `atspi::pick_frame`).
+    pub focused: bool,
 }
 
 /// A monitor's place in the global layout, in logical pixels.
@@ -58,6 +61,9 @@ struct WireWindow {
     at: [i32; 2],
     size: [i32; 2],
     monitor: i64,
+    /// 0 for the focused window, then 1, 2... back through focus history.
+    #[serde(rename = "focusHistoryID")]
+    focus_history_id: i64,
 }
 
 impl From<WireWindow> for Window {
@@ -69,6 +75,7 @@ impl From<WireWindow> for Window {
             title: w.title,
             rect: Rect::new(w.at[0], w.at[1], w.size[0], w.size[1]),
             monitor: w.monitor,
+            focused: w.focus_history_id == 0,
         }
     }
 }
@@ -208,9 +215,10 @@ mod tests {
     #[test]
     fn wire_window_becomes_a_rect() {
         let json = r#"{"address":"0x1","pid":7,"class":"kitty","title":"t","at":[8,38],"size":[1262,1394],
-                       "monitor":0,"floating":false}"#;
+                       "monitor":0,"floating":false,"focusHistoryID":0}"#;
         let window: Window = serde_json::from_str::<WireWindow>(json).unwrap().into();
         assert_eq!(window.rect, Rect::new(8, 38, 1262, 1394));
+        assert!(window.focused);
     }
 
     #[test]
