@@ -149,6 +149,16 @@ pub fn focused_window() -> Result<Option<Window>> {
     Ok(Some(wire.into()))
 }
 
+/// Any mapped window by its address (`dump --address`, for scanning a
+/// window without focusing it).
+pub fn window_by_address(address: &str) -> Result<Option<Window>> {
+    let clients: Vec<WireWindow> = request("clients")?;
+    Ok(clients
+        .into_iter()
+        .find(|c| c.address == address)
+        .map(Window::from))
+}
+
 pub fn monitors() -> Result<Vec<Monitor>> {
     let wire: Vec<WireMonitor> = request("monitors")?;
     Ok(wire.into_iter().map(Monitor::from).collect())
