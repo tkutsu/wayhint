@@ -20,7 +20,10 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::keys::{HOME_ROW, KeyCode, Layout};
+use crate::{
+    keys::{HOME_ROW, KeyCode, Layout},
+    style::Style,
+};
 
 /// The file as written. `#[serde(default)]` lets every table and field be
 /// left out; `Default` says what "left out" means.
@@ -28,6 +31,7 @@ use crate::keys::{HOME_ROW, KeyCode, Layout};
 #[serde(default, deny_unknown_fields)]
 struct File {
     keys: FileKeys,
+    style: Style,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -47,6 +51,7 @@ pub struct Config {
     pub alphabet: Alphabet,
     /// The layout the keys were decoded with, for `wayhint config`.
     pub layout: String,
+    pub style: Style,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -224,9 +229,11 @@ impl Config {
         let layout = Layout::new(&layout_name)?;
         let alphabet =
             Alphabet::resolve(file.keys.alphabet.as_deref(), &file.keys.aliases, &layout)?;
+        file.style.validate()?;
         Ok(Self {
             alphabet,
             layout: layout_name,
+            style: file.style,
         })
     }
 
@@ -247,10 +254,14 @@ impl Config {
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
-                let letter = self.alphabet.letters[alias.letter].label;
+                // `{:?}` of a `String` quotes and escapes it the way TOML
+                // reads it; of a `char` it would print `'c'`, which TOML doesn't.
+                let letter = self.alphabet.letters[alias.letter].label.to_string();
                 let _ = writeln!(out, "{:?} = {letter:?}", alias.label.to_string());
             }
         }
+        out.push('\n');
+        out.push_str(&self.style.render());
         out
     }
 }
@@ -325,6 +336,16 @@ mod tests {
         assert!(
             err("[keys]\nalphabet = \"ab\"\n[keys.aliases]\n\"b\" = \"a\"").contains("already")
         );
+    }
+
+    #[test]
+    fn rendered_config_reads_back_the_same() {
+        let text =
+            "[keys]\nalphabet = \"ciaehtns\"\n[keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15";
+        let config = Config::parse(text, us).unwrap();
+        let again = Config::parse(&config.render(), || bail!("layout is in the file")).unwrap();
+        assert_eq!(again.alphabet, config.alphabet);
+        assert_eq!(again.style, config.style);
     }
 
     #[test]
