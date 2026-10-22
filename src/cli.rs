@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::geometry::Point;
+use crate::{action::Action, geometry::Point};
 
 /// Keyboard hints for everything clickable on a Wayland desktop.
 ///
@@ -18,6 +18,10 @@ pub struct Cli {
     /// Exit after one click instead of tagging the window again
     #[arg(long)]
     pub once: bool,
+
+    /// Arm a verb for the first tag, as if its key were typed first
+    #[arg(long, value_name = "ACTION")]
+    pub verb: Option<Action>,
 
     /// Config file to use instead of ~/.config/wayhint/config.toml
     #[arg(long, global = true, value_name = "PATH")]
@@ -46,6 +50,9 @@ pub enum Command {
         /// Global logical coordinates, `X,Y`
         #[arg(long, value_name = "X,Y", value_parser = parse_point)]
         at: Point,
+        /// What to do there
+        #[arg(long, value_name = "ACTION", default_value = "left")]
+        verb: Action,
     },
 }
 

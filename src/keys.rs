@@ -26,6 +26,11 @@ pub struct KeyCode(u32);
 impl KeyCode {
     pub const ESC: Self = Self(1);
     pub const BACKSPACE: Self = Self(14);
+    pub const TAB: Self = Self(15);
+    pub const ENTER: Self = Self(28);
+    pub const SPACE: Self = Self(57);
+    const LEFT_SHIFT: Self = Self(42);
+    const RIGHT_SHIFT: Self = Self(54);
 
     /// A code as the input-method grab or `wl_keyboard` reports it.
     pub const fn from_evdev(code: u32) -> Self {
@@ -35,6 +40,49 @@ impl KeyCode {
     fn to_xkb(self) -> xkb::Keycode {
         xkb::Keycode::new(self.0 + 8)
     }
+
+    /// Either Shift key. The overlay follows these by position, like every
+    /// other key, so Caps Lock never counts as Shift.
+    pub const fn is_shift(self) -> bool {
+        self.0 == Self::LEFT_SHIFT.0 || self.0 == Self::RIGHT_SHIFT.0
+    }
+}
+
+/// The keys a config writes by name, in evdev codes. Names match in any
+/// case (`home`, `Home`); [`name_of`] gives them back as written here.
+const NAMED: [(&str, KeyCode); 14] = [
+    ("Up", KeyCode(103)),
+    ("Down", KeyCode(108)),
+    ("Left", KeyCode(105)),
+    ("Right", KeyCode(106)),
+    ("PgUp", KeyCode(104)),
+    ("PgDn", KeyCode(109)),
+    ("Home", KeyCode(102)),
+    ("End", KeyCode(107)),
+    ("Delete", KeyCode(111)),
+    ("Tab", KeyCode::TAB),
+    ("Space", KeyCode::SPACE),
+    ("Enter", KeyCode::ENTER),
+    ("Esc", KeyCode::ESC),
+    ("Backspace", KeyCode::BACKSPACE),
+];
+
+/// The key a name stands for: `"pgup"` is Page Up.
+pub fn named(name: &str) -> Option<KeyCode> {
+    NAMED
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|&(_, code)| code)
+}
+
+/// A named key's name, for printing the config back.
+pub fn name_of(code: KeyCode) -> Option<&'static str> {
+    NAMED.iter().find(|&&(_, c)| c == code).map(|&(n, _)| n)
+}
+
+/// Every name, for the message when a config uses an unknown one.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    NAMED.iter().map(|&(n, _)| n)
 }
 
 /// The 47 printable keys of the main block, in evdev codes: the number row,
@@ -190,6 +238,17 @@ mod tests {
         assert_eq!(colemak.decode('s').map(|k| k.code), Some(KeyCode(32)));
         assert!(Layout::new("no-such-layout").is_err());
         assert!(Layout::new("us(colemak").is_err());
+    }
+
+    #[test]
+    fn named_keys_match_in_any_case() {
+        assert_eq!(named("pgup"), Some(KeyCode(104)));
+        assert_eq!(named("HOME").and_then(name_of), Some("Home"));
+        assert_eq!(named("PageUp"), None);
+        assert!(
+            KeyCode(42).is_shift() && !KeyCode(58).is_shift(),
+            "Caps Lock isn't Shift"
+        );
     }
 
     #[test]

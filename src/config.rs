@@ -17,11 +17,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, bail};
-use serde::Deserialize;
+use anyhow::{Context as _, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    keys::{HOME_ROW, KeyCode, Layout},
+    action::Action,
+    keys::{self, HOME_ROW, Key, KeyCode, Layout},
     style::Style,
 };
 
@@ -32,6 +33,7 @@ use crate::{
 struct File {
     keys: FileKeys,
     style: Style,
+    pointer: FilePointer,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -43,15 +45,83 @@ struct FileKeys {
     layout: Option<String>,
     /// Other keys that count as an alphabet letter: `";" = "c"`.
     aliases: BTreeMap<String, String>,
+    // One field per verb: a key as written (`"."`, `"Home"`), or `""` for
+    // the action a bare tag does. `Action::ALL` lists the same seven.
+    left: Option<String>,
+    right: Option<String>,
+    middle: Option<String>,
+    double: Option<String>,
+    hover: Option<String>,
+    back: Option<String>,
+    forward: Option<String>,
 }
+
+impl FileKeys {
+    /// The field for `action`, if the file sets it. Named fields and a
+    /// `match`, not a map, so a misspelt verb is still serde's "unknown
+    /// field" error.
+    fn verb(&self, action: Action) -> Option<&str> {
+        match action {
+            Action::Left => &self.left,
+            Action::Right => &self.right,
+            Action::Middle => &self.middle,
+            Action::Double => &self.double,
+            Action::Hover => &self.hover,
+            Action::Back => &self.back,
+            Action::Forward => &self.forward,
+        }
+        .as_deref()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FilePointer {
+    after: After,
+}
+
+/// Where the cursor goes after a click: `[pointer] after`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum After {
+    /// Back where it was, so the mouse is where you left it.
+    #[default]
+    Restore,
+    /// On the target, for focus-follows-mouse setups.
+    Leave,
+}
+
+/// The verbs' default keys, as positions, so they sit in the same place on
+/// every layout, as the home row does. On US they print `r m 2 o [ ]`.
+/// Left has none: a bare tag left-clicks.
+const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
+    (Action::Left, None),
+    (Action::Right, Some(KeyCode::from_evdev(19))),
+    (Action::Middle, Some(KeyCode::from_evdev(50))),
+    (Action::Double, Some(KeyCode::from_evdev(3))),
+    (Action::Hover, Some(KeyCode::from_evdev(24))),
+    (Action::Back, Some(KeyCode::from_evdev(26))),
+    (Action::Forward, Some(KeyCode::from_evdev(27))),
+];
+
+/// Keys every mode reads itself, so no verb may take them.
+const BUILT_IN: [KeyCode; 5] = [
+    KeyCode::ESC,
+    KeyCode::BACKSPACE,
+    KeyCode::SPACE,
+    KeyCode::ENTER,
+    KeyCode::TAB,
+];
 
 /// Everything wayhint needs from the settings, checked.
 #[derive(Debug)]
 pub struct Config {
     pub alphabet: Alphabet,
+    pub verbs: Verbs,
     /// The layout the keys were decoded with, for `wayhint config`.
     pub layout: String,
     pub style: Style,
+    pub after: After,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -66,6 +136,8 @@ pub struct Letter {
 pub struct Alphabet {
     letters: Vec<Letter>,
     aliases: Vec<Alias>,
+    /// Letters left out because a verb has their key, for `wayhint config`.
+    dropped: Vec<(char, Action)>,
 }
 
 /// Another key that types a letter: the Ferris Greek layer sends `;` from
@@ -99,13 +171,10 @@ impl Alphabet {
             })
     }
 
-    /// Decodes and checks `[keys] alphabet` and `[keys.aliases]`.
-    fn resolve(
-        written: Option<&str>,
-        aliases: &BTreeMap<String, String>,
-        layout: &Layout,
-    ) -> Result<Self> {
-        let letters = match written {
+    /// Decodes `[keys] alphabet`, or the default home row, and checks no
+    /// key is in it twice.
+    fn decode_letters(written: Option<&str>, layout: &Layout) -> Result<Vec<Letter>> {
+        let letters: Vec<Letter> = match written {
             Some(text) => text
                 .chars()
                 .map(|ch| decode_unshifted(ch, layout).map(|code| Letter { code, label: ch }))
@@ -129,9 +198,37 @@ impl Alphabet {
                 );
             }
         }
+        Ok(letters)
+    }
+
+    /// Builds the alphabet from its decoded `letters` and `[keys.aliases]`.
+    /// Keys in `taken` belong to a verb: a key is a tag letter or a
+    /// command, never both, so their letters are left out.
+    fn resolve(
+        mut letters: Vec<Letter>,
+        aliases: &BTreeMap<String, String>,
+        layout: &Layout,
+        taken: &[(KeyCode, Action)],
+    ) -> Result<Self> {
+        let verb_of = |code: KeyCode| taken.iter().find(|t| t.0 == code).map(|t| t.1);
+        let mut dropped = Vec::new();
+        // `retain` keeps what the closure returns `true` for; this closure
+        // also writes down each letter it throws out.
+        letters.retain(|l| match verb_of(l.code) {
+            Some(action) => {
+                dropped.push((l.label, action));
+                false
+            }
+            None => true,
+        });
         if letters.len() < 2 {
+            let why = if dropped.is_empty() {
+                ""
+            } else {
+                " once verb keys are left out"
+            };
             bail!(
-                "[keys] alphabet: needs at least two letters, got {}",
+                "[keys] alphabet: needs at least two letters, got {}{why}",
                 letters.len()
             );
         }
@@ -139,12 +236,19 @@ impl Alphabet {
         let mut alphabet = Self {
             letters,
             aliases: Vec::new(),
+            dropped,
         };
         for (from, to) in aliases {
             let label = single_char(from, "[keys.aliases]")?;
             let code = decode_unshifted(label, layout).context("[keys.aliases]")?;
             let target = decode_unshifted(single_char(to, "[keys.aliases]")?, layout)
                 .context("[keys.aliases]")?;
+            if let Some(action) = verb_of(code).or_else(|| verb_of(target)) {
+                bail!(
+                    "[keys.aliases] {from:?} = {to:?}: that key is the {} verb",
+                    action.name()
+                );
+            }
             let Some(letter) = alphabet.letters.iter().position(|l| l.code == target) else {
                 bail!("[keys.aliases] {from:?} = {to:?}: {to:?} isn't in the alphabet");
             };
@@ -159,6 +263,123 @@ impl Alphabet {
         }
         Ok(alphabet)
     }
+}
+
+/// The verb keys, checked: exactly one action has no key (a bare tag does
+/// it), and every other has a key of its own or is unbound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verbs {
+    default: Action,
+    /// Each bound verb, its key, and the key as `wayhint config` prints it.
+    keys: Vec<(Action, Key, String)>,
+    /// Verbs left without a key because their default key is one of the
+    /// file's tag keys, with that default, for `wayhint config`.
+    unbound: Vec<(Action, String)>,
+}
+
+impl Verbs {
+    /// The action a bare tag (or a bare `Space`) does.
+    pub fn default_action(&self) -> Action {
+        self.default
+    }
+
+    /// The verb a key arms. Shift is part of the key: `_` isn't `-`.
+    pub fn action_of(&self, key: Key) -> Option<Action> {
+        self.keys.iter().find(|v| v.1 == key).map(|v| v.0)
+    }
+
+    /// Decodes the seven verb fields, fills in the defaults, checks them.
+    ///
+    /// What the file says wins over a default: a verb the file doesn't
+    /// bind gets its default key only if that isn't one of `tag_keys`, the
+    /// file's own letters and aliases. A verb key the file does write takes
+    /// its letter out of the alphabet instead.
+    fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
+        let mut defaults = Vec::new();
+        let mut unbound = Vec::new();
+        let mut keys: Vec<(Action, Key, String)> = Vec::new();
+        for (action, default) in DEFAULT_VERBS {
+            let field = action.name();
+            let (key, label) = match (file.verb(action), default) {
+                // `""`, written or by default: no key, a bare tag does it.
+                (Some(""), _) | (None, None) => {
+                    defaults.push(action);
+                    continue;
+                }
+                (Some(text), _) => {
+                    let key =
+                        decode_key(text, layout).with_context(|| format!("[keys] {field}"))?;
+                    // A name is printed back as the table spells it: "home" is "Home".
+                    let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
+                    (key, label)
+                }
+                (None, Some(code)) => {
+                    let label = layout
+                        .char_at(code)
+                        .map_or_else(|| "?".into(), String::from);
+                    if tag_keys.contains(&code) {
+                        unbound.push((action, label));
+                        continue;
+                    }
+                    (Key { code, shift: false }, label)
+                }
+            };
+            if BUILT_IN.contains(&key.code) {
+                bail!(
+                    "[keys] {field} = {label:?}: Esc, Backspace, Space, Enter and Tab are built in"
+                );
+            }
+            if let Some(other) = keys.iter().find(|v| v.1 == key) {
+                bail!("[keys] {} and {field} are both {label:?}", other.0.name());
+            }
+            keys.push((action, key, label));
+        }
+        // A slice pattern names the three cases: one default, none, several.
+        let default = match defaults.as_slice() {
+            [one] => *one,
+            [] => bail!("[keys]: no verb is the default; set one to \"\", as in left = \"\""),
+            [a, b, ..] => bail!(
+                "[keys] {} and {}: only one verb can be the default (\"\"); give {} a key",
+                a.name(),
+                b.name(),
+                a.name()
+            ),
+        };
+        Ok(Self {
+            default,
+            keys,
+            unbound,
+        })
+    }
+
+    /// The bound keys' positions: these leave the alphabet. A shifted verb
+    /// takes its base key too, because Shift on a tag letter is kept for
+    /// Shift-click.
+    fn taken(&self) -> Vec<(KeyCode, Action)> {
+        self.keys.iter().map(|v| (v.1.code, v.0)).collect()
+    }
+}
+
+/// One key field: one character is a printable key as the layout types
+/// it, Shift allowed (`"_"`); anything longer is a key name (`"Home"`).
+fn decode_key(text: &str, layout: &Layout) -> Result<Key> {
+    let mut chars = text.chars();
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        return layout.decode(ch).ok_or_else(|| {
+            anyhow!(
+                "{ch:?} isn't a key on layout {} (main block only)",
+                layout.name()
+            )
+        });
+    }
+    let code = keys::named(text).ok_or_else(|| {
+        let names: Vec<_> = keys::names().collect();
+        anyhow!(
+            "{text:?} isn't a key name; the names are {}",
+            names.join(", ")
+        )
+    })?;
+    Ok(Key { code, shift: false })
 }
 
 /// A config key string that must be exactly one character.
@@ -210,20 +431,35 @@ impl Config {
     /// Parses and validates config text. Separate from `load` so tests need
     /// no files.
     pub fn parse(text: &str, first_layout: impl FnOnce() -> Result<String>) -> Result<Self> {
-        let file: File = toml::from_str(text)?;
-        let layout_name = match file.keys.layout {
+        let mut file: File = toml::from_str(text)?;
+        // `take` moves the name out and leaves `None`, so `file.keys` stays
+        // whole for the verbs below to borrow.
+        let layout_name = match file.keys.layout.take() {
             Some(name) => name,
             None => first_layout()
                 .context("finding your keyboard layout (set [keys] layout to skip this)")?,
         };
         let layout = Layout::new(&layout_name)?;
-        let alphabet =
-            Alphabet::resolve(file.keys.alphabet.as_deref(), &file.keys.aliases, &layout)?;
+        let letters = Alphabet::decode_letters(file.keys.alphabet.as_deref(), &layout)?;
+        // The keys the file made tag keys, so default verbs can stay off
+        // them. A broken alias is skipped here; `Alphabet::resolve` says why.
+        let tag_keys: Vec<KeyCode> = letters
+            .iter()
+            .map(|l| l.code)
+            .chain(file.keys.aliases.keys().filter_map(|from| {
+                let ch = single_char(from, "").ok()?;
+                decode_unshifted(ch, &layout).ok()
+            }))
+            .collect();
+        let verbs = Verbs::resolve(&file.keys, &layout, &tag_keys)?;
+        let alphabet = Alphabet::resolve(letters, &file.keys.aliases, &layout, &verbs.taken())?;
         file.style.validate()?;
         Ok(Self {
             alphabet,
+            verbs,
             layout: layout_name,
             style: file.style,
+            after: file.pointer.after,
         })
     }
 
@@ -241,6 +477,28 @@ impl Config {
             "layout = {:?}         # keys above are decoded with this layout",
             self.layout
         );
+        if !self.alphabet.dropped.is_empty() {
+            let dropped: Vec<String> = self
+                .alphabet
+                .dropped
+                .iter()
+                .map(|(label, action)| format!("{label} ({})", action.name()))
+                .collect();
+            let _ = writeln!(out, "# left out of the alphabet: {}", dropped.join(", "));
+        }
+        for action in Action::ALL {
+            let name = action.name();
+            if action == self.verbs.default {
+                let _ = writeln!(out, "{name} = \"\"   # a bare tag does this");
+            } else if let Some((_, _, label)) = self.verbs.keys.iter().find(|v| v.0 == action) {
+                let _ = writeln!(out, "{name} = {label:?}");
+            } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
+                let _ = writeln!(
+                    out,
+                    "# {name} has no key: its default, {label:?}, is one of your tag letters"
+                );
+            }
+        }
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
@@ -252,6 +510,15 @@ impl Config {
         }
         out.push('\n');
         out.push_str(&self.style.render());
+        let after = match self.after {
+            After::Restore => {
+                "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
+            }
+            After::Leave => {
+                "\"leave\"   # the cursor stays on the target; \"restore\" puts it back"
+            }
+        };
+        let _ = write!(out, "\n[pointer]\nafter = {after}\n");
         out
     }
 }
@@ -328,14 +595,98 @@ mod tests {
         );
     }
 
+    fn key(code: u32, shift: bool) -> Key {
+        Key {
+            code: KeyCode::from_evdev(code),
+            shift,
+        }
+    }
+
+    #[test]
+    fn default_verbs_sit_off_the_home_row() {
+        let config = Config::parse("", us).unwrap();
+        assert_eq!(config.verbs.default_action(), Action::Left);
+        assert_eq!(config.verbs.action_of(key(19, false)), Some(Action::Right));
+        assert_eq!(config.verbs.action_of(key(19, true)), None, "R isn't r");
+        assert_eq!(labels(&config), "asdfghjkl", "nothing left out");
+        assert_eq!(config.after, After::Restore);
+    }
+
+    #[test]
+    fn the_plans_bindings_load() {
+        let config = Config::parse(
+            "[keys]\nalphabet = \"ehatincsulodypmgf\"\nright = \"\"\nleft = \".\"\n\
+             double = \"k\"\nmiddle = \"j\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
+             [pointer]\nafter = \"leave\"",
+            us,
+        )
+        .unwrap();
+        assert_eq!(config.verbs.default_action(), Action::Right);
+        assert_eq!(config.verbs.action_of(key(52, false)), Some(Action::Left));
+        assert_eq!(config.verbs.action_of(key(12, true)), Some(Action::Hover));
+        assert_eq!(config.verbs.action_of(key(102, false)), Some(Action::Back));
+        assert_eq!(labels(&config), "ehatincsulodypmgf");
+        assert_eq!(config.after, After::Leave);
+    }
+
+    #[test]
+    fn a_written_verb_key_leaves_the_alphabet() {
+        // `X` is shifted x: Shift on a tag letter is kept for Shift-click,
+        // so the x position leaves the tags.
+        let config = Config::parse(
+            "[keys]\nalphabet = \"asdx\"\nhover = \"X\"\nright = \"t\"",
+            us,
+        )
+        .unwrap();
+        assert_eq!(labels(&config), "asd");
+        assert!(
+            config
+                .render()
+                .contains("# left out of the alphabet: x (hover)")
+        );
+    }
+
+    #[test]
+    fn a_default_verb_key_gives_way_to_written_letters() {
+        // The file as it stood on 2026-10-23: an alphabet with m and o in
+        // it, the verbs still commented out. Middle (m) and hover (o) lose
+        // their defaults instead of taking two letters.
+        let config = Config::parse("[keys]\nalphabet = \"ehatincsulodypmgfbwv\"", us).unwrap();
+        assert_eq!(labels(&config), "ehatincsulodypmgfbwv");
+        assert_eq!(config.verbs.action_of(key(50, false)), None);
+        assert_eq!(config.verbs.action_of(key(19, false)), Some(Action::Right));
+        let rendered = config.render();
+        assert!(rendered.contains("# middle has no key: its default, \"m\", is one of your"));
+        let again = Config::parse(&rendered, || bail!("layout is in the file")).unwrap();
+        assert_eq!(again.verbs, config.verbs);
+    }
+
+    #[test]
+    fn broken_verbs_say_why() {
+        let err = |text: &str| format!("{:#}", Config::parse(text, us).unwrap_err());
+        assert!(err("[keys]\nright = \"\"").contains("only one verb can be the default"));
+        assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
+        assert!(err("[keys]\nhover = \"esc\"").contains("built in"));
+        assert!(err("[keys]\nright = \"x\"\nmiddle = \"x\"").contains("both"));
+        assert!(err("[keys]\nback = \"PageUp\"").contains("the names are Up, Down"));
+        assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));
+        assert!(
+            err("[keys]\nalphabet = \"ab\"\nhover = \"a\"").contains("once verb keys are left out")
+        );
+        assert!(err("[keys]\nright = \"r\"\n[keys.aliases]\n\"r\" = \"a\"").contains("right verb"));
+        assert!(err("[pointer]\nafter = \"stay\"").contains("unknown variant"));
+    }
+
     #[test]
     fn rendered_config_reads_back_the_same() {
-        let text =
-            "[keys]\nalphabet = \"ciaehtns\"\n[keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15";
+        let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\n\
+                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"";
         let config = Config::parse(text, us).unwrap();
         let again = Config::parse(&config.render(), || bail!("layout is in the file")).unwrap();
         assert_eq!(again.alphabet, config.alphabet);
+        assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
+        assert_eq!(again.after, config.after);
     }
 
     #[test]
