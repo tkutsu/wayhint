@@ -1,105 +1,75 @@
 //! wayhint: keyboard hints for everything clickable on a Wayland desktop.
 //!
-//! Phase 0 has no hints yet, only a command line that behaves like a real
-//! one: `--help`, `--version`, and exit code 2 for anything it doesn't know.
+//! `main` only turns the command line into a call and an error into an exit
+//! code. Each module owns one job; see the plan's module table.
+
+mod cli;
+mod config;
+mod desktop;
+mod geometry;
+mod keys;
 
 use std::process::ExitCode;
 
-/// What the command line asked for.
-#[derive(Debug, PartialEq)]
-enum Command {
-    Run,
-    Version,
-    Help,
-}
+use anyhow::{Context as _, Result};
+use clap::Parser as _;
 
-/// Why the command line was rejected. It owns its `String`, so the error can
-/// outlive the arguments it came from.
-#[derive(Debug, PartialEq)]
-enum ParseError {
-    Unexpected(String),
-}
-
-const USAGE: &str = "Usage: wayhint [OPTIONS]
-
-Options:
-  -h, --help     Print help
-  -V, --version  Print version";
-
-/// Reads the arguments, without the program name. It borrows `&str`s so a
-/// test can write `parse(&["-V"])`.
-fn parse(args: &[&str]) -> Result<Command, ParseError> {
-    match args {
-        [] => Ok(Command::Run),
-        ["-V" | "--version"] => Ok(Command::Version),
-        ["-h" | "--help"] => Ok(Command::Help),
-        // One flag we know, then more: the first extra one is the problem.
-        ["-V" | "--version" | "-h" | "--help", extra, ..] | [extra, ..] => {
-            Err(ParseError::Unexpected((*extra).to_string()))
-        }
-    }
-}
+use crate::{
+    cli::{Cli, Command},
+    config::Config,
+};
 
 fn main() -> ExitCode {
-    // `env::args()` hands out owned `String`s. The `Vec<String>` has to live
-    // in a named variable, because the `Vec<&str>` below borrows from it.
-    let owned: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-
-    match parse(&args) {
-        Ok(Command::Run) => {
-            println!("wayhint: nothing to do yet");
-            ExitCode::SUCCESS
-        }
-        Ok(Command::Version) => {
-            println!("wayhint {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
-        }
-        Ok(Command::Help) => {
-            println!("{}\n\n{USAGE}", env!("CARGO_PKG_DESCRIPTION"));
-            ExitCode::SUCCESS
-        }
-        Err(ParseError::Unexpected(arg)) => {
-            eprintln!("error: unexpected argument '{arg}'\n\n{USAGE}");
-            ExitCode::from(2)
+    // `parse` prints help, version and usage errors itself, exiting 0 or 2.
+    let cli = Cli::parse();
+    match run(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // `{:#}` prints the whole context chain on one line:
+            // "config ~/.config/wayhint/config.toml: [keys] alphabet: ..."
+            eprintln!("wayhint: {error:#}");
+            ExitCode::FAILURE
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn run(cli: &Cli) -> Result<()> {
+    let config = || Config::load(cli.config.as_deref(), desktop::keyboard_layout);
+    match cli.command {
+        None => {
+            config()?;
+            println!("wayhint: nothing to do yet");
+            Ok(())
+        }
+        Some(Command::Config) => {
+            print!("{}", config()?.render());
+            Ok(())
+        }
+        Some(Command::Dump { window: true }) => dump_window(),
+        Some(Command::Dump { window: false }) => {
+            anyhow::bail!("only `dump --window` exists so far")
+        }
+    }
+}
 
-    #[test]
-    fn no_args_runs() {
-        assert_eq!(parse(&[]), Ok(Command::Run));
+/// `wayhint dump --window`: the focused window and the monitor it's on.
+fn dump_window() -> Result<()> {
+    /// A struct only for printing. It borrows instead of owning, hence the
+    /// lifetime `'a`: it can't outlive the values it points at. Unlike
+    /// `serde_json::json!`, a struct keeps its fields in this order.
+    #[derive(serde::Serialize)]
+    struct Dump<'a> {
+        window: &'a desktop::Window,
+        monitor: Option<&'a desktop::Monitor>,
     }
 
-    #[test]
-    fn version_long_and_short() {
-        assert_eq!(parse(&["--version"]), Ok(Command::Version));
-        assert_eq!(parse(&["-V"]), Ok(Command::Version));
-    }
-
-    #[test]
-    fn help_long_and_short() {
-        assert_eq!(parse(&["--help"]), Ok(Command::Help));
-        assert_eq!(parse(&["-h"]), Ok(Command::Help));
-    }
-
-    #[test]
-    fn unknown_flag_is_an_error() {
-        assert_eq!(
-            parse(&["--bogus"]),
-            Err(ParseError::Unexpected("--bogus".into()))
-        );
-    }
-
-    #[test]
-    fn extra_argument_is_an_error() {
-        assert_eq!(
-            parse(&["-V", "extra"]),
-            Err(ParseError::Unexpected("extra".into()))
-        );
-    }
+    let window = desktop::focused_window()?.context("no window has focus")?;
+    let monitors = desktop::monitors()?;
+    let monitor = monitors.iter().find(|m| m.id == window.monitor);
+    let dump = Dump {
+        window: &window,
+        monitor,
+    };
+    println!("{}", serde_json::to_string_pretty(&dump)?);
+    Ok(())
 }

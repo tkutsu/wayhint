@@ -11,6 +11,12 @@ keywords = ["wayland", "keyboard", "accessibility", "hints", "hyprland"]
 categories = ["command-line-utilities", "accessibility"]
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+xkbcommon = { version = "0.8", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"
