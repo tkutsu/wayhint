@@ -4,8 +4,9 @@
 //!
 //! 1. Find the window's app: the registry child whose bus connection has
 //!    the window's PID.
-//! 2. Find the window's frame among the app's children: by title, else the
-//!    one marked active. Two candidates is ambiguous: refuse, never guess.
+//! 2. Find the window's frame among the app's children: by title, else (for
+//!    the focused window only) the one marked active. Two candidates is
+//!    ambiguous: refuse, never guess.
 //! 3. Walk the frame breadth first, one level at a time, at most
 //!    [`IN_FLIGHT`] requests at once, reading role, states and interfaces.
 //! 4. For candidates only (see `filter::is_candidate`), read name, box and
@@ -227,7 +228,7 @@ impl<'c> Walk<'c> {
             let states = self.call(proxy.get_state()).await.unwrap_or_default();
             frames.push((id, name, states.contains(State::Active)));
         }
-        pick_frame(&frames, &window.title)
+        pick_frame(&frames, &window.title, window.focused)
             .map(|(id, _, _)| id.clone())
             .with_context(|| {
                 format!(
@@ -456,16 +457,26 @@ fn worth_entering(
 }
 
 /// The frame whose name is the window title. Several with that title (two
-/// Chromium windows on "New Tab"), or none: the one active frame among them.
-/// Still not exactly one: nothing, so the caller refuses instead of guessing.
+/// Chromium windows on "New Tab"), or none: the one active frame among them,
+/// but only for the focused window. "Active" means focused, so for any other
+/// window the active frame is a different window of the same app, and its
+/// targets would be drawn over this window. Still not exactly one: nothing,
+/// so the caller refuses instead of guessing.
 ///
 /// The returned reference borrows from `frames`, and the lifetime `'f` says
 /// so: the caller can't drop the list while holding the answer.
 fn pick_frame<'f>(
     frames: &'f [(ObjectId, String, bool)],
     title: &str,
+    focused: bool,
 ) -> Option<&'f (ObjectId, String, bool)> {
     let by_title: Vec<_> = frames.iter().filter(|f| f.1 == title).collect();
+    if let [one] = by_title.as_slice() {
+        return Some(one);
+    }
+    if !focused {
+        return None;
+    }
     let pool = if by_title.is_empty() {
         frames.iter().collect()
     } else {
@@ -577,31 +588,35 @@ mod tests {
             bus: ":1.1".into(),
             path: n.into(),
         };
+        let pick = |frames: &[(ObjectId, String, bool)], title: &str, focused: bool| {
+            pick_frame(frames, title, focused).map(|f| f.0.path.clone())
+        };
         let frames = vec![
             (id("/a"), "Inbox".to_string(), false),
             (id("/b"), "New Tab".to_string(), true),
         ];
+        assert_eq!(pick(&frames, "Inbox", true).as_deref(), Some("/a"));
+        assert_eq!(pick(&frames, "Inbox", false).as_deref(), Some("/a"));
+        assert_eq!(pick(&frames, "Other", true).as_deref(), Some("/b"));
         assert_eq!(
-            pick_frame(&frames, "Inbox").map(|f| f.0.path.as_str()),
-            Some("/a")
-        );
-        assert_eq!(
-            pick_frame(&frames, "Other").map(|f| f.0.path.as_str()),
-            Some("/b")
+            pick(&frames, "Other", false),
+            None,
+            "unfocused: the active frame is some other window"
         );
         let twins = vec![
             (id("/a"), "New Tab".to_string(), false),
             (id("/b"), "New Tab".to_string(), true),
         ];
         assert_eq!(
-            pick_frame(&twins, "New Tab").map(|f| f.0.path.as_str()),
+            pick(&twins, "New Tab", true).as_deref(),
             Some("/b"),
             "same title: the active one"
         );
+        assert_eq!(pick(&twins, "New Tab", false), None);
         let both = vec![
             (id("/a"), "New Tab".to_string(), true),
             (id("/b"), "New Tab".to_string(), true),
         ];
-        assert!(pick_frame(&both, "New Tab").is_none(), "still two: refuse");
+        assert_eq!(pick(&both, "New Tab", true), None, "still two: refuse");
     }
 }

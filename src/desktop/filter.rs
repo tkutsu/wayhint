@@ -435,6 +435,7 @@ mod tests {
                 title: "test".into(),
                 rect: Rect::new(100, 100, 800, 600),
                 monitor: 0,
+                focused: true,
             };
             Tree {
                 window,
