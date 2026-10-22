@@ -8,7 +8,7 @@
 //!
 //! Objects SCTK doesn't wrap (the input method, the sync callback) get a
 //! small "user data" type implementing `Dispatch2`, which is where their
-//! events land: [`NoEvents`], [`ImeEvents`], [`Synced`].
+//! events land: [`NoEvents`], [`ImeEvents`], [`Synced`], [`Answered`].
 
 use std::collections::VecDeque;
 
@@ -79,6 +79,8 @@ pub struct State {
     pub gate: KeyGate,
     /// Events for `Overlay::next_event`, oldest first.
     pub events: VecDeque<Event>,
+    /// Set when the compositor answers `Overlay::roundtrip`'s sync.
+    pub answered: bool,
 }
 
 impl State {
@@ -186,6 +188,24 @@ impl Dispatch2<wl_callback::WlCallback, State> for Synced {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             state.gate.synced(self.0);
+        }
+    }
+}
+
+/// User data for the `wl_display.sync` of `Overlay::roundtrip`.
+pub struct Answered;
+
+impl Dispatch2<wl_callback::WlCallback, State> for Answered {
+    fn event(
+        &self,
+        state: &mut State,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.answered = true;
         }
     }
 }
