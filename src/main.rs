@@ -19,6 +19,7 @@ mod geometry;
 mod keys;
 mod selection;
 mod snapshot;
+mod style;
 
 use std::process::ExitCode;
 
