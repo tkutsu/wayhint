@@ -49,9 +49,9 @@ bind = SUPER, slash, exec, wayhint
 | a tag | Left-clicks that control, then shows new tags |
 | `r` then a tag | Right-click |
 | `m` then a tag | Middle click |
-| `2` then a tag | Double click |
+| `t` then a tag | Double click ("twice") |
 | `o` then a tag | Hover: moves the pointer there and leaves it |
-| `[` / `]` then a tag | The mouse's back and forward buttons |
+| `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
 | `Space` | Does the default action, or the verb typed first, where the pointer is |
 | `Backspace` | Removes the last typed letter, then the verb |
 | `Esc` | Clears typed letters and the verb; with none, exits |
