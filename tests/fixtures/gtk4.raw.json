@@ -1,0 +1,1566 @@
+{
+  "tree": {
+    "window": {
+      "address": "0x558b65a43af0",
+      "pid": 3467144,
+      "class": "org.wayhint.FixtureGtk4",
+      "title": "wayhint fixture gtk4",
+      "rect": {
+        "x": 0,
+        "y": 38,
+        "w": 2560,
+        "h": 1402
+      },
+      "monitor": 0
+    },
+    "nodes": [
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/819fe8c6_401a_4e1f_bc5d_34e5aaf6c4cf"
+        },
+        "parent": null,
+        "role": "frame",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "w": 2560,
+          "h": 1402
+        },
+        "details": {
+          "name": "wayhint fixture gtk4",
+          "actions": [
+            "window.close",
+            "window.toggle-maximized",
+            "default.activate"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/d7b8c4ff_fb31_4126_9b34_8e202fcc9b18"
+        },
+        "parent": 0,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 16,
+          "w": 2528,
+          "h": 1386
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/5a7bb859_f600_4ecc_afe8_b887ed6c177e"
+        },
+        "parent": 1,
+        "role": "table",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 16,
+          "w": 2528,
+          "h": 40
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/9af36ce9_3f6f_4468_8c6f_424f99a69773"
+        },
+        "parent": 1,
+        "role": "table",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 68,
+          "w": 2528,
+          "h": 64
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/7540a512_1e8c_4e25_a78d_a9046ca0bb0d"
+        },
+        "parent": 1,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 144,
+          "w": 2528,
+          "h": 64
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/fcf54442_243f_4cb2_b9a0_aceb1617ba63"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 16,
+          "w": 330,
+          "h": 40
+        },
+        "details": {
+          "name": "fx button",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/0e3190e8_8f9a_4a71_a911_4b311c9f6962"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 346,
+          "y": 16,
+          "w": 307,
+          "h": 40
+        },
+        "details": {
+          "name": "fx link",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/7a903b89_6381_4447_9cb7_8fd53439c4fe"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 653,
+          "y": 16,
+          "w": 399,
+          "h": 40
+        },
+        "details": {
+          "name": "fx entry",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/91605955_5c7e_4e61_ae2d_91f08f76b9dc"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1052,
+          "y": 16,
+          "w": 323,
+          "h": 40
+        },
+        "details": {
+          "name": "fx check",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/4e522391_b97a_485f_876f_8ebdc1b2d42e"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1375,
+          "y": 16,
+          "w": 277,
+          "h": 40
+        },
+        "details": {
+          "name": "fx switch",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/f15e637b_6bec_410d_9180_737e5e868854"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 300,
+          "h": 40
+        },
+        "details": {
+          "name": "one",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/3037dd29_0782_41bb_ab0e_b45566c0a250"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1952,
+          "y": 16,
+          "w": 264,
+          "h": 40
+        },
+        "details": {
+          "name": "fx icon button",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/78f11c3c_87c3_49a8_bb06_8e49d69022e7"
+        },
+        "parent": 2,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 2216,
+          "y": 16,
+          "w": 328,
+          "h": 40
+        },
+        "details": {
+          "name": "fx toggle",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/b4a556fe_0f54_4477_9242_6fbb184e02b4"
+        },
+        "parent": 3,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 68,
+          "w": 274,
+          "h": 64
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/c21967ba_c622_4463_b336_2d27dee0e72c"
+        },
+        "parent": 3,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 290,
+          "y": 68,
+          "w": 387,
+          "h": 64
+        },
+        "details": {
+          "name": "fx disabled",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/112e81ff_294e_4619_9a8e_e67466ad6d41"
+        },
+        "parent": 3,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 677,
+          "y": 68,
+          "w": 325,
+          "h": 64
+        },
+        "details": {
+          "name": "fx label",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/c93b630f_6da2_47fb_a625_f4436d960019"
+        },
+        "parent": 3,
+        "role": "table cell",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 68,
+          "w": 474,
+          "h": 64
+        },
+        "details": {
+          "name": "fx scrolled out 0",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/8b5a8397_c070_4229_828c_b3ec9c2360cd"
+        },
+        "parent": 4,
+        "role": "image",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 144,
+          "w": 64,
+          "h": 64
+        },
+        "details": {
+          "name": "fx image",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/3e23867d_0375_48c7_bc4b_a152391deb07"
+        },
+        "parent": 5,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 16,
+          "w": 324,
+          "h": 34
+        },
+        "details": {
+          "name": "fx button",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/206e8769_611f_480b_8ddd_c9abf49677a9"
+        },
+        "parent": 6,
+        "role": "link",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 346,
+          "y": 16,
+          "w": 301,
+          "h": 34
+        },
+        "details": {
+          "name": "fx link",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/f5848025_61d2_4ebd_84a6_6a2402bce358"
+        },
+        "parent": 7,
+        "role": "text",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": true,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 653,
+          "y": 16,
+          "w": 393,
+          "h": 34
+        },
+        "details": {
+          "name": "fx entry",
+          "actions": [
+            "activate"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/75039a8e_913e_48c0_bc45_06d09c953e22"
+        },
+        "parent": 8,
+        "role": "check box",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1052,
+          "y": 16,
+          "w": 317,
+          "h": 34
+        },
+        "details": {
+          "name": "fx check",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/13ab4b13_b5bc_4a3e_8422_b7eab83e36b2"
+        },
+        "parent": 9,
+        "role": "switch",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1375,
+          "y": 16,
+          "w": 271,
+          "h": 34
+        },
+        "details": {
+          "name": "fx switch",
+          "actions": [
+            "toggle"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/4879e362_86b9_40a5_a677_e98f705821f3"
+        },
+        "parent": 10,
+        "role": "combo box",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 294,
+          "h": 34
+        },
+        "details": {
+          "name": "one",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/a1b5dfea_1a96_428a_abd8_1d6edfb8a052"
+        },
+        "parent": 11,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1952,
+          "y": 16,
+          "w": 258,
+          "h": 34
+        },
+        "details": {
+          "name": "fx icon button",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/fa21b81f_f954_4136_ba08_05caa3e1e7f5"
+        },
+        "parent": 12,
+        "role": "toggle button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 2216,
+          "y": 16,
+          "w": 322,
+          "h": 34
+        },
+        "details": {
+          "name": "fx toggle",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/e00b2d1a_f62a_4b25_a52e_a30cbb5eb05d"
+        },
+        "parent": 14,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": false,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 290,
+          "y": 68,
+          "w": 381,
+          "h": 58
+        },
+        "details": {
+          "name": "fx disabled",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/ae829751_cf4f_4c3f_abf1_366e180a38ea"
+        },
+        "parent": 15,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 677,
+          "y": 68,
+          "w": 319,
+          "h": 58
+        },
+        "details": {
+          "name": "fx label",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/55871932_fd25_4bff_82f0_2bd024ca1604"
+        },
+        "parent": 16,
+        "role": "scroll pane",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 68,
+          "w": 468,
+          "h": 58
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/34d7b00a_2577_4821_ab52_9d4113c2cfdd"
+        },
+        "parent": 18,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 16,
+          "w": 290,
+          "h": 24
+        },
+        "details": {
+          "name": "fx button",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/aaffd00d_3cff_457b_90b9_25d212f77cb2"
+        },
+        "parent": 19,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 346,
+          "y": 16,
+          "w": 267,
+          "h": 24
+        },
+        "details": {
+          "name": "fx link",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/567d7326_e4ac_4a1c_8ab8_981ccbe97db3"
+        },
+        "parent": 21,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1052,
+          "y": 19,
+          "w": 20,
+          "h": 20
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/1271703e_cf63_48fe_9048_615e940b0c38"
+        },
+        "parent": 21,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1076,
+          "y": 16,
+          "w": 285,
+          "h": 26
+        },
+        "details": {
+          "name": "fx check",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/46966c3e_ad32_494a_b8ce_7ec1aa48f1fb"
+        },
+        "parent": 23,
+        "role": "toggle button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 294,
+          "h": 34
+        },
+        "details": {
+          "name": "one",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/f129cd91_cba4_42d4_aea8_066b92822767"
+        },
+        "parent": 25,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 2216,
+          "y": 16,
+          "w": 288,
+          "h": 24
+        },
+        "details": {
+          "name": "fx toggle",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/1dadd3b6_9700_4a5e_bde0_f3eaa160207c"
+        },
+        "parent": 26,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": null,
+        "details": null
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/0fabef8d_fe96_48c8_a1e6_8aa4f0e92457"
+        },
+        "parent": 28,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 68,
+          "w": 468,
+          "h": 58
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/f96a0386_a6a6_46a0_bb37_fe82176b8dc7"
+        },
+        "parent": 28,
+        "role": "scroll bar",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1459,
+          "y": 68,
+          "w": 11,
+          "h": 58
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/c20cea0d_c803_4ee2_9aaf_5942dda85b86"
+        },
+        "parent": 33,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 274,
+          "h": 24
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/3d0f544f_28ce_4b16_bfde_14c513dd574c"
+        },
+        "parent": 36,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 68,
+          "w": 468,
+          "h": 334
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/2e297604_042f_48f8_b504_4f0a1b2440d4"
+        },
+        "parent": 37,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1459,
+          "y": 68,
+          "w": 11,
+          "h": 58
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/e93afbd7_0f33_469c_9a2e_bdeeaa53c6bc"
+        },
+        "parent": 38,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 252,
+          "h": 24
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/5391c191_4ed7_48e3_8824_7ea20c6e43b4"
+        },
+        "parent": 39,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 68,
+          "w": 468,
+          "h": 300
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/546580c3_565b_49d6_a60b_8f74a92e4bb1"
+        },
+        "parent": 39,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 368,
+          "w": 468,
+          "h": 34
+        },
+        "details": {
+          "name": "fx scrolled out",
+          "actions": [
+            "click"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/6c219598_bf4a_4769_9d55_b532f9315b32"
+        },
+        "parent": 41,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": false,
+        "component": true,
+        "bounds": null,
+        "details": null
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/3a73a90e_9c91_4a11_b8b0_8c4626390d6f"
+        },
+        "parent": 43,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1002,
+          "y": 368,
+          "w": 434,
+          "h": 24
+        },
+        "details": {
+          "name": "fx scrolled out",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/ed411274_f06b_4a9f_95e1_7e1143ab3f5a"
+        },
+        "parent": 44,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": true,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 252,
+          "h": 24
+        },
+        "details": {
+          "name": "",
+          "actions": [
+            "listitem.scroll-to"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/42345e9f_dd02_4f9d_bf4d_048da0c77cf4"
+        },
+        "parent": 46,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 252,
+          "h": 24
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.459",
+          "path": "/org/wayhint/FixtureGtk4/a11y/562bb084_ff14_4bbc_9ec0_324753885fce"
+        },
+        "parent": 47,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 1652,
+          "y": 16,
+          "w": 27,
+          "h": 24
+        },
+        "details": {
+          "name": "one",
+          "actions": [
+            "clipboard.copy",
+            "selection.delete",
+            "clipboard.paste",
+            "link.open",
+            "clipboard.cut",
+            "link.copy",
+            "menu.popup",
+            "selection.select-all"
+          ]
+        }
+      }
+    ]
+  },
+  "stats": {
+    "ms": 12.3,
+    "nodes": 49,
+    "requests": 426,
+    "incomplete": null
+  }
+}

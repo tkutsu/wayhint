@@ -1,0 +1,646 @@
+{
+  "tree": {
+    "window": {
+      "address": "0x558b656f31f0",
+      "pid": 3467227,
+      "class": "org.qt-project.qml6",
+      "title": "wayhint fixture qml",
+      "rect": {
+        "x": 0,
+        "y": 38,
+        "w": 2560,
+        "h": 1402
+      },
+      "monitor": 0
+    },
+    "nodes": [
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483668"
+        },
+        "parent": null,
+        "role": "frame",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": false,
+        "component": true,
+        "bounds": null,
+        "details": null
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483654"
+        },
+        "parent": 0,
+        "role": "filler",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "w": 2560,
+          "h": 1402
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483655"
+        },
+        "parent": 1,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 151,
+          "w": 80,
+          "h": 29
+        },
+        "details": {
+          "name": "fx button",
+          "actions": [
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483648"
+        },
+        "parent": 1,
+        "role": "text",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": true,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 108,
+          "y": 151,
+          "w": 120,
+          "h": 29
+        },
+        "details": {
+          "name": "fx field",
+          "actions": [
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483656"
+        },
+        "parent": 1,
+        "role": "check box",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 240,
+          "y": 151,
+          "w": 89,
+          "h": 33
+        },
+        "details": {
+          "name": "fx check",
+          "actions": [
+            "Toggle",
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483657"
+        },
+        "parent": 1,
+        "role": "check box",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 341,
+          "y": 151,
+          "w": 120,
+          "h": 33
+        },
+        "details": {
+          "name": "fx switch",
+          "actions": [
+            "Toggle",
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483649"
+        },
+        "parent": 1,
+        "role": "combo box",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 473,
+          "y": 151,
+          "w": 120,
+          "h": 29
+        },
+        "details": {
+          "name": "fx combo",
+          "actions": [
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483658"
+        },
+        "parent": 1,
+        "role": "radio button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 605,
+          "y": 151,
+          "w": 85,
+          "h": 33
+        },
+        "details": {
+          "name": "fx radio",
+          "actions": [
+            "Toggle",
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483650"
+        },
+        "parent": 1,
+        "role": "slider",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 702,
+          "y": 151,
+          "w": 160,
+          "h": 13
+        },
+        "details": {
+          "name": "fx slider",
+          "actions": [
+            "Increase",
+            "Decrease",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483651"
+        },
+        "parent": 1,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 874,
+          "y": 151,
+          "w": 28,
+          "h": 28
+        },
+        "details": {
+          "name": "fx icon button",
+          "actions": [
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483659"
+        },
+        "parent": 1,
+        "role": "button",
+        "states": {
+          "showing": false,
+          "visible": false,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": false,
+        "bounds": null,
+        "details": null
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483660"
+        },
+        "parent": 1,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": false,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 534,
+          "w": 84,
+          "h": 29
+        },
+        "details": {
+          "name": "fx disabled",
+          "actions": [
+            "Press"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483652"
+        },
+        "parent": 1,
+        "role": "label",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 112,
+          "y": 534,
+          "w": 51,
+          "h": 21
+        },
+        "details": {
+          "name": "fx label",
+          "actions": [
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483661"
+        },
+        "parent": 1,
+        "role": "button",
+        "states": {
+          "showing": false,
+          "visible": false,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": false,
+        "bounds": null,
+        "details": null
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483662"
+        },
+        "parent": 1,
+        "role": "panel",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 296,
+          "y": 534,
+          "w": 200,
+          "h": 50
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483653"
+        },
+        "parent": 1,
+        "role": "image",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": false,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 16,
+          "y": 1061,
+          "w": 64,
+          "h": 64
+        },
+        "details": {
+          "name": "fx image",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483666"
+        },
+        "parent": 6,
+        "role": "text",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": false,
+          "sensitive": false,
+          "focusable": false,
+          "editable": true,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 473,
+          "y": 151,
+          "w": 100,
+          "h": 29
+        },
+        "details": {
+          "name": "",
+          "actions": []
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483665"
+        },
+        "parent": 14,
+        "role": "button",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 296,
+          "y": 834,
+          "w": 108,
+          "h": 29
+        },
+        "details": {
+          "name": "fx scrolled out",
+          "actions": [
+            "Press",
+            "Set Focus"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483664"
+        },
+        "parent": 14,
+        "role": "scroll bar",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 486,
+          "y": 534,
+          "w": 10,
+          "h": 50
+        },
+        "details": {
+          "name": "",
+          "actions": [
+            "Increase",
+            "Decrease",
+            "Set Focus",
+            "Increase",
+            "Decrease"
+          ]
+        }
+      },
+      {
+        "object": {
+          "bus": ":1.462",
+          "path": "/org/a11y/atspi/accessible/2147483663"
+        },
+        "parent": 14,
+        "role": "scroll bar",
+        "states": {
+          "showing": true,
+          "visible": true,
+          "enabled": true,
+          "sensitive": true,
+          "focusable": true,
+          "editable": false,
+          "selectable": false,
+          "active": false
+        },
+        "action": true,
+        "component": true,
+        "bounds": {
+          "x": 296,
+          "y": 574,
+          "w": 200,
+          "h": 10
+        },
+        "details": {
+          "name": "",
+          "actions": [
+            "Increase",
+            "Decrease",
+            "Set Focus",
+            "Increase",
+            "Decrease"
+          ]
+        }
+      }
+    ]
+  },
+  "stats": {
+    "ms": 2.9,
+    "nodes": 20,
+    "requests": 176,
+    "incomplete": null
+  }
+}
