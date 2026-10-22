@@ -43,7 +43,7 @@ use tiny_skia::Pixmap;
 pub use self::draw::Tag;
 use self::{
     draw::Painter,
-    wayland::{Grab, NoEvents, State, Synced},
+    wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 use crate::{desktop::Monitor, geometry::Point, keys::KeyCode, style::Style};
 
@@ -98,6 +98,7 @@ impl Overlay {
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
             events: VecDeque::new(),
+            answered: false,
         };
         // Two round trips: the first lists outputs and seats, the second
         // brings their names and capabilities.
@@ -173,7 +174,7 @@ impl Overlay {
     /// frame: every key pressed before that was aimed at something else.
     pub fn show(&mut self, tags: &[Tag]) -> Result<()> {
         self.update(tags)?;
-        let generation = self.state.gate.redrawn();
+        let generation = self.new_tags();
         self.conn.display().sync(&self.qh, Synced(generation));
         self.conn.flush()?;
         Ok(())
@@ -200,9 +201,18 @@ impl Overlay {
     pub fn clear(&mut self) -> Result<()> {
         self.painter.paint(&mut self.pixmap, &[]);
         self.state.present(&self.pixmap)?;
-        self.state.gate.redrawn();
+        self.new_tags();
         self.conn.flush()?;
         Ok(())
+    }
+
+    /// Starts a new tag generation: the gate refuses keys until the frame
+    /// is confirmed, and keys read but not yet taken are dropped. Both were
+    /// aimed at the old tags. Two taps can arrive in one read; after the
+    /// first picks a target, the second would pick from the next scan.
+    fn new_tags(&mut self) -> u32 {
+        self.state.events.retain(|e| !matches!(e, Event::Key(_)));
+        self.state.gate.redrawn()
     }
 
     /// Waits for the next thing to react to.
@@ -219,18 +229,32 @@ impl Overlay {
     /// so a click right after lands with the app's keyboard back.
     pub fn release_keyboard(&mut self) -> Result<()> {
         self.state.release_keys();
-        self.conn.roundtrip()?;
-        Ok(())
+        self.roundtrip()
     }
 
     pub fn grab_keyboard(&mut self) -> Result<()> {
         self.state.take_keys(&self.qh);
-        self.conn.flush()?;
-        // Let the grab (or its `unavailable`) arrive before reading keys.
-        self.event_loop
-            .dispatch(std::time::Duration::from_millis(50), &mut self.state)?;
+        // Let the grab's `unavailable`, if it comes, arrive before any key.
+        self.roundtrip()?;
         if matches!(self.state.grab, Grab::Released) {
             bail!("couldn't take the keyboard");
+        }
+        Ok(())
+    }
+
+    /// Waits until the compositor has handled every request sent so far,
+    /// and handles every event it sent on the way.
+    ///
+    /// `Connection::roundtrip` waits the same but only queues those events,
+    /// so their handlers run later. After a release in the fallback mode,
+    /// the keyboard's `leave` would then run after the next grab and read as
+    /// focus being taken away: the run would end after its first click.
+    fn roundtrip(&mut self) -> Result<()> {
+        self.state.answered = false;
+        self.conn.display().sync(&self.qh, Answered);
+        self.conn.flush()?;
+        while !self.state.answered {
+            self.event_loop.dispatch(None, &mut self.state)?;
         }
         Ok(())
     }
