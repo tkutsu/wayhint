@@ -397,6 +397,8 @@ impl<'c> Walk<'c> {
             .buffered(IN_FLIGHT)
             .collect()
             .await;
+        // A failed read stays `None`, and the filter drops everything inside
+        // that scroll area rather than guess what's in view.
         for (i, result) in wanted.into_iter().zip(results) {
             tree.nodes[i].bounds = result.ok();
         }
