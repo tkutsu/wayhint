@@ -195,16 +195,15 @@ impl Config {
         explicit: Option<&Path>,
         first_layout: impl FnOnce() -> Result<String>,
     ) -> Result<Self> {
-        let (path, text) = match explicit {
-            Some(path) => (path.to_path_buf(), std::fs::read_to_string(path)?),
+        let path = match explicit {
+            Some(path) => path.to_path_buf(),
             None => match default_path() {
-                Some(path) if path.exists() => {
-                    let text = std::fs::read_to_string(&path)?;
-                    (path, text)
-                }
+                Some(path) if path.exists() => path,
                 _ => return Self::parse("", first_layout),
             },
         };
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading config {}", path.display()))?;
         Self::parse(&text, first_layout).with_context(|| format!("config {}", path.display()))
     }
 
