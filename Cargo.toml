@@ -1,0 +1,19 @@
+[package]
+name = "wayhint"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"            # the oldest Rust that builds this; 2024 edition needs 1.85
+description = "Keyboard hints for everything clickable on a Wayland desktop"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tkutsu/wayhint"
+readme = "README.md"
+keywords = ["wayland", "keyboard", "accessibility", "hints", "hyprland"]
+categories = ["command-line-utilities", "accessibility"]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
