@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, bail};
 use atspi::{
     AccessibilityConnection, CoordType, Interface, ObjectRefOwned, State, StateSet,
     proxy::{accessible::AccessibleProxy, action::ActionProxy, component::ComponentProxy},
@@ -40,6 +40,7 @@ use crate::{
     desktop::{
         Window,
         filter::{self, DOCUMENT_ROLES},
+        recheck::Fresh,
         tree::{Details, Node, ObjectId, States, Tree},
     },
     geometry::Rect,
@@ -73,16 +74,6 @@ pub struct Stats {
     pub requests: usize,
     /// Why the scan stopped early, if it did.
     pub incomplete: Option<String>,
-}
-
-/// A fresh read of one target, for the re-check before clicking.
-#[derive(Debug, Clone)]
-pub struct Fresh {
-    pub role: String,
-    pub name: String,
-    pub states: States,
-    /// Window-relative, like everything AT-SPI gives.
-    pub bounds: Rect,
 }
 
 /// An open connection to the accessibility bus.
@@ -169,13 +160,13 @@ impl<'c> Walk<'c> {
     {
         self.requests.set(self.requests.get() + 1);
         let deadline = tokio::time::Instant::from_std(self.deadline);
-        match tokio::time::timeout_at(deadline, request).await {
-            Ok(result) => Ok(result?),
-            Err(_) => {
-                self.mark_incomplete("time limit");
-                Err(anyhow!("time limit"))
-            }
-        }
+        // `timeout_at` wraps the call's own `Result` in another one: the
+        // outer `Err` means the deadline passed first.
+        let Ok(result) = tokio::time::timeout_at(deadline, request).await else {
+            self.mark_incomplete("time limit");
+            bail!("time limit");
+        };
+        Ok(result?)
     }
 
     /// Builds a proxy of any AT-SPI interface for one object. Generic over

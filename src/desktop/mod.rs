@@ -1,7 +1,8 @@
 //! Everything about the world outside wayhint: the compositor and the
-//! accessibility tree, behind a few calls. The rest of the program sees
-//! plain data (`Window`, `Monitor`, `Snapshot`), never a socket, a D-Bus
-//! proxy or a future.
+//! accessibility tree, behind three calls on [`Desktop`] (scan a window,
+//! re-check a target) plus a few plain Hyprland queries. The rest of the
+//! program sees plain data (`Window`, `Monitor`, `Snapshot`, `Verdict`),
+//! never a socket, a D-Bus proxy or a future.
 //!
 //! The async scan runs on a Tokio runtime that [`Desktop`] owns. Each call
 //! blocks until its answer is in (`block_on`), so callers stay ordinary
@@ -11,7 +12,10 @@
 mod atspi;
 pub mod filter;
 mod hyprland;
+pub mod recheck;
 pub mod tree;
+
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -21,8 +25,12 @@ pub use self::{
     hyprland::{
         Monitor, Window, cursor, focused_window, keyboard_layout, monitors, window_by_address,
     },
+    recheck::Verdict,
 };
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, Target};
+
+/// How long the re-check may take: one object, four small requests.
+const RECHECK_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// A connection to the accessibility bus plus the runtime its calls run on.
 pub struct Desktop {
@@ -65,5 +73,20 @@ impl Desktop {
             &filter::filter(&tree),
             stats,
         ))
+    }
+
+    /// Asks a target's object again, right before clicking it: still there,
+    /// still the same thing, same place, and its window still focused.
+    pub fn recheck(&self, snapshot: &Snapshot, target: &Target) -> Result<Verdict> {
+        // Where the window is now, if it still has focus; the box is
+        // compared in global coordinates, so a moved window counts as moved.
+        let origin = focused_window()?
+            .filter(|w| w.address == snapshot.window.address)
+            .map(|w| w.rect.origin());
+        let fresh = self
+            .runtime
+            .block_on(self.scanner.read(&target.object, RECHECK_TIMEOUT))
+            .ok();
+        Ok(recheck::verdict(target, fresh.as_ref(), origin))
     }
 }
