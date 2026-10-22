@@ -16,9 +16,10 @@
 //! silent partial result.
 //!
 //! Why async at all: a window has hundreds of objects and each answer is a
-//! D-Bus round trip. Asking eight at a time, on one thread, turns a 40 ms
-//! walk into a 5 ms one, and `async` is how Rust waits on several answers
-//! without a thread per request.
+//! D-Bus round trip. Asking eight nodes at a time, on one thread, scans
+//! Dolphin (137 nodes, 828 requests) in 8 ms instead of 23 ms with one at a
+//! time (measured 2026-10-22), and `async` is how Rust waits on several
+//! answers without a thread per request.
 
 use std::{
     cell::{Cell, RefCell},
