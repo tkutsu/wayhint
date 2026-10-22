@@ -91,6 +91,7 @@ pub const DOCUMENT_ROLES: [&str; 6] = [
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
     TooSmall,
+    /// Wholly outside the window, or less than [`MIN_SIZE`] inside it.
     OutsideWindow,
     /// Firefox gives its frame a `click` action.
     TheWindow,
@@ -104,6 +105,9 @@ pub enum Reason {
     Wrapper,
     /// Scrolled out of view: GTK and Qt still say "showing".
     ClippedByScrollArea,
+    /// A scroll area above it didn't give its box, so what's in view is
+    /// unknown.
+    ScrollAreaUnread,
 }
 
 /// A node that gets a tag, with the part of its box that's visible
@@ -286,30 +290,17 @@ pub fn filter(tree: &Tree) -> Filtered {
         })
         .collect();
 
-    // Step 3: duplicates. Each candidate is compared with its nearest kept
-    // ancestor: nearly the same box means one control reported twice, and
-    // media inside a clickable is the clickable's.
-    let position_of = |node: usize| kept.iter().position(|k| k.index == node);
-    let mut duplicate = vec![false; kept.len()];
-    for (i, inner) in kept.iter().enumerate() {
-        let Some(j) = tree.ancestors(inner.index).find_map(position_of) else {
-            continue;
-        };
-        let outer = &kept[j];
-        let same_box = inner.bounds.iou(outer.bounds) > 0.8;
-        let media_in_clickable =
-            inner.is_media() && !outer.is_media() && outer.is_control() && !wrapper[j];
-        if same_box || media_in_clickable {
-            let inner_wins = !inner.is_media() && inner.rank() > outer.rank();
-            duplicate[if inner_wins { j } else { i }] = true;
-        }
-    }
+    // Step 3: duplicates.
+    let duplicate = duplicates(tree, &kept, &wrapper);
 
     // Step 4: what's left of rules 1-3, which need the whole kept set.
+    // Wrappers aren't controls here: their click is the page's event
+    // delegation, and everything inside them would count as inside a control.
     let controls: BTreeSet<usize> = kept
         .iter()
-        .filter(|c| c.is_control())
-        .map(|c| c.index)
+        .zip(&wrapper)
+        .filter(|&(c, &is_wrapper)| c.is_control() && !is_wrapper)
+        .map(|(c, _)| c.index)
         .chain(disabled_controls)
         .collect();
     let scrollers = scroll_areas(tree);
@@ -339,18 +330,55 @@ pub fn filter(tree: &Tree) -> Filtered {
                 reason,
             }),
             None => match clip(tree, c, &scrollers) {
-                Some(visible) => out.kept.push(Kept {
+                Ok(visible) => out.kept.push(Kept {
                     node: c.index,
                     visible,
                 }),
-                None => out.dropped.push(Dropped {
+                Err(reason) => out.dropped.push(Dropped {
                     node: c.index,
-                    reason: Reason::ClippedByScrollArea,
+                    reason,
                 }),
             },
         }
     }
     out
+}
+
+/// Step 3: which of the `kept` candidates are duplicates, by position.
+///
+/// Each candidate is compared with its nearest ancestor that's still in the
+/// running: nearly the same box means one control reported twice, and media
+/// inside a clickable is the clickable's. Two kinds of ancestor are out of
+/// the running:
+///
+/// - Wrappers, which step 4 drops: a wrapper that won here would take its
+///   child down with it, and neither would get a tag.
+/// - Ancestors already marked duplicate: in three nested boxes of one size,
+///   if the middle loses to the outer, the inner must face the outer, or
+///   both survive.
+///
+/// Parents come before children in walk order, so an ancestor's fate is
+/// known by the time its descendants come up.
+fn duplicates(tree: &Tree, kept: &[Candidate], wrapper: &[bool]) -> Vec<bool> {
+    let mut duplicate = vec![false; kept.len()];
+    for (i, inner) in kept.iter().enumerate() {
+        let in_running = |node: usize| {
+            kept.iter()
+                .position(|k| k.index == node)
+                .filter(|&j| !wrapper[j] && !duplicate[j])
+        };
+        let Some(j) = tree.ancestors(inner.index).find_map(in_running) else {
+            continue;
+        };
+        let outer = &kept[j];
+        let same_box = inner.bounds.iou(outer.bounds) > 0.8;
+        let media_in_clickable = inner.is_media() && !outer.is_media() && outer.is_control();
+        if same_box || media_in_clickable {
+            let inner_wins = !inner.is_media() && inner.rank() > outer.rank();
+            duplicate[if inner_wins { j } else { i }] = true;
+        }
+    }
+    duplicate
 }
 
 fn has_showing_child(tree: &Tree, index: usize) -> bool {
@@ -359,14 +387,35 @@ fn has_showing_child(tree: &Tree, index: usize) -> bool {
         .any(|n| n.parent == Some(index) && n.states.showing)
 }
 
-/// The part of a candidate's box inside every scroll area above it, or
-/// `None` if too little is left. Scroll areas without a box are skipped.
-fn clip(tree: &Tree, c: &Candidate, scrollers: &BTreeSet<usize>) -> Option<Rect> {
+/// The part of a candidate's box a click can reach: inside the window and
+/// inside every scroll area above it. The click goes to the centre of this
+/// part, so a button half past the window's edge is clicked in its visible
+/// half, not beside the window.
+///
+/// Dropped when too little is left, or when a scroll area above it has no
+/// box: that read failed, so which part is visible is unknown, and a click
+/// could land on whatever covers the hidden part. An empty box (0x0) says
+/// nothing, as in the walk rule, and is skipped.
+fn clip(tree: &Tree, c: &Candidate, scrollers: &BTreeSet<usize>) -> Result<Rect, Reason> {
+    let big_enough = |r: &Rect| r.w >= MIN_SIZE && r.h >= MIN_SIZE;
+    let window = Rect::new(0, 0, tree.window.rect.w, tree.window.rect.h);
+    let in_window = c
+        .bounds
+        .intersect(window)
+        .filter(big_enough)
+        .ok_or(Reason::OutsideWindow)?;
+    // `try_fold` threads the visible part through every scroll area and
+    // stops at the first `Err`.
     tree.ancestors(c.index)
         .filter(|a| scrollers.contains(a))
-        .filter_map(|a| tree.nodes[a].bounds.filter(|b| !b.is_empty()))
-        .try_fold(c.bounds, Rect::intersect)
-        .filter(|r| r.w >= MIN_SIZE && r.h >= MIN_SIZE)
+        .try_fold(in_window, |visible, area| match tree.nodes[area].bounds {
+            None => Err(Reason::ScrollAreaUnread),
+            Some(b) if b.is_empty() => Ok(visible),
+            Some(b) => visible
+                .intersect(b)
+                .filter(big_enough)
+                .ok_or(Reason::ClippedByScrollArea),
+        })
 }
 
 #[cfg(test)]
@@ -743,5 +792,103 @@ mod tests {
             }]
         );
         assert_eq!(reason(&tree, gone), Some(Reason::ClippedByScrollArea));
+    }
+
+    #[test]
+    fn a_control_past_the_window_edge_is_clicked_inside() {
+        let mut b = Builder::new();
+        let half = b.add(
+            Some(0),
+            "button",
+            "Half",
+            &["press"],
+            Rect::new(-200, 10, 220, 30),
+        );
+        let sliver = b.add(
+            Some(0),
+            "button",
+            "Sliver",
+            &["press"],
+            Rect::new(-200, 50, 202, 30),
+        );
+        let tree = b.tree();
+        let out = filter(&tree);
+        assert_eq!(
+            out.kept,
+            vec![Kept {
+                node: half,
+                visible: Rect::new(0, 10, 20, 30)
+            }]
+        );
+        assert_eq!(reason(&tree, sliver), Some(Reason::OutsideWindow));
+    }
+
+    #[test]
+    fn an_unread_scroll_area_hides_what_is_inside() {
+        let mut b = Builder::new();
+        let pane = b.add(Some(0), "scroll pane", "", &[], Rect::new(0, 0, 400, 200));
+        let button = b.add(
+            Some(pane),
+            "button",
+            "Maybe",
+            &["press"],
+            Rect::new(10, 300, 80, 40),
+        );
+        b.nodes[pane].bounds = None;
+        let tree = b.tree();
+        assert_eq!(kept(&tree), Vec::<usize>::new());
+        assert_eq!(reason(&tree, button), Some(Reason::ScrollAreaUnread));
+    }
+
+    #[test]
+    fn a_wrapper_never_takes_its_child_down() {
+        // An unnamed clickable section the size of the file row inside it
+        // outranks the row, but it's a wrapper and goes in step 4.
+        let mut b = Builder::new();
+        let section = b.add(Some(0), "section", "", &["click"], Rect::new(0, 0, 400, 40));
+        let row = b.add(
+            Some(section),
+            "list item",
+            "notes.md",
+            &[],
+            Rect::new(0, 0, 400, 40),
+        );
+        b.nodes[row].states.focusable = true;
+        b.nodes[row].states.selectable = true;
+        let tree = b.tree();
+        assert_eq!(kept(&tree), vec![row]);
+        assert_eq!(reason(&tree, section), Some(Reason::Wrapper));
+    }
+
+    #[test]
+    fn three_nested_boxes_of_one_size_are_one_tag() {
+        // The middle loses to the outer; the inner outranks the middle but
+        // not the outer, so only the outer stays.
+        let mut b = Builder::new();
+        let outer = b.add(
+            Some(0),
+            "button",
+            "Save",
+            &["press"],
+            Rect::new(10, 10, 80, 30),
+        );
+        let middle = b.add(
+            Some(outer),
+            "label",
+            "",
+            &["click"],
+            Rect::new(10, 10, 80, 30),
+        );
+        let inner = b.add(
+            Some(middle),
+            "label",
+            "Save",
+            &["click"],
+            Rect::new(10, 10, 80, 30),
+        );
+        let tree = b.tree();
+        assert_eq!(kept(&tree), vec![outer]);
+        assert_eq!(reason(&tree, middle), Some(Reason::Duplicate));
+        assert_eq!(reason(&tree, inner), Some(Reason::Duplicate));
     }
 }
