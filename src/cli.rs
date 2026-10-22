@@ -23,6 +23,13 @@ pub enum Command {
     Dump(Dump),
     /// Print the config in effect: your file merged with the defaults
     Config,
+    /// Show a saved snapshot's tags and print the one you pick; clicks nothing
+    #[command(hide = true)]
+    Overlay {
+        /// A snapshot written by `wayhint dump`
+        #[arg(long, value_name = "SNAPSHOT")]
+        from: PathBuf,
+    },
 }
 
 /// `#[derive(Args)]` makes a reusable group of flags: `Dump`'s live in their
