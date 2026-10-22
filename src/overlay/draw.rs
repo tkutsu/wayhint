@@ -262,8 +262,13 @@ fn tint(coverage: &[u8], width: usize, height: usize, color: Color) -> Option<Pi
 /// B, A; Wayland's ARGB8888 is a little-endian 32-bit number, which in
 /// memory is B, G, R, A. Both are premultiplied, so only red and blue swap.
 pub fn to_argb8888(pixmap: &Pixmap, out: &mut [u8]) {
-    for (src, dst) in pixmap.data().chunks_exact(4).zip(out.chunks_exact_mut(4)) {
-        dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]);
+    // `as_chunks::<4>` views the bytes as `[u8; 4]` arrays, one per pixel,
+    // so each can be taken apart by name; the second half of the pair is
+    // the leftover bytes, none here.
+    let (pixels, _) = pixmap.data().as_chunks::<4>();
+    let (slots, _) = out.as_chunks_mut::<4>();
+    for (&[r, g, b, a], slot) in pixels.iter().zip(slots) {
+        *slot = [b, g, r, a];
     }
 }
 
