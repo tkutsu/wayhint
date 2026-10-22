@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(s.press(Input::Letter(3)), Step::Typing, "f is a prefix");
         assert!(s.matches(&[3, 0]) && !s.matches(&[0]));
         assert_eq!(s.press(Input::Letter(1)), Step::Picked(4), "fs");
-        assert!(s.typed().is_empty(), "a pick starts over");
+        assert_eq!(s.typed(), [0; 0], "a pick starts over");
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         let mut s = Selector::new(5, 4);
         s.press(Input::Letter(3));
         assert_eq!(s.press(Input::Backspace), Step::Typing);
-        assert!(s.typed().is_empty());
+        assert_eq!(s.typed(), [0; 0]);
         s.press(Input::Letter(3));
         assert_eq!(s.press(Input::Escape), Step::Typing, "first Esc clears");
         assert_eq!(s.press(Input::Escape), Step::Exit, "second Esc leaves");

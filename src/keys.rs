@@ -32,10 +32,6 @@ impl KeyCode {
         Self(code)
     }
 
-    pub const fn evdev(self) -> u32 {
-        self.0
-    }
-
     fn to_xkb(self) -> xkb::Keycode {
         xkb::Keycode::new(self.0 + 8)
     }

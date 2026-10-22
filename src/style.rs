@@ -178,15 +178,15 @@ mod tests {
 
     #[test]
     fn render_round_trips() {
+        #[derive(Deserialize)]
+        struct File {
+            style: Style,
+        }
         let style = Style {
             size: 20.0,
             ..Style::default()
         };
         let text = style.render();
-        #[derive(Deserialize)]
-        struct File {
-            style: Style,
-        }
         assert_eq!(toml::from_str::<File>(&text).unwrap().style, style);
     }
 

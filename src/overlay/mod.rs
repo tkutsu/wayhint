@@ -137,7 +137,7 @@ impl Overlay {
         event_loop
             .handle()
             .insert_source(signals, |_, (), state: &mut State| {
-                state.events.push_back(Event::Interrupted)
+                state.events.push_back(Event::Interrupted);
             })
             .map_err(|e| anyhow::anyhow!("adding signals to the event loop: {}", e.error))?;
 

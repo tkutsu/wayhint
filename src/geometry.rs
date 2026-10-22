@@ -61,11 +61,6 @@ impl Rect {
         Point::new(self.x, self.y)
     }
 
-    /// Half-open: the right and bottom edges belong to the next rectangle.
-    pub const fn contains(self, p: Point) -> bool {
-        p.x >= self.x && p.x < self.right() && p.y >= self.y && p.y < self.bottom()
-    }
-
     /// The same rectangle moved by `by`.
     #[must_use]
     pub const fn offset(self, by: Point) -> Self {
@@ -158,13 +153,6 @@ mod tests {
             a.iou(Rect::new(0, 0, 0, 0)).abs() < f64::EPSILON,
             "empty boxes never match"
         );
-    }
-
-    #[test]
-    fn contains_is_half_open() {
-        let r = Rect::new(0, 0, 10, 10);
-        assert!(r.contains(Point::new(0, 0)));
-        assert!(!r.contains(Point::new(10, 5)));
     }
 
     #[test]

@@ -78,15 +78,6 @@ struct Alias {
 }
 
 impl Alphabet {
-    /// Builds an alphabet straight from letters, for tests and snapshots.
-    #[cfg(test)]
-    pub fn from_letters(letters: Vec<Letter>) -> Self {
-        Self {
-            letters,
-            aliases: Vec::new(),
-        }
-    }
-
     pub fn letters(&self) -> &[Letter] {
         &self.letters
     }
