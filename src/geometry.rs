@@ -3,9 +3,10 @@
 //! Every coordinate wayhint keeps is global and logical: the compositor's
 //! layout space, where the top-left monitor usually starts at (0, 0) and a
 //! scale-2 monitor still counts its width in logical pixels. AT-SPI boxes
-//! arrive relative to their window and are moved here once, at the edge of
-//! the program (`desktop::atspi`), so nothing further in has to ask which
-//! space a number is in.
+//! arrive relative to their window; the raw tree keeps them that way, and
+//! `Snapshot::build` moves them to global once, so nothing after the
+//! snapshot has to ask which space a number is in. The overlay subtracts
+//! its monitor's origin at the last moment, to draw.
 
 use serde::{Deserialize, Serialize};
 
