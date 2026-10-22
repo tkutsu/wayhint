@@ -1,10 +1,13 @@
-//! Tags and typing them. Pure: no keys, screens or targets, only numbers.
+//! Tags and typing them. Pure: no keys, screens or targets, only numbers
+//! and the [`Action`] a pick carries.
 //!
 //! A label is a list of letter indices into the alphabet (`[0]` is the
 //! first letter, `[8, 2]` the ninth then the third), so this module never
 //! needs to know what the letters are or which keys type them. The overlay
 //! turns key presses into [`Input`]s and draws whatever [`Selector`] says
 //! is still possible.
+
+use crate::action::Action;
 
 /// Labels for `count` targets from an alphabet of `size` letters.
 ///
@@ -47,6 +50,10 @@ pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
 pub enum Input {
     /// A tag letter, by its index in the alphabet.
     Letter(usize),
+    /// A verb key: the next tag gets this action instead of the default.
+    Verb(Action),
+    /// `Space`: act where the pointer already is, no tag.
+    Here,
     Backspace,
     Escape,
 }
@@ -56,26 +63,37 @@ pub enum Input {
 pub enum Step {
     /// Still typing: redraw, showing only the labels that match.
     Typing,
-    /// A whole label was typed: this target, by index.
-    Picked(usize),
+    /// A whole label was typed: do `action` at this target, by index.
+    Picked { index: usize, action: Action },
+    /// `Space`: do `action` where the pointer is.
+    Here(Action),
     /// A letter no label continues with. Nothing changes, nothing runs.
     Ignored,
-    /// `Esc` with nothing typed: leave.
+    /// `Esc` with nothing typed or armed: leave.
     Exit,
 }
 
-/// The labels on screen and the letters typed so far.
+/// The labels on screen, the letters typed so far, and the armed verb.
+///
+/// The grammar is fixed slots, `[verb] (tag | Space)`, so nothing ever
+/// waits on a timeout: a verb key is never a tag letter (the config takes
+/// verb keys out of the alphabet), and labels are prefix-free.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
     typed: Vec<usize>,
+    /// The action a bare tag does: the config's `""` verb.
+    default: Action,
+    armed: Option<Action>,
 }
 
 impl Selector {
-    pub fn new(count: usize, alphabet_size: usize) -> Self {
+    pub fn new(count: usize, alphabet_size: usize, default: Action) -> Self {
         Self {
             labels: labels(count, alphabet_size),
             typed: Vec::new(),
+            default,
+            armed: None,
         }
     }
 
@@ -85,6 +103,18 @@ impl Selector {
 
     pub fn typed(&self) -> &[usize] {
         &self.typed
+    }
+
+    /// The verb typed before the tag, if any, for the status pill.
+    pub fn armed(&self) -> Option<Action> {
+        self.armed
+    }
+
+    /// What a pick would do now. `Option::unwrap_or` takes the armed verb
+    /// if there is one; `Copy` types like `Action` are copied out, so the
+    /// selector keeps its own.
+    fn action(&self) -> Action {
+        self.armed.unwrap_or(self.default)
     }
 
     /// Whether a label is still possible: it starts with what's typed.
@@ -101,8 +131,10 @@ impl Selector {
                 let mut next = self.typed.clone();
                 next.push(letter);
                 if let Some(index) = self.labels.iter().position(|l| *l == next) {
+                    let action = self.action();
                     self.typed.clear();
-                    Step::Picked(index)
+                    self.armed = None;
+                    Step::Picked { index, action }
                 } else if self.labels.iter().any(|l| l.starts_with(&next)) {
                     self.typed = next;
                     Step::Typing
@@ -110,13 +142,31 @@ impl Selector {
                     Step::Ignored
                 }
             }
-            Input::Backspace => {
-                self.typed.pop();
+            // A verb starts the command over: a second verb replaces the
+            // first, so a wrong one needs no Backspace, and letters typed
+            // before it are dropped (verbs come before the tag).
+            Input::Verb(action) => {
+                self.typed.clear();
+                self.armed = Some(action);
                 Step::Typing
             }
-            // Esc clears what's typed first; only a second Esc leaves.
-            Input::Escape if !self.typed.is_empty() => {
+            Input::Here => {
+                let action = self.action();
                 self.typed.clear();
+                self.armed = None;
+                Step::Here(action)
+            }
+            // Backspace takes back the last key: a letter, else the verb.
+            Input::Backspace => {
+                if self.typed.pop().is_none() {
+                    self.armed = None;
+                }
+                Step::Typing
+            }
+            // Esc clears what's typed and armed first; only a second Esc leaves.
+            Input::Escape if !self.typed.is_empty() || self.armed.is_some() => {
+                self.typed.clear();
+                self.armed = None;
                 Step::Typing
             }
             Input::Escape => Step::Exit,
@@ -158,18 +208,27 @@ mod tests {
         );
     }
 
+    /// Five targets over four letters: a s d fa fs. Bare tags left-click.
+    fn five() -> Selector {
+        Selector::new(5, 4, Action::Left)
+    }
+
+    const fn picked(index: usize, action: Action) -> Step {
+        Step::Picked { index, action }
+    }
+
     #[test]
     fn typing_a_label_picks_it() {
-        let mut s = Selector::new(5, 4); // a s d fa fs
+        let mut s = five();
         assert_eq!(s.press(Input::Letter(3)), Step::Typing, "f is a prefix");
         assert!(s.matches(&[3, 0]) && !s.matches(&[0]));
-        assert_eq!(s.press(Input::Letter(1)), Step::Picked(4), "fs");
+        assert_eq!(s.press(Input::Letter(1)), picked(4, Action::Left), "fs");
         assert_eq!(s.typed(), [0; 0], "a pick starts over");
     }
 
     #[test]
     fn backspace_and_escape_step_back() {
-        let mut s = Selector::new(5, 4);
+        let mut s = five();
         s.press(Input::Letter(3));
         assert_eq!(s.press(Input::Backspace), Step::Typing);
         assert_eq!(s.typed(), [0; 0]);
@@ -179,8 +238,50 @@ mod tests {
     }
 
     #[test]
+    fn a_verb_applies_to_the_next_pick_only() {
+        let mut s = five();
+        s.press(Input::Verb(Action::Right));
+        assert_eq!(s.armed(), Some(Action::Right));
+        assert_eq!(s.press(Input::Letter(0)), picked(0, Action::Right));
+        assert_eq!(s.armed(), None, "the next tag is a bare one again");
+        assert_eq!(s.press(Input::Letter(0)), picked(0, Action::Left));
+    }
+
+    #[test]
+    fn a_second_verb_replaces_the_first_and_clears_letters() {
+        let mut s = five();
+        s.press(Input::Verb(Action::Right));
+        s.press(Input::Letter(3));
+        s.press(Input::Verb(Action::Double));
+        assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[][..]));
+    }
+
+    #[test]
+    fn backspace_takes_the_letter_then_the_verb() {
+        let mut s = five();
+        s.press(Input::Verb(Action::Hover));
+        s.press(Input::Letter(3));
+        s.press(Input::Backspace);
+        assert_eq!(s.armed(), Some(Action::Hover), "the letter went first");
+        s.press(Input::Backspace);
+        assert_eq!(s.armed(), None);
+        s.press(Input::Verb(Action::Hover));
+        assert_eq!(s.press(Input::Escape), Step::Typing, "Esc disarms first");
+        assert_eq!(s.press(Input::Escape), Step::Exit);
+    }
+
+    #[test]
+    fn space_acts_where_the_pointer_is() {
+        let mut s = five();
+        assert_eq!(s.press(Input::Here), Step::Here(Action::Left));
+        s.press(Input::Verb(Action::Middle));
+        assert_eq!(s.press(Input::Here), Step::Here(Action::Middle));
+        assert_eq!(s.armed(), None);
+    }
+
+    #[test]
     fn a_letter_no_label_continues_is_ignored() {
-        let mut s = Selector::new(5, 4);
+        let mut s = five();
         s.press(Input::Letter(3));
         assert_eq!(
             s.press(Input::Letter(3)),

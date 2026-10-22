@@ -44,7 +44,7 @@ use smithay_client_toolkit::{
 use tiny_skia::Pixmap;
 
 use crate::{
-    keys::KeyCode,
+    keys::{Key, KeyCode},
     overlay::{Event, draw, gate::KeyGate},
 };
 
@@ -77,6 +77,8 @@ pub struct State {
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub grab: Grab,
     pub gate: KeyGate,
+    /// The Shift keys held down right now, by position.
+    pub shifts: Vec<KeyCode>,
     /// Events for `Overlay::next_event`, oldest first.
     pub events: VecDeque<Event>,
     /// Set when the compositor answers `Overlay::roundtrip`'s sync.
@@ -94,6 +96,9 @@ impl State {
         if !matches!(self.grab, Grab::Released) {
             return;
         }
+        // A Shift held across the click was pressed before this grab, and
+        // its release may never come here: start with none held.
+        self.shifts.clear();
         if let (Some(manager), Some(seat)) = (&self.input_methods, self.seat()) {
             let method = manager.get_input_method(&seat, qh, ImeEvents);
             let grab = method.grab_keyboard(qh, ImeEvents);
@@ -155,10 +160,19 @@ impl State {
     }
 
     fn key(&mut self, code: u32, pressed: bool) {
-        let key = KeyCode::from_evdev(code);
+        let code = KeyCode::from_evdev(code);
+        // Shift is never a key of its own here, only state for the others.
+        if code.is_shift() {
+            self.shifts.retain(|&k| k != code);
+            if pressed {
+                self.shifts.push(code);
+            }
+            return;
+        }
         if pressed {
-            self.gate.press(key);
-        } else if self.gate.release(key) {
+            let shift = !self.shifts.is_empty();
+            self.gate.press(Key { code, shift });
+        } else if let Some(key) = self.gate.release(code) {
             // Acting on release: press and release were both swallowed, so
             // nothing reaches the app once the grab ends.
             self.events.push_back(Event::Key(key));
@@ -245,7 +259,8 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
         _: &QueueHandle<State>,
     ) {
         // The grab also sends a keymap and modifiers; keys are matched by
-        // position, so only the codes matter.
+        // position, so only the codes matter (Shift is followed by its
+        // codes too, in `State::key`).
         if let zwp_input_method_keyboard_grab_v2::Event::Key {
             key,
             state: WEnum::Value(key_state),

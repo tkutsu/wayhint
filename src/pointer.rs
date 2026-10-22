@@ -25,14 +25,37 @@ use smithay_client_toolkit::reexports::{
     },
 };
 
-use crate::geometry::{Point, Rect};
+use crate::{
+    action::Action,
+    geometry::{Point, Rect},
+};
 
-/// Linux's code for the left button (`BTN_LEFT` in input-event-codes.h).
+// Linux's button codes (`BTN_*` in input-event-codes.h). Side and extra are
+// the thumb buttons, which browsers and file managers read as back and forward.
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
+const BTN_SIDE: u32 = 0x113;
+const BTN_EXTRA: u32 = 0x114;
 /// Pauses that let apps see the pointer arrive and the press as a click,
-/// measured in the phase 1 spike (81 ms from pick to restored cursor).
+/// measured in the phase 1 spike (81 ms from pick to restored cursor). The
+/// gap between a double click's two clicks is also `PRESS`: far inside the
+/// 400 ms GTK and Qt allow by default.
 const ARRIVE: Duration = Duration::from_millis(30);
 const PRESS: Duration = Duration::from_millis(20);
+
+/// The button an action presses, and how many times: a hover, none.
+const fn presses(action: Action) -> (u32, u32) {
+    match action {
+        Action::Left => (BTN_LEFT, 1),
+        Action::Double => (BTN_LEFT, 2),
+        Action::Right => (BTN_RIGHT, 1),
+        Action::Middle => (BTN_MIDDLE, 1),
+        Action::Back => (BTN_SIDE, 1),
+        Action::Forward => (BTN_EXTRA, 1),
+        Action::Hover => (BTN_LEFT, 0),
+    }
+}
 
 /// The pointer's own event queue needs a state type. None of these objects
 /// sends anything wayhint reads, so it's empty.
@@ -89,13 +112,19 @@ impl Pointer {
         })
     }
 
-    /// Left-clicks at `at`, then moves the cursor to `back_to` if given.
-    pub fn click(&mut self, at: Point, back_to: Option<Point>) -> Result<()> {
+    /// Does `action` at `at`, then moves the cursor to `back_to` if given.
+    pub fn act(&mut self, action: Action, at: Point, back_to: Option<Point>) -> Result<()> {
         self.move_to(at)?;
         sleep(ARRIVE);
-        self.button(BTN_LEFT, true)?;
-        sleep(PRESS);
-        self.button(BTN_LEFT, false)?;
+        let (button, count) = presses(action);
+        for i in 0..count {
+            if i > 0 {
+                sleep(PRESS);
+            }
+            self.button(button, true)?;
+            sleep(PRESS);
+            self.button(button, false)?;
+        }
         if let Some(back) = back_to {
             sleep(ARRIVE);
             self.move_to(back)?;

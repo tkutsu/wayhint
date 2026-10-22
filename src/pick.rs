@@ -5,50 +5,88 @@
 use anyhow::Result;
 
 use crate::{
-    config::Alphabet,
-    keys::KeyCode,
+    action::Action,
+    config::{Alphabet, Config},
+    geometry::{Point, Rect},
+    keys::{Key, KeyCode},
     overlay::{Event, Overlay, Tag},
     selection::{Input, Selector, Step},
     snapshot::Target,
 };
 
+/// How far above the monitor's bottom edge the status pill sits, in px.
+const PILL_LIFT: i32 = 48;
+
 /// How a pick ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
-    /// The target at this index was chosen.
-    Target(usize),
+    /// Do `action` at the target at `index`.
+    Target { index: usize, action: Action },
+    /// Do `action` where the pointer is now (`Space`).
+    Here(Action),
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
 }
 
-/// Shows tags for `targets` and reads keys until one is picked.
-pub fn pick(overlay: &mut Overlay, alphabet: &Alphabet, targets: &[Target]) -> Result<Pick> {
-    let mut selector = Selector::new(targets.len(), alphabet.len());
-    overlay.show(&tags(&selector, alphabet, targets))?;
+/// Shows tags for `targets` and reads keys until one is picked. `verb`
+/// (from `--verb`) is armed as if its key were the first one typed.
+pub fn pick(
+    overlay: &mut Overlay,
+    config: &Config,
+    targets: &[Target],
+    verb: Option<Action>,
+) -> Result<Pick> {
+    let mut selector = Selector::new(
+        targets.len(),
+        config.alphabet.len(),
+        config.verbs.default_action(),
+    );
+    if let Some(action) = verb {
+        selector.press(Input::Verb(action));
+    }
+    let screen = overlay.monitor().rect;
+    overlay.show(&tags(&selector, &config.alphabet, targets, screen))?;
     loop {
         let input = match overlay.next_event()? {
-            Event::Key(KeyCode::ESC) => Input::Escape,
-            Event::Key(KeyCode::BACKSPACE) => Input::Backspace,
-            // Any other key: a tag letter, or ignored.
-            Event::Key(code) => match alphabet.index_of(code) {
-                Some(letter) => Input::Letter(letter),
+            Event::Key(key) => match input_of(key, config) {
+                Some(input) => input,
                 None => continue,
             },
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
         };
         match selector.press(input) {
-            Step::Typing => overlay.update(&tags(&selector, alphabet, targets))?,
-            Step::Picked(index) => return Ok(Pick::Target(index)),
+            Step::Typing => overlay.update(&tags(&selector, &config.alphabet, targets, screen))?,
+            Step::Picked { index, action } => return Ok(Pick::Target { index, action }),
+            Step::Here(action) => return Ok(Pick::Here(action)),
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
         }
     }
 }
 
-/// The tags still possible after what's been typed, drawn upper case.
-fn tags(selector: &Selector, alphabet: &Alphabet, targets: &[Target]) -> Vec<Tag> {
+/// What a key means: a built-in key, else a verb, else a tag letter, else
+/// nothing. The config keeps verb keys out of the alphabet, so the order of
+/// the last two never decides anything. Shift on a tag letter is kept for
+/// Shift-click (spike test 9); until then it picks like the plain letter.
+fn input_of(key: Key, config: &Config) -> Option<Input> {
+    match key.code {
+        KeyCode::ESC => Some(Input::Escape),
+        KeyCode::BACKSPACE => Some(Input::Backspace),
+        KeyCode::SPACE => Some(Input::Here),
+        code => config
+            .verbs
+            .action_of(key)
+            .map(Input::Verb)
+            .or_else(|| config.alphabet.index_of(code).map(Input::Letter)),
+    }
+}
+
+/// The tags still possible after what's been typed, drawn upper case, plus
+/// the armed verb's name as a pill at the bottom of `screen`. The pill is
+/// drawn as one more tag: same look, no new drawing code.
+fn tags(selector: &Selector, alphabet: &Alphabet, targets: &[Target], screen: Rect) -> Vec<Tag> {
     let letters = alphabet.letters();
-    selector
+    let mut tags: Vec<Tag> = selector
         .labels()
         .iter()
         .zip(targets)
@@ -58,7 +96,15 @@ fn tags(selector: &Selector, alphabet: &Alphabet, targets: &[Target]) -> Vec<Tag
             text: label.iter().map(|&i| upper(letters[i].label)).collect(),
             typed: selector.typed().len(),
         })
-        .collect()
+        .collect();
+    if let Some(action) = selector.armed() {
+        tags.push(Tag {
+            at: Point::new(screen.center().x, screen.bottom() - PILL_LIFT),
+            text: action.name().into(),
+            typed: 0,
+        });
+    }
+    tags
 }
 
 /// A letter in upper case when that's one character (`ß` would be `SS`,
@@ -81,5 +127,29 @@ mod tests {
         assert_eq!(upper('α'), 'Α');
         assert_eq!(upper(';'), ';');
         assert_eq!(upper('ß'), 'ß');
+    }
+
+    #[test]
+    fn keys_decode_built_ins_then_verbs_then_letters() {
+        let config = Config::parse("[keys]\nhover = \"_\"", || Ok("us".into())).unwrap();
+        let key = |code, shift| Key {
+            code: KeyCode::from_evdev(code),
+            shift,
+        };
+        assert_eq!(input_of(key(57, false), &config), Some(Input::Here));
+        assert_eq!(
+            input_of(key(19, false), &config),
+            Some(Input::Verb(Action::Right))
+        );
+        assert_eq!(
+            input_of(key(12, true), &config),
+            Some(Input::Verb(Action::Hover))
+        );
+        assert_eq!(
+            input_of(key(12, false), &config),
+            None,
+            "- alone is nothing"
+        );
+        assert_eq!(input_of(key(30, true), &config), Some(Input::Letter(0)));
     }
 }

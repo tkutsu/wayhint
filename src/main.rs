@@ -5,6 +5,7 @@
 //!
 //! | Module      | Job                                                      |
 //! |-------------|----------------------------------------------------------|
+//! | `action`    | the verbs: what to do at a target                        |
 //! | `config`    | the settings file, validated once at start               |
 //! | `keys`      | physical keys, and decoding config characters            |
 //! | `style`     | how a tag looks                                          |
@@ -17,6 +18,7 @@
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
 //! | `dump`      | `wayhint dump`, printing each seam as JSON               |
 
+mod action;
 mod cli;
 mod config;
 mod desktop;
@@ -64,14 +66,14 @@ fn main() -> ExitCode {
 fn dispatch(cli: &Cli) -> Result<()> {
     let config = || Config::load(cli.config.as_deref(), desktop::keyboard_layout);
     match &cli.command {
-        None => run::run(&config()?, cli.once),
+        None => run::run(&config()?, cli.once, cli.verb),
         Some(Command::Config) => {
             print!("{}", config()?.render());
             Ok(())
         }
         Some(Command::Dump(args)) => dump::run(args),
         Some(Command::Overlay { from }) => overlay_from(&config()?, from),
-        Some(Command::Click { at }) => run::click_at(*at),
+        Some(Command::Click { at, verb }) => run::click_at(*at, *verb),
     }
 }
 
@@ -95,11 +97,16 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         snapshot.targets.len(),
         overlay.keyboard_mode()
     );
-    if let Pick::Target(index) = pick::pick(&mut overlay, &config.alphabet, &snapshot.targets)? {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&snapshot.targets[index])?
-        );
+    match pick::pick(&mut overlay, config, &snapshot.targets, None)? {
+        Pick::Target { index, action } => {
+            eprintln!("wayhint: {} on", action.name());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot.targets[index])?
+            );
+        }
+        Pick::Here(action) => eprintln!("wayhint: {} where the pointer is", action.name()),
+        Pick::Leave => {}
     }
     Ok(())
 }

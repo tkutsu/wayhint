@@ -10,8 +10,12 @@
 //!
 //! The one rule covers keys typed during a scan, a key held across a
 //! redraw, and the keybind's own keys still held when wayhint starts.
+//!
+//! Each press is kept with whether Shift was down at that moment, and the
+//! release hands that back: people often let go of Shift before the key,
+//! and `Shift+-` still meant `_`.
 
-use crate::keys::KeyCode;
+use crate::keys::{Key, KeyCode};
 
 #[derive(Debug, Default)]
 pub struct KeyGate {
@@ -20,7 +24,7 @@ pub struct KeyGate {
     /// The round trip for `generation` has come back.
     armed: bool,
     /// Keys pressed while armed, not yet released.
-    live: Vec<KeyCode>,
+    live: Vec<Key>,
 }
 
 impl KeyGate {
@@ -40,17 +44,17 @@ impl KeyGate {
         }
     }
 
-    pub fn press(&mut self, key: KeyCode) {
-        if self.armed && !self.live.contains(&key) {
+    pub fn press(&mut self, key: Key) {
+        if self.armed && !self.live.iter().any(|k| k.code == key.code) {
             self.live.push(key);
         }
     }
 
-    /// Whether this release acts: only if its press counted.
-    pub fn release(&mut self, key: KeyCode) -> bool {
-        let before = self.live.len();
-        self.live.retain(|&k| k != key);
-        self.live.len() != before
+    /// The key as it was pressed, if this release acts: only if its press
+    /// counted.
+    pub fn release(&mut self, code: KeyCode) -> Option<Key> {
+        let index = self.live.iter().position(|k| k.code == code)?;
+        Some(self.live.remove(index))
     }
 }
 
@@ -58,7 +62,10 @@ impl KeyGate {
 mod tests {
     use super::*;
 
-    const A: KeyCode = KeyCode::from_evdev(30);
+    const A: Key = Key {
+        code: KeyCode::from_evdev(30),
+        shift: false,
+    };
 
     #[test]
     fn a_press_after_the_round_trip_acts_on_release() {
@@ -66,8 +73,18 @@ mod tests {
         let generation = gate.redrawn();
         gate.synced(generation);
         gate.press(A);
-        assert!(gate.release(A));
-        assert!(!gate.release(A), "one release per press");
+        assert_eq!(gate.release(A.code), Some(A));
+        assert_eq!(gate.release(A.code), None, "one release per press");
+    }
+
+    #[test]
+    fn shift_is_what_it_was_at_the_press() {
+        let mut gate = KeyGate::default();
+        let generation = gate.redrawn();
+        gate.synced(generation);
+        let shifted = Key { shift: true, ..A };
+        gate.press(shifted);
+        assert_eq!(gate.release(A.code), Some(shifted));
     }
 
     #[test]
@@ -77,7 +94,7 @@ mod tests {
         let generation = gate.redrawn();
         gate.press(A);
         gate.synced(generation);
-        assert!(!gate.release(A));
+        assert_eq!(gate.release(A.code), None);
     }
 
     #[test]
@@ -88,7 +105,11 @@ mod tests {
         gate.press(A);
         let second = gate.redrawn();
         gate.synced(second);
-        assert!(!gate.release(A), "its press was aimed at the old tags");
+        assert_eq!(
+            gate.release(A.code),
+            None,
+            "its press was aimed at the old tags"
+        );
     }
 
     #[test]
@@ -98,6 +119,6 @@ mod tests {
         let _second = gate.redrawn();
         gate.synced(first);
         gate.press(A);
-        assert!(!gate.release(A));
+        assert_eq!(gate.release(A.code), None);
     }
 }

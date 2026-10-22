@@ -45,13 +45,14 @@ use self::{
     draw::Painter,
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
-use crate::{desktop::Monitor, geometry::Point, keys::KeyCode, style::Style};
+use crate::{desktop::Monitor, geometry::Point, keys::Key, style::Style};
 
 /// Something the run loop has to react to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// A key was released, and its press counted (see `gate.rs`).
-    Key(KeyCode),
+    /// A key was released, and its press counted (see `gate.rs`). Shift
+    /// is part of it, as it was at the press; Shift alone is never one.
+    Key(Key),
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
     /// The compositor closed the overlay (its monitor went away).
@@ -97,6 +98,7 @@ impl Overlay {
             keyboard: None,
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
+            shifts: Vec::new(),
             events: VecDeque::new(),
             answered: false,
         };
