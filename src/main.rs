@@ -13,6 +13,8 @@
 //! | `selection` | labels and what typed keys mean (pure)                   |
 //! | `overlay`   | the Wayland surface: draws tags, reads keys              |
 //! | `pick`      | overlay plus selection: choose one target                |
+//! | `pointer`   | the virtual pointer: click, and never leave a button held |
+//! | `run`       | the loop: scan, pick, re-check, click, again             |
 //! | `dump`      | `wayhint dump`, printing each seam as JSON               |
 
 mod cli;
@@ -23,6 +25,8 @@ mod geometry;
 mod keys;
 mod overlay;
 mod pick;
+mod pointer;
+mod run;
 mod selection;
 mod snapshot;
 mod style;
@@ -44,7 +48,7 @@ use crate::{
 fn main() -> ExitCode {
     // `parse` prints help, version and usage errors itself, exiting 0 or 2.
     let cli = Cli::parse();
-    match run(&cli) {
+    match dispatch(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // `{:#}` prints the whole context chain on one line:
@@ -55,20 +59,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> Result<()> {
+/// One arm per command. The config is a closure, loaded only by the
+/// commands that need it: `dump` and `click` work even with a broken file.
+fn dispatch(cli: &Cli) -> Result<()> {
     let config = || Config::load(cli.config.as_deref(), desktop::keyboard_layout);
     match &cli.command {
-        None => {
-            config()?;
-            println!("wayhint: nothing to do yet");
-            Ok(())
-        }
+        None => run::run(&config()?, cli.once),
         Some(Command::Config) => {
             print!("{}", config()?.render());
             Ok(())
         }
         Some(Command::Dump(args)) => dump::run(args),
         Some(Command::Overlay { from }) => overlay_from(&config()?, from),
+        Some(Command::Click { at }) => run::click_at(*at),
     }
 }
 

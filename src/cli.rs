@@ -6,9 +6,19 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::geometry::Point;
+
+/// Keyboard hints for everything clickable on a Wayland desktop.
+///
+/// With no command: tag the focused window's controls, click the one whose
+/// tag you type, and keep going until Esc.
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version, about, long_about)]
 pub struct Cli {
+    /// Exit after one click instead of tagging the window again
+    #[arg(long)]
+    pub once: bool,
+
     /// Config file to use instead of ~/.config/wayhint/config.toml
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
@@ -30,6 +40,13 @@ pub enum Command {
         #[arg(long, value_name = "SNAPSHOT")]
         from: PathBuf,
     },
+    /// Click once at a global position, then put the cursor back
+    #[command(hide = true)]
+    Click {
+        /// Global logical coordinates, `X,Y`
+        #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+        at: Point,
+    },
 }
 
 /// `#[derive(Args)]` makes a reusable group of flags: `Dump`'s live in their
@@ -49,4 +66,38 @@ pub struct Dump {
     /// Scan this window (a Hyprland address, `0x...`) instead of the focused one
     #[arg(long, hide = true)]
     pub address: Option<String>,
+}
+
+/// `"120,-40"` to a point. clap calls this for `--at`; its `Err` becomes the
+/// usage error clap prints.
+fn parse_point(text: &str) -> Result<Point, String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or("write X,Y, for example 640,400")?;
+    let number = |part: &str| {
+        part.trim()
+            .parse::<i32>()
+            .map_err(|e| format!("{part:?}: {e}"))
+    };
+    Ok(Point::new(number(x)?, number(y)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        // clap checks for clashing flags and bad attributes here, not at
+        // compile time, so one test catches them all.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn points_parse() {
+        assert_eq!(parse_point("120,-40"), Ok(Point::new(120, -40)));
+        assert!(parse_point("120").is_err());
+        assert!(parse_point("a,b").is_err());
+    }
 }
