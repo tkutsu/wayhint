@@ -1616,6 +1616,7 @@ dependencies = [
  "fontdue",
  "futures",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "smithay-client-toolkit",

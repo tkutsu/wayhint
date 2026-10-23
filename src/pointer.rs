@@ -7,12 +7,10 @@
 //! backstop. A button left pressed by a crashed tool is the worst thing it
 //! can do to a desktop.
 
-use std::{
-    thread::sleep,
-    time::{Duration, Instant},
-};
+use std::{thread::sleep, time::Duration};
 
 use anyhow::{Context as _, Result};
+use rustix::time::{ClockId, clock_gettime};
 use smithay_client_toolkit::reexports::{
     client::{
         Connection, Dispatch, EventQueue, QueueHandle,
@@ -88,7 +86,6 @@ pub struct Pointer {
     /// All monitors together: absolute motion is a fraction of this box.
     extent: Rect,
     held: Vec<u32>,
-    started: Instant,
 }
 
 impl Pointer {
@@ -108,7 +105,6 @@ impl Pointer {
             device,
             extent: outputs,
             held: Vec::new(),
-            started: Instant::now(),
         })
     }
 
@@ -140,8 +136,7 @@ impl Pointer {
     /// Releases every button still pressed. Safe to call any number of times.
     pub fn release_all(&mut self) {
         for button in std::mem::take(&mut self.held) {
-            self.device
-                .button(self.now(), button, ButtonState::Released);
+            self.device.button(now(), button, ButtonState::Released);
             self.device.frame();
         }
         let _ = self.conn.flush();
@@ -155,7 +150,7 @@ impl Pointer {
         let y = u32::try_from(at.y - self.extent.y).context("point above every monitor")?;
         let (w, h) = (u32::try_from(self.extent.w)?, u32::try_from(self.extent.h)?);
         self.device
-            .motion_absolute(self.now(), x.min(w - 1), y.min(h - 1), w, h);
+            .motion_absolute(now(), x.min(w - 1), y.min(h - 1), w, h);
         self.device.frame();
         self.conn.flush()?;
         Ok(())
@@ -169,17 +164,26 @@ impl Pointer {
             self.held.retain(|&b| b != button);
             ButtonState::Released
         };
-        self.device.button(self.now(), button, state);
+        self.device.button(now(), button, state);
         self.device.frame();
         self.conn.flush()?;
         Ok(())
     }
+}
 
-    /// Milliseconds since the pointer was made. Wayland only needs these to
-    /// increase; their starting point means nothing.
-    fn now(&self) -> u32 {
-        u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX)
-    }
+/// The time to stamp an input event with: milliseconds of the monotonic
+/// clock, the clock the compositor stamps the real mouse and keyboard with.
+///
+/// Apps count double clicks by comparing these stamps. Counting from when
+/// the pointer was made restarted near zero in every run, so a Firefox
+/// click in one run looked like the next click of the run before (spike
+/// test 8, 2026-10-23: a triple click counted `3, 1, 2`). The protocol keeps
+/// 32 bits of milliseconds, so the clock wraps every 49 days, as the
+/// compositor's own stamps do.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // the wrap is the protocol's
+pub fn now() -> u32 {
+    let t = clock_gettime(ClockId::Monotonic);
+    (t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1_000_000) as u32
 }
 
 impl Drop for Pointer {
