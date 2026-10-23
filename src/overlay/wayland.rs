@@ -10,7 +10,7 @@
 //! small "user data" type implementing `Dispatch2`, which is where their
 //! events land: [`NoEvents`], [`ImeEvents`], [`Synced`], [`Answered`].
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fs::File, os::fd::OwnedFd, os::unix::fs::FileExt as _};
 
 use smithay_client_toolkit::{
     compositor::CompositorHandler,
@@ -31,7 +31,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        keyboard::{KeyEvent, KeyboardHandler, Keymap, Keysym, Modifiers, RawModifiers},
     },
     shell::{
         WaylandSurface,
@@ -44,6 +44,8 @@ use smithay_client_toolkit::{
 use tiny_skia::Pixmap;
 
 use crate::{
+    action::Mods,
+    keyboard::Locks,
     keys::{Key, KeyCode},
     overlay::{Event, draw, gate::KeyGate},
 };
@@ -77,8 +79,12 @@ pub struct State {
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub grab: Grab,
     pub gate: KeyGate,
-    /// The Shift keys held down right now, by position.
-    pub shifts: Vec<KeyCode>,
+    /// The modifier keys held down right now, by position.
+    pub modifiers: Vec<KeyCode>,
+    /// The real keyboard's keymap as xkb text, and its locks and layout,
+    /// for the virtual keyboard of a modifier click to copy.
+    pub keymap: Option<String>,
+    pub locks: Locks,
     /// Events for `Overlay::next_event`, oldest first.
     pub events: VecDeque<Event>,
     /// Set when the compositor answers `Overlay::roundtrip`'s sync.
@@ -96,9 +102,9 @@ impl State {
         if !matches!(self.grab, Grab::Released) {
             return;
         }
-        // A Shift held across the click was pressed before this grab, and
-        // its release may never come here: start with none held.
-        self.shifts.clear();
+        // A modifier held across the click was pressed before this grab,
+        // and its release may never come here: start with none held.
+        self.modifiers.clear();
         if let (Some(manager), Some(seat)) = (&self.input_methods, self.seat()) {
             let method = manager.get_input_method(&seat, qh, ImeEvents);
             let grab = method.grab_keyboard(qh, ImeEvents);
@@ -166,23 +172,44 @@ impl State {
 
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
-        // Shift is never a key of its own here, only state for the others.
-        if code.is_shift() {
-            self.shifts.retain(|&k| k != code);
+        // A modifier is never a key of its own here, only state for the
+        // others.
+        if !code.modifier().is_empty() {
+            self.modifiers.retain(|&k| k != code);
             if pressed {
-                self.shifts.push(code);
+                self.modifiers.push(code);
             }
             return;
         }
         if pressed {
-            let shift = !self.shifts.is_empty();
-            self.gate.press(Key { code, shift });
-        } else if let Some(key) = self.gate.release(code) {
+            let mods = self
+                .modifiers
+                .iter()
+                .fold(Mods::NONE, |all, k| all.union(k.modifier()));
+            self.gate.press(
+                Key {
+                    code,
+                    shift: mods.shift,
+                },
+                mods,
+            );
+        } else if let Some((key, mods)) = self.gate.release(code) {
             // Acting on release: press and release were both swallowed, so
             // nothing reaches the app once the grab ends.
-            self.events.push_back(Event::Key(key));
+            self.events.push_back(Event::Key(key, mods));
         }
     }
+}
+
+/// Reads a keymap the compositor sent as a file descriptor. `read_exact_at`
+/// reads from the start without moving the file's position, which the
+/// compositor may share with every other client it sent the keymap to.
+fn read_keymap(fd: OwnedFd, size: u32) -> Option<String> {
+    let mut bytes = vec![0; usize::try_from(size).ok()?];
+    File::from(fd).read_exact_at(&mut bytes, 0).ok()?;
+    // A keymap ends with a C string's closing zero.
+    let text = bytes.split(|&b| b == 0).next()?;
+    String::from_utf8(text.to_vec()).ok()
 }
 
 /// User data for objects whose events don't matter (the input-method
@@ -263,16 +290,27 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
         _: &Connection,
         _: &QueueHandle<State>,
     ) {
-        // The grab also sends a keymap and modifiers; keys are matched by
-        // position, so only the codes matter (Shift is followed by its
-        // codes too, in `State::key`).
-        if let zwp_input_method_keyboard_grab_v2::Event::Key {
-            key,
-            state: WEnum::Value(key_state),
-            ..
-        } = event
-        {
-            state.key(key, key_state == wl_keyboard::KeyState::Pressed);
+        // Keys are matched by position, so tags only need the codes
+        // (modifiers are followed by their codes too, in `State::key`). The
+        // keymap and the lock state are kept for modifier clicks.
+        match event {
+            zwp_input_method_keyboard_grab_v2::Event::Key {
+                key,
+                state: WEnum::Value(key_state),
+                ..
+            } => state.key(key, key_state == wl_keyboard::KeyState::Pressed),
+            zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
+                state.keymap = read_keymap(fd, size);
+            }
+            zwp_input_method_keyboard_grab_v2::Event::Modifiers {
+                mods_locked, group, ..
+            } => {
+                state.locks = Locks {
+                    locked: mods_locked,
+                    group,
+                };
+            }
+            _ => {}
         }
     }
 }
@@ -362,6 +400,17 @@ impl KeyboardHandler for State {
         _: KeyEvent,
     ) {
     }
+    /// The fallback's keymap and lock state, kept as the grab's are.
+    fn update_keymap(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        keymap: Keymap<'_>,
+    ) {
+        self.keymap = Some(keymap.as_string());
+    }
+
     fn update_modifiers(
         &mut self,
         _: &Connection,
@@ -369,9 +418,13 @@ impl KeyboardHandler for State {
         _: &wl_keyboard::WlKeyboard,
         _: u32,
         _: Modifiers,
-        _: RawModifiers,
-        _: u32,
+        raw: RawModifiers,
+        layout: u32,
     ) {
+        self.locks = Locks {
+            locked: raw.locked,
+            group: layout,
+        };
     }
 }
 

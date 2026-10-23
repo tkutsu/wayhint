@@ -5,7 +5,7 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    action::Action,
+    action::{Action, Mods},
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
@@ -20,10 +20,14 @@ const PILL_LIFT: i32 = 48;
 /// How a pick ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
-    /// Do `action` at the target at `index`.
-    Target { index: usize, action: Action },
-    /// Do `action` where the pointer is now (`Space`).
-    Here(Action),
+    /// Do `action` at the target at `index`, with `mods` held.
+    Target {
+        index: usize,
+        action: Action,
+        mods: Mods,
+    },
+    /// Do `action` where the pointer is now (`Space`), with `mods` held.
+    Here { action: Action, mods: Mods },
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
 }
@@ -42,13 +46,13 @@ pub fn pick(
         config.verbs.default_action(),
     );
     if let Some(action) = verb {
-        selector.press(Input::Verb(action));
+        selector.press(Input::Verb(action, Mods::NONE));
     }
     let screen = overlay.monitor().rect;
     overlay.show(&tags(&selector, config, targets, screen))?;
     loop {
         let input = match overlay.next_event()? {
-            Event::Key(key) => match input_of(key, config) {
+            Event::Key(key, mods) => match input_of(key, mods, config) {
                 Some(input) => input,
                 None => continue,
             },
@@ -57,8 +61,18 @@ pub fn pick(
         };
         match selector.press(input) {
             Step::Typing => overlay.update(&tags(&selector, config, targets, screen))?,
-            Step::Picked { index, action } => return Ok(Pick::Target { index, action }),
-            Step::Here(action) => return Ok(Pick::Here(action)),
+            Step::Picked {
+                index,
+                action,
+                mods,
+            } => {
+                return Ok(Pick::Target {
+                    index,
+                    action,
+                    mods,
+                });
+            }
+            Step::Here { action, mods } => return Ok(Pick::Here { action, mods }),
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
         }
@@ -67,18 +81,21 @@ pub fn pick(
 
 /// What a key means: a built-in key, else a verb, else a tag letter, else
 /// nothing. The config keeps verb keys out of the alphabet, so the order of
-/// the last two never decides anything. Shift on a tag letter is kept for
-/// Shift-click (spike test 9); until then it picks like the plain letter.
-fn input_of(key: Key, config: &Config) -> Option<Input> {
+/// the last two never decides anything. A tag letter matches with or
+/// without Shift: Shift on it is a Shift-click, carried in `mods`.
+fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     match key.code {
         KeyCode::ESC => Some(Input::Escape),
         KeyCode::BACKSPACE => Some(Input::Backspace),
-        KeyCode::SPACE => Some(Input::Here),
+        KeyCode::SPACE => Some(Input::Here(mods)),
         code => config
             .verbs
             .action_of(key)
-            .map(Input::Verb)
-            .or_else(|| config.alphabet.index_of(code).map(Input::Letter)),
+            .map(|action| Input::Verb(action, mods))
+            .or_else(|| {
+                let letter = config.alphabet.index_of(code)?;
+                Some(Input::Letter(letter, mods))
+            }),
     }
 }
 
@@ -146,24 +163,33 @@ mod tests {
     #[test]
     fn keys_decode_built_ins_then_verbs_then_letters() {
         let config = Config::parse("[keys]\nhover = \"_\"", || Ok("us".into())).unwrap();
-        let key = |code, shift| Key {
-            code: KeyCode::from_evdev(code),
-            shift,
+        // A key and the modifiers held on it, Shift alone or none.
+        let input = |code, shift| {
+            let key = Key {
+                code: KeyCode::from_evdev(code),
+                shift,
+            };
+            let mods = Mods {
+                shift,
+                ..Mods::NONE
+            };
+            input_of(key, mods, &config)
         };
-        assert_eq!(input_of(key(57, false), &config), Some(Input::Here));
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(input(57, false), Some(Input::Here(Mods::NONE)));
         assert_eq!(
-            input_of(key(19, false), &config),
-            Some(Input::Verb(Action::Right))
+            input(19, false),
+            Some(Input::Verb(Action::Right, Mods::NONE))
         );
+        assert_eq!(input(12, true), Some(Input::Verb(Action::Hover, shift)));
+        assert_eq!(input(12, false), None, "- alone is nothing");
         assert_eq!(
-            input_of(key(12, true), &config),
-            Some(Input::Verb(Action::Hover))
+            input(30, true),
+            Some(Input::Letter(0, shift)),
+            "a Shift-click on a"
         );
-        assert_eq!(
-            input_of(key(12, false), &config),
-            None,
-            "- alone is nothing"
-        );
-        assert_eq!(input_of(key(30, true), &config), Some(Input::Letter(0)));
     }
 }

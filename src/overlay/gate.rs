@@ -11,11 +11,15 @@
 //! The one rule covers keys typed during a scan, a key held across a
 //! redraw, and the keybind's own keys still held when wayhint starts.
 //!
-//! Each press is kept with whether Shift was down at that moment, and the
-//! release hands that back: people often let go of Shift before the key,
-//! and `Shift+-` still meant `_`.
+//! Each press is kept with the modifiers held at that moment, and the
+//! release hands them back: people often let go of Shift before the key,
+//! and `Shift+-` still meant `_`; Ctrl let go a moment early still meant a
+//! Ctrl-click.
 
-use crate::keys::{Key, KeyCode};
+use crate::{
+    action::Mods,
+    keys::{Key, KeyCode},
+};
 
 #[derive(Debug, Default)]
 pub struct KeyGate {
@@ -23,8 +27,8 @@ pub struct KeyGate {
     generation: u32,
     /// The round trip for `generation` has come back.
     armed: bool,
-    /// Keys pressed while armed, not yet released.
-    live: Vec<Key>,
+    /// Keys pressed while armed, not yet released, with their modifiers.
+    live: Vec<(Key, Mods)>,
 }
 
 impl KeyGate {
@@ -44,16 +48,16 @@ impl KeyGate {
         }
     }
 
-    pub fn press(&mut self, key: Key) {
-        if self.armed && !self.live.iter().any(|k| k.code == key.code) {
-            self.live.push(key);
+    pub fn press(&mut self, key: Key, mods: Mods) {
+        if self.armed && !self.live.iter().any(|(k, _)| k.code == key.code) {
+            self.live.push((key, mods));
         }
     }
 
-    /// The key as it was pressed, if this release acts: only if its press
-    /// counted.
-    pub fn release(&mut self, code: KeyCode) -> Option<Key> {
-        let index = self.live.iter().position(|k| k.code == code)?;
+    /// The key and modifiers as they were at the press, if this release
+    /// acts: only if its press counted.
+    pub fn release(&mut self, code: KeyCode) -> Option<(Key, Mods)> {
+        let index = self.live.iter().position(|(k, _)| k.code == code)?;
         Some(self.live.remove(index))
     }
 }
@@ -72,19 +76,24 @@ mod tests {
         let mut gate = KeyGate::default();
         let generation = gate.redrawn();
         gate.synced(generation);
-        gate.press(A);
-        assert_eq!(gate.release(A.code), Some(A));
+        gate.press(A, Mods::NONE);
+        assert_eq!(gate.release(A.code), Some((A, Mods::NONE)));
         assert_eq!(gate.release(A.code), None, "one release per press");
     }
 
     #[test]
-    fn shift_is_what_it_was_at_the_press() {
+    fn modifiers_are_what_they_were_at_the_press() {
         let mut gate = KeyGate::default();
         let generation = gate.redrawn();
         gate.synced(generation);
         let shifted = Key { shift: true, ..A };
-        gate.press(shifted);
-        assert_eq!(gate.release(A.code), Some(shifted));
+        let mods = Mods {
+            shift: true,
+            ctrl: true,
+            alt: false,
+        };
+        gate.press(shifted, mods);
+        assert_eq!(gate.release(A.code), Some((shifted, mods)));
     }
 
     #[test]
@@ -92,7 +101,7 @@ mod tests {
         // A tap queued during the scan: press and release arrive early.
         let mut gate = KeyGate::default();
         let generation = gate.redrawn();
-        gate.press(A);
+        gate.press(A, Mods::NONE);
         gate.synced(generation);
         assert_eq!(gate.release(A.code), None);
     }
@@ -102,7 +111,7 @@ mod tests {
         let mut gate = KeyGate::default();
         let first = gate.redrawn();
         gate.synced(first);
-        gate.press(A);
+        gate.press(A, Mods::NONE);
         let second = gate.redrawn();
         gate.synced(second);
         assert_eq!(
@@ -118,7 +127,7 @@ mod tests {
         let first = gate.redrawn();
         let _second = gate.redrawn();
         gate.synced(first);
-        gate.press(A);
+        gate.press(A, Mods::NONE);
         assert_eq!(gate.release(A.code), None);
     }
 }

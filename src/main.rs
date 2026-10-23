@@ -15,6 +15,7 @@
 //! | `overlay`   | the Wayland surface: draws tags, reads keys              |
 //! | `pick`      | overlay plus selection: choose one target                |
 //! | `pointer`   | the virtual pointer: click, and never leave a button held |
+//! | `keyboard`  | the virtual keyboard: modifiers held around a click      |
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
 //! | `dump`      | `wayhint dump`, printing each seam as JSON               |
 
@@ -24,6 +25,7 @@ mod config;
 mod desktop;
 mod dump;
 mod geometry;
+mod keyboard;
 mod keys;
 mod overlay;
 mod pick;
@@ -98,14 +100,16 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         overlay.keyboard_mode()
     );
     match pick::pick(&mut overlay, config, &snapshot.targets, None)? {
-        Pick::Target { index, action } => {
+        Pick::Target { index, action, .. } => {
             eprintln!("wayhint: {} on", action.name());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&snapshot.targets[index])?
             );
         }
-        Pick::Here(action) => eprintln!("wayhint: {} where the pointer is", action.name()),
+        Pick::Here { action, .. } => {
+            eprintln!("wayhint: {} where the pointer is", action.name());
+        }
         Pick::Leave => {}
     }
     Ok(())
