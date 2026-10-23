@@ -82,9 +82,9 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> 
     } else if fresh.role != target.role || fresh.name != target.name {
         Some(Why::Replaced)
     } else if !now.near(target.rect, TOLERANCE) || !now.contains(target.hit) {
-        // The hit point is the middle of the part that showed, so on a
-        // clipped box it can sit a pixel from the edge: a move the
-        // tolerance allows can still leave it outside.
+        // The hit point is the middle of the part that showed, which the
+        // filter lets be 4 px wide: 2 px from an edge, as far as the
+        // tolerance lets a box move. So the box must still hold it.
         Some(Why::Moved)
     } else if !window.contains(target.hit) {
         Some(Why::Outside)
