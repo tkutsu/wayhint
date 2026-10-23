@@ -45,9 +45,12 @@ use tiny_skia::Pixmap;
 
 use crate::{
     action::Mods,
-    keyboard::{Locks, held, read_keymap},
+    keyboard::{Keyboard, Locks, held, read_keymap},
     keys::{Key, KeyCode},
-    overlay::{Event, draw, gate::KeyGate},
+    overlay::{
+        Event, draw,
+        gate::{KeyGate, Seen},
+    },
 };
 
 /// How keys reach wayhint right now.
@@ -79,6 +82,12 @@ pub struct State {
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub grab: Grab,
     pub gate: KeyGate,
+    /// The keys this grab saw go down, to tell the app's releases apart.
+    pub seen: Seen,
+    /// Passes the app what the input-method grab takes from it and wayhint
+    /// doesn't use (see `keyboard.rs`). Made before the first grab, so a
+    /// key let go the moment the grab starts still reaches the app.
+    pub passthrough: Option<Keyboard>,
     /// The modifiers held right now, as the compositor last reported them.
     pub held: Mods,
     /// The real keyboard's keymap as xkb text, and its locks and layout,
@@ -106,6 +115,7 @@ impl State {
         // across the click included (Hyprland sends `modifiers` with the
         // keymap). Until then none, so one let go meanwhile can't stick.
         self.held = Mods::NONE;
+        self.seen = Seen::default();
         if let (Some(manager), Some(seat)) = (&self.input_methods, self.seat()) {
             let method = manager.get_input_method(&seat, qh, ImeEvents);
             let grab = method.grab_keyboard(qh, ImeEvents);
@@ -172,16 +182,25 @@ impl State {
     }
 
     /// Modifier keys come through here too, as keys nothing in the config
-    /// is, so `pick` skips them; what they hold arrives as `modifiers`.
+    /// is, so `pick` skips them; what they hold arrives as `modifiers`. The
+    /// release of a key pressed before the grab goes on to the app.
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
         if pressed {
+            self.seen.press(code);
             let key = Key {
                 code,
                 shift: self.held.shift,
             };
             self.gate.press(key, self.held);
-        } else if let Some((key, mods)) = self.gate.release(code) {
+            return;
+        }
+        if self.seen.release(code)
+            && let Some(passthrough) = &self.passthrough
+        {
+            passthrough.release(code);
+        }
+        if let Some((key, mods)) = self.gate.release(code) {
             // Acting on release: press and release were both swallowed, so
             // nothing reaches the app once the grab ends.
             self.events.push_back(Event::Key(key, mods));
@@ -253,6 +272,8 @@ impl Dispatch2<ZwpInputMethodV2, State> for ImeEvents {
             );
             state.release_keys();
             state.input_methods = None;
+            // Focus moves now, and the app is caught up when it comes back.
+            state.passthrough = None;
             state.take_focus(qh);
         }
     }
@@ -291,6 +312,11 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
                     locked: mods_locked,
                     group,
                 };
+                // The app hears them as it would without the grab, so a
+                // Super let go here is let go there too.
+                if let Some(passthrough) = &state.passthrough {
+                    passthrough.modifiers(mods_depressed, mods_latched, state.locks);
+                }
             }
             _ => {}
         }

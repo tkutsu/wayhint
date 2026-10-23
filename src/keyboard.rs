@@ -16,6 +16,15 @@
 //! [`Keyboard::release_all`]; `Drop` calls it too, as a backstop. A Ctrl
 //! left held makes every later click on the desktop a Ctrl-click.
 //!
+//! The overlay keeps one more, to pass the app what its input-method grab
+//! takes and wayhint doesn't use: modifier changes, and the release of a
+//! key pressed before the grab ([`Keyboard::modifiers`], [`Keyboard::release`]).
+//! Hyprland hands a grab every key and modifier and the app none, and
+//! doesn't catch the app up when the grab ends. Without this, Super from
+//! the SUPER+W that started wayhint stayed held in the app, and every
+//! click was a Super-click until the next real modifier, wayhint's own and
+//! the mouse's after it exited (2026-10-23: a YouTube video took no click).
+//!
 //! The real keyboard's keymap is read here too: [`seat_keymap`] asks for it
 //! before anything else, and the config is decoded with it.
 
@@ -161,6 +170,20 @@ impl Keyboard {
         }
         let Locks { locked, group } = self.locks;
         self.device.modifiers(0, 0, locked, group);
+        let _ = self.conn.flush();
+    }
+
+    /// Tells the app the key at `code` is up. For a key it saw go down
+    /// before the grab, whose release the grab took.
+    pub fn release(&self, code: KeyCode) {
+        self.device.key(now(), code.evdev(), RELEASED);
+        let _ = self.conn.flush();
+    }
+
+    /// Tells the app what the real keyboard holds, as the grab heard it.
+    pub fn modifiers(&self, depressed: u32, latched: u32, locks: Locks) {
+        self.device
+            .modifiers(depressed, latched, locks.locked, locks.group);
         let _ = self.conn.flush();
     }
 }

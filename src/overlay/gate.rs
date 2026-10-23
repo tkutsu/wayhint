@@ -15,6 +15,8 @@
 //! release hands them back: people often let go of Shift before the key,
 //! and `Shift+-` still meant `_`; Ctrl let go a moment early still meant a
 //! Ctrl-click.
+//!
+//! [`Seen`] answers the other side: which releases belong to the app.
 
 use crate::{
     action::Mods,
@@ -59,6 +61,33 @@ impl KeyGate {
     pub fn release(&mut self, code: KeyCode) -> Option<(Key, Mods)> {
         let index = self.live.iter().position(|(k, _)| k.code == code)?;
         Some(self.live.remove(index))
+    }
+}
+
+/// The keys a grab has seen go down, counted or not. Any other key let go
+/// in the grab went down before it: the app saw that press, the grab took
+/// the release, and the app holds the key until it's told. Super, from the
+/// keybind that started wayhint, is the usual one.
+#[derive(Debug, Default)]
+pub struct Seen(Vec<KeyCode>);
+
+impl Seen {
+    pub fn press(&mut self, code: KeyCode) {
+        if !self.0.contains(&code) {
+            self.0.push(code);
+        }
+    }
+
+    /// Whether this release is the app's: true when its press came before
+    /// the grab.
+    pub fn release(&mut self, code: KeyCode) -> bool {
+        match self.0.iter().position(|&c| c == code) {
+            Some(index) => {
+                self.0.swap_remove(index);
+                false
+            }
+            None => true,
+        }
     }
 }
 
@@ -119,6 +148,17 @@ mod tests {
             None,
             "its press was aimed at the old tags"
         );
+    }
+
+    #[test]
+    fn a_release_whose_press_came_before_the_grab_is_the_apps() {
+        // SUPER+W: Super went down before the grab, and is let go in it.
+        let super_key = KeyCode::from_evdev(125);
+        let mut seen = Seen::default();
+        seen.press(A.code);
+        assert!(seen.release(super_key), "the app saw Super go down");
+        assert!(!seen.release(A.code), "the grab saw A go down");
+        assert!(seen.release(A.code), "a second release is no press of ours");
     }
 
     #[test]
