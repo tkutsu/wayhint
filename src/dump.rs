@@ -34,7 +34,7 @@ pub fn run(args: &Dump) -> Result<()> {
         });
     }
     let filtered = filter::filter(&tree);
-    let snapshot = Snapshot::build(1, &tree, &filtered, stats);
+    let snapshot = Snapshot::build(1, window.monitor, [(&tree, &filtered, &stats)]);
     if !args.explain {
         return print(&snapshot);
     }

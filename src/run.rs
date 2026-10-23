@@ -1,11 +1,14 @@
 //! The first release: one straight loop, in one thread.
 //!
 //! ```text
-//! focused window -> scan -> tags -> keys -> re-check -> act -> settle --+
-//!      ^                                                                |
-//!      +----------------------------------------------------------------+
+//! windows shown -> scan -> tags -> keys -> re-check -> act -> settle --+
+//!      ^                                                               |
+//!      +---------------------------------------------------------------+
 //! Esc, Ctrl+C, --once or a click on a text field -> clean up -> exit
 //! ```
+//!
+//! Every window the focused monitor shows gets tags, not just the focused
+//! one, except where another window covers them.
 //!
 //! The keys pick a target and a verb (`[verb] tag`), or a verb and the
 //! spot under the pointer (`[verb] Space`), which skips the re-check.
@@ -25,7 +28,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     action::{Action, Mods},
     config::{After, Config},
-    desktop::{self, Desktop, Monitor, Verdict, tree::ObjectId},
+    desktop::{self, Desktop, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
@@ -71,9 +74,11 @@ enum Done {
 
 /// The run: `verb` (from `--verb`) arms the first pick.
 pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
-    let window = desktop::focused_window()?.context("no window has focus")?;
     let monitors = desktop::monitors()?;
-    let monitor = monitor_of(&monitors, window.monitor)?;
+    let monitor = monitors
+        .iter()
+        .find(|m| m.focused)
+        .context("no monitor has focus")?;
     let outputs = Rect::bounding(monitors.iter().map(|m| m.rect)).context("no monitors")?;
 
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
@@ -100,22 +105,10 @@ impl Session {
         loop {
             // No tags while scanning: nothing stale can be typed.
             self.overlay.clear()?;
-            let window = desktop::focused_window()?.context("no window has focus")?;
-            if window.monitor != self.overlay.monitor().id {
-                bail!("focus moved to another monitor; run wayhint again there");
-            }
-            let snapshot = self.desktop.scan(&window)?;
-            if let Some(why) = &snapshot.stats.incomplete {
-                eprintln!(
-                    "wayhint: scan of {} incomplete ({why}); some targets may be missing",
-                    window.class
-                );
-            }
-            // An error, not a quiet exit: from a keybind, it's the only way
-            // you learn why no tags came (`main` puts errors on screen).
-            if snapshot.targets.is_empty() {
-                bail!("nothing to click in {} ({})", window.class, window.title);
-            }
+            let monitor = self.overlay.monitor();
+            let stack = desktop::stack(monitor.id)?;
+            let (snapshot, unread) = self.desktop.scan(&stack, monitor);
+            report(&snapshot, &unread)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
             // later rounds start with the default action again.
@@ -278,11 +271,29 @@ impl Session {
     }
 }
 
-fn monitor_of(monitors: &[Monitor], id: i64) -> Result<&Monitor> {
-    monitors
-        .iter()
-        .find(|m| m.id == id)
-        .with_context(|| format!("the focused window's monitor ({id}) is gone"))
+/// Says what a scan missed: windows it couldn't read (`unread`) and scans
+/// cut short. With nothing to click it's an error, not a quiet exit: from
+/// a keybind, that's the only way you learn why no tags came (`main` puts
+/// errors on screen), and a lone terminal says why there: it isn't on the
+/// bus.
+fn report(snapshot: &Snapshot, unread: &[anyhow::Error]) -> Result<()> {
+    if snapshot.targets.is_empty() {
+        let mut why = vec!["nothing to click on this workspace".to_string()];
+        why.extend(unread.iter().map(|e| format!("{e:#}")));
+        bail!("{}", why.join("; "));
+    }
+    for e in unread {
+        eprintln!("wayhint: no tags in {e:#}");
+    }
+    for scanned in &snapshot.windows {
+        if let Some(why) = &scanned.stats.incomplete {
+            eprintln!(
+                "wayhint: scan of {} incomplete ({why}); some targets may be missing",
+                scanned.window.class
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `wayhint click --at X,Y`: the pointer alone, one action.

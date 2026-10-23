@@ -93,11 +93,15 @@ impl Scanner {
         Ok(Self { a11y })
     }
 
-    /// Reads one window's tree within `bounds`.
+    /// Reads one window's tree within `bounds`. Its errors start with the
+    /// window's class, since a run reads several at once.
     pub async fn scan(&self, window: &Window, bounds: Bounds) -> Result<(Tree, Stats)> {
         let started = Instant::now();
         let walk = Walk::new(self.a11y.connection(), started + bounds.time);
-        let frame = walk.find_frame(&self.a11y, window).await?;
+        let frame = walk
+            .find_frame(&self.a11y, window)
+            .await
+            .with_context(|| window.class.clone())?;
         let nodes = walk.read_tree(frame, window.rect, bounds.nodes).await;
         let mut tree = Tree {
             window: window.clone(),
@@ -214,9 +218,8 @@ impl<'c> Walk<'c> {
         }
         let app = app.with_context(|| {
             format!(
-                "{} (pid {}) isn't on the accessibility bus, so wayhint can't see its \
-                 controls (run from a terminal, wayhint tags that terminal)",
-                window.class, window.pid
+                "pid {} isn't on the accessibility bus, so wayhint can't see its controls",
+                window.pid
             )
         })?;
 
@@ -233,8 +236,7 @@ impl<'c> Walk<'c> {
             .map(|(id, _, _)| id.clone())
             .with_context(|| {
                 format!(
-                    "{} has {} windows and none is clearly {:?}",
-                    window.class,
+                    "{} windows and none is clearly {:?}",
                     frames.len(),
                     window.title
                 )

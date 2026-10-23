@@ -36,8 +36,8 @@ pub enum Verdict {
 pub enum Why {
     /// The object no longer answers.
     Gone,
-    /// Another window has focus now.
-    Unfocused,
+    /// Its window is gone, or another window is over the spot now.
+    Covered,
     Hidden,
     Disabled,
     /// Different role or name: the path now names something else.
@@ -53,7 +53,7 @@ impl fmt::Display for Why {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Gone => "it's gone",
-            Self::Unfocused => "its window lost focus",
+            Self::Covered => "its window is gone or covered",
             Self::Hidden => "it's hidden now",
             Self::Disabled => "it's disabled now",
             Self::Replaced => "something else is there now",
@@ -64,12 +64,13 @@ impl fmt::Display for Why {
 }
 
 /// `fresh` is `None` when the read failed; `window` is the window's box
-/// now, in global coordinates, `None` if it lost focus. Its origin puts the
-/// fresh box in global coordinates too, so a moved window counts as moved.
+/// now, in global coordinates, `None` if it's gone or something covers the
+/// target (see `hyprland::uncovered`). Its origin puts the fresh box in
+/// global coordinates too, so a moved window counts as moved.
 pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> Verdict {
     // `let ... else` names the happy path and leaves early otherwise.
     let Some(window) = window else {
-        return Verdict::Refuse(Why::Unfocused);
+        return Verdict::Refuse(Why::Covered);
     };
     let Some(fresh) = fresh else {
         return Verdict::Refuse(Why::Gone);
@@ -113,6 +114,7 @@ mod tests {
                 bus: ":1.7".into(),
                 path: "/ok".into(),
             },
+            window: 0,
             rect: Rect::new(110, 60, 80, 30),
             hit: Point::new(150, 75),
             role: "button".into(),
@@ -190,12 +192,12 @@ mod tests {
     }
 
     #[test]
-    fn vanished_hidden_disabled_replaced_unfocused() {
+    fn vanished_hidden_disabled_replaced_covered() {
         let t = target();
         assert_eq!(verdict(&t, None, Some(WINDOW)), Verdict::Refuse(Why::Gone));
         assert_eq!(
             verdict(&t, Some(&fresh()), None),
-            Verdict::Refuse(Why::Unfocused)
+            Verdict::Refuse(Why::Covered)
         );
         let mut hidden = fresh();
         hidden.states.showing = false;
