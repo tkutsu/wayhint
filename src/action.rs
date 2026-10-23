@@ -54,6 +54,38 @@ impl Action {
     }
 }
 
+/// Modifiers held through a click: Shift-click, Ctrl-click, Alt-click, or
+/// any mix. Held on a tag's last letter (or on `Space`), they go to the app
+/// through a virtual keyboard around the click.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+impl Mods {
+    pub const NONE: Self = Self {
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        !self.shift && !self.ctrl && !self.alt
+    }
+
+    /// Both sets together: Ctrl held with Shift is both.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            shift: self.shift || other.shift,
+            ctrl: self.ctrl || other.ctrl,
+            alt: self.alt || other.alt,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

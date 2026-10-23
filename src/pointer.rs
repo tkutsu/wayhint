@@ -56,8 +56,9 @@ const fn presses(action: Action) -> (u32, u32) {
 }
 
 /// The pointer's own event queue needs a state type. None of these objects
-/// sends anything wayhint reads, so it's empty.
-struct Quiet;
+/// sends anything wayhint reads, so it's empty. The virtual keyboard uses
+/// it too.
+pub struct Quiet;
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Quiet {
     fn event(
@@ -108,8 +109,9 @@ impl Pointer {
         })
     }
 
-    /// Does `action` at `at`, then moves the cursor to `back_to` if given.
-    pub fn act(&mut self, action: Action, at: Point, back_to: Option<Point>) -> Result<()> {
+    /// Moves to `at` and does `action` there. The cursor stays; put it back
+    /// with [`Pointer::put_back`], after letting go of any modifiers.
+    pub fn act(&mut self, action: Action, at: Point) -> Result<()> {
         self.move_to(at)?;
         sleep(ARRIVE);
         let (button, count) = presses(action);
@@ -121,14 +123,22 @@ impl Pointer {
             sleep(PRESS);
             self.button(button, false)?;
         }
-        if let Some(back) = back_to {
-            sleep(ARRIVE);
-            self.move_to(back)?;
-        }
-        // Wait until the compositor has handled all of it. Without this, a
-        // process that exits right after (`click --at`, `--once`) closes the
-        // connection with the last motion unprocessed, and Hyprland drops it:
-        // the cursor stayed on the button (found 2026-10-22).
+        self.handled()
+    }
+
+    /// Moves the cursor to `to` after a pause, so the app sees the click
+    /// end before the pointer leaves.
+    pub fn put_back(&mut self, to: Point) -> Result<()> {
+        sleep(ARRIVE);
+        self.move_to(to)?;
+        self.handled()
+    }
+
+    /// Waits until the compositor has handled everything sent. Without
+    /// this, a process that exits right after (`click --at`, `--once`)
+    /// closes the connection with the last motion unprocessed, and Hyprland
+    /// drops it: the cursor stayed on the button (found 2026-10-22).
+    fn handled(&self) -> Result<()> {
         self.conn.roundtrip()?;
         Ok(())
     }

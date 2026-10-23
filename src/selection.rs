@@ -1,5 +1,5 @@
 //! Tags and typing them. Pure: no keys, screens or targets, only numbers
-//! and the [`Action`] a pick carries.
+//! and the [`Action`] and [`Mods`] a pick carries.
 //!
 //! A label is a list of letter indices into the alphabet (`[0]` is the
 //! first letter, `[8, 2]` the ninth then the third), so this module never
@@ -7,7 +7,7 @@
 //! turns key presses into [`Input`]s and draws whatever [`Selector`] says
 //! is still possible.
 
-use crate::action::Action;
+use crate::action::{Action, Mods};
 
 /// Labels for `count` targets from an alphabet of `size` letters.
 ///
@@ -45,15 +45,16 @@ pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     labels
 }
 
-/// One thing the user did, already decoded from a key.
+/// One thing the user did, already decoded from a key, with the modifiers
+/// held on that key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
     /// A tag letter, by its index in the alphabet.
-    Letter(usize),
+    Letter(usize, Mods),
     /// A verb key: the next tag gets this action instead of the default.
-    Verb(Action),
+    Verb(Action, Mods),
     /// `Space`: act where the pointer already is, no tag.
-    Here,
+    Here(Mods),
     Backspace,
     Escape,
 }
@@ -63,10 +64,15 @@ pub enum Input {
 pub enum Step {
     /// Still typing: redraw, showing only the labels that match.
     Typing,
-    /// A whole label was typed: do `action` at this target, by index.
-    Picked { index: usize, action: Action },
-    /// `Space`: do `action` where the pointer is.
-    Here(Action),
+    /// A whole label was typed: do `action` at this target, by index,
+    /// with `mods` held.
+    Picked {
+        index: usize,
+        action: Action,
+        mods: Mods,
+    },
+    /// `Space`: do `action` where the pointer is, with `mods` held.
+    Here { action: Action, mods: Mods },
     /// A letter no label continues with. Nothing changes, nothing runs.
     Ignored,
     /// `Esc` with nothing typed or armed: leave.
@@ -85,6 +91,8 @@ pub struct Selector {
     /// The action a bare tag does: the config's `""` verb.
     default: Action,
     armed: Option<Action>,
+    /// The armed verb's key needed Shift (`_` is Shift and `-`).
+    armed_shifted: bool,
 }
 
 impl Selector {
@@ -94,6 +102,7 @@ impl Selector {
             typed: Vec::new(),
             default,
             armed: None,
+            armed_shifted: false,
         }
     }
 
@@ -117,6 +126,24 @@ impl Selector {
         self.armed.unwrap_or(self.default)
     }
 
+    /// The modifiers a pick holds: those on its last key, except a Shift
+    /// that may be left over from a shifted verb. Typing `_` then a tag
+    /// fast, Shift is often still down on the tag, and that's no
+    /// Shift-click. The cost: a shifted verb can't Shift-click.
+    fn mods(&self, held: Mods) -> Mods {
+        Mods {
+            shift: held.shift && !self.armed_shifted,
+            ..held
+        }
+    }
+
+    /// Starts the next command: nothing typed, nothing armed.
+    fn reset(&mut self) {
+        self.typed.clear();
+        self.armed = None;
+        self.armed_shifted = false;
+    }
+
     /// Whether a label is still possible: it starts with what's typed.
     pub fn matches(&self, label: &[usize]) -> bool {
         label.starts_with(&self.typed)
@@ -127,14 +154,17 @@ impl Selector {
     /// until it says what the new one does.
     pub fn press(&mut self, input: Input) -> Step {
         match input {
-            Input::Letter(letter) => {
+            Input::Letter(letter, held) => {
                 let mut next = self.typed.clone();
                 next.push(letter);
                 if let Some(index) = self.labels.iter().position(|l| *l == next) {
-                    let action = self.action();
-                    self.typed.clear();
-                    self.armed = None;
-                    Step::Picked { index, action }
+                    let (action, mods) = (self.action(), self.mods(held));
+                    self.reset();
+                    Step::Picked {
+                        index,
+                        action,
+                        mods,
+                    }
                 } else if self.labels.iter().any(|l| l.starts_with(&next)) {
                     self.typed = next;
                     Step::Typing
@@ -145,28 +175,27 @@ impl Selector {
             // A verb starts the command over: a second verb replaces the
             // first, so a wrong one needs no Backspace, and letters typed
             // before it are dropped (verbs come before the tag).
-            Input::Verb(action) => {
+            Input::Verb(action, held) => {
                 self.typed.clear();
                 self.armed = Some(action);
+                self.armed_shifted = held.shift;
                 Step::Typing
             }
-            Input::Here => {
-                let action = self.action();
-                self.typed.clear();
-                self.armed = None;
-                Step::Here(action)
+            Input::Here(held) => {
+                let (action, mods) = (self.action(), self.mods(held));
+                self.reset();
+                Step::Here { action, mods }
             }
             // Backspace takes back the last key: a letter, else the verb.
             Input::Backspace => {
                 if self.typed.pop().is_none() {
-                    self.armed = None;
+                    self.reset();
                 }
                 Step::Typing
             }
             // Esc clears what's typed and armed first; only a second Esc leaves.
             Input::Escape if !self.typed.is_empty() || self.armed.is_some() => {
-                self.typed.clear();
-                self.armed = None;
+                self.reset();
                 Step::Typing
             }
             Input::Escape => Step::Exit,
@@ -214,25 +243,47 @@ mod tests {
     }
 
     const fn picked(index: usize, action: Action) -> Step {
-        Step::Picked { index, action }
+        Step::Picked {
+            index,
+            action,
+            mods: Mods::NONE,
+        }
     }
+
+    /// Keys with nothing held, to keep the tests short.
+    const fn letter(index: usize) -> Input {
+        Input::Letter(index, Mods::NONE)
+    }
+
+    const fn verb(action: Action) -> Input {
+        Input::Verb(action, Mods::NONE)
+    }
+
+    const SHIFT: Mods = Mods {
+        shift: true,
+        ..Mods::NONE
+    };
+    const CTRL: Mods = Mods {
+        ctrl: true,
+        ..Mods::NONE
+    };
 
     #[test]
     fn typing_a_label_picks_it() {
         let mut s = five();
-        assert_eq!(s.press(Input::Letter(3)), Step::Typing, "f is a prefix");
+        assert_eq!(s.press(letter(3)), Step::Typing, "f is a prefix");
         assert!(s.matches(&[3, 0]) && !s.matches(&[0]));
-        assert_eq!(s.press(Input::Letter(1)), picked(4, Action::Left), "fs");
+        assert_eq!(s.press(letter(1)), picked(4, Action::Left), "fs");
         assert_eq!(s.typed(), [0; 0], "a pick starts over");
     }
 
     #[test]
     fn backspace_and_escape_step_back() {
         let mut s = five();
-        s.press(Input::Letter(3));
+        s.press(letter(3));
         assert_eq!(s.press(Input::Backspace), Step::Typing);
         assert_eq!(s.typed(), [0; 0]);
-        s.press(Input::Letter(3));
+        s.press(letter(3));
         assert_eq!(s.press(Input::Escape), Step::Typing, "first Esc clears");
         assert_eq!(s.press(Input::Escape), Step::Exit, "second Esc leaves");
     }
@@ -240,32 +291,32 @@ mod tests {
     #[test]
     fn a_verb_applies_to_the_next_pick_only() {
         let mut s = five();
-        s.press(Input::Verb(Action::Right));
+        s.press(verb(Action::Right));
         assert_eq!(s.armed(), Some(Action::Right));
-        assert_eq!(s.press(Input::Letter(0)), picked(0, Action::Right));
+        assert_eq!(s.press(letter(0)), picked(0, Action::Right));
         assert_eq!(s.armed(), None, "the next tag is a bare one again");
-        assert_eq!(s.press(Input::Letter(0)), picked(0, Action::Left));
+        assert_eq!(s.press(letter(0)), picked(0, Action::Left));
     }
 
     #[test]
     fn a_second_verb_replaces_the_first_and_clears_letters() {
         let mut s = five();
-        s.press(Input::Verb(Action::Right));
-        s.press(Input::Letter(3));
-        s.press(Input::Verb(Action::Double));
+        s.press(verb(Action::Right));
+        s.press(letter(3));
+        s.press(verb(Action::Double));
         assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[][..]));
     }
 
     #[test]
     fn backspace_takes_the_letter_then_the_verb() {
         let mut s = five();
-        s.press(Input::Verb(Action::Hover));
-        s.press(Input::Letter(3));
+        s.press(verb(Action::Hover));
+        s.press(letter(3));
         s.press(Input::Backspace);
         assert_eq!(s.armed(), Some(Action::Hover), "the letter went first");
         s.press(Input::Backspace);
         assert_eq!(s.armed(), None);
-        s.press(Input::Verb(Action::Hover));
+        s.press(verb(Action::Hover));
         assert_eq!(s.press(Input::Escape), Step::Typing, "Esc disarms first");
         assert_eq!(s.press(Input::Escape), Step::Exit);
     }
@@ -273,21 +324,64 @@ mod tests {
     #[test]
     fn space_acts_where_the_pointer_is() {
         let mut s = five();
-        assert_eq!(s.press(Input::Here), Step::Here(Action::Left));
-        s.press(Input::Verb(Action::Middle));
-        assert_eq!(s.press(Input::Here), Step::Here(Action::Middle));
+        let here = |action, mods| Step::Here { action, mods };
+        assert_eq!(
+            s.press(Input::Here(Mods::NONE)),
+            here(Action::Left, Mods::NONE)
+        );
+        s.press(verb(Action::Middle));
+        assert_eq!(s.press(Input::Here(CTRL)), here(Action::Middle, CTRL));
         assert_eq!(s.armed(), None);
+    }
+
+    #[test]
+    fn modifiers_on_the_last_letter_go_with_the_pick() {
+        let mut s = five();
+        s.press(Input::Letter(3, CTRL));
+        let step = s.press(Input::Letter(1, SHIFT));
+        assert_eq!(
+            step,
+            Step::Picked {
+                index: 4,
+                action: Action::Left,
+                mods: SHIFT
+            },
+            "only the last letter's count"
+        );
+    }
+
+    #[test]
+    fn shift_left_over_from_a_shifted_verb_is_dropped() {
+        let mut s = five();
+        s.press(Input::Verb(Action::Double, SHIFT));
+        let both = Mods {
+            ctrl: true,
+            ..SHIFT
+        };
+        assert_eq!(
+            s.press(Input::Letter(0, both)),
+            Step::Picked {
+                index: 0,
+                action: Action::Double,
+                mods: CTRL
+            }
+        );
+        assert_eq!(
+            s.press(Input::Letter(0, SHIFT)),
+            Step::Picked {
+                index: 0,
+                action: Action::Left,
+                mods: SHIFT
+            },
+            "the next command starts clean"
+        );
     }
 
     #[test]
     fn a_letter_no_label_continues_is_ignored() {
         let mut s = five();
-        s.press(Input::Letter(3));
-        assert_eq!(
-            s.press(Input::Letter(3)),
-            Step::Ignored,
-            "no ff with 5 targets"
-        );
+        s.press(letter(3));
+        assert_eq!(s.press(letter(3)), Step::Ignored, "no ff with 5 targets");
         assert_eq!(s.typed(), [3], "the prefix stays");
     }
 

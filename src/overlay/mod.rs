@@ -45,14 +45,18 @@ use self::{
     draw::Painter,
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
-use crate::{desktop::Monitor, geometry::Point, keys::Key, style::Style};
+use crate::{
+    action::Mods, desktop::Monitor, geometry::Point, keyboard::Locks, keys::Key, style::Style,
+};
 
 /// Something the run loop has to react to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// A key was released, and its press counted (see `gate.rs`). Shift
-    /// is part of it, as it was at the press; Shift alone is never one.
-    Key(Key),
+    /// A key was released, and its press counted (see `gate.rs`), with
+    /// the modifiers held at its press; a modifier alone is never one.
+    /// Shift is in both: in the [`Key`], because `_` and `-` are different
+    /// keys to the config, and in the [`Mods`], for a Shift-click.
+    Key(Key, Mods),
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
     /// The compositor closed the overlay (its monitor went away).
@@ -102,7 +106,9 @@ impl Overlay {
             keyboard: None,
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
-            shifts: Vec::new(),
+            modifiers: Vec::new(),
+            keymap: None,
+            locks: Locks::default(),
             events: VecDeque::new(),
             answered: false,
         };
@@ -181,6 +187,16 @@ impl Overlay {
         matches!(self.state.grab, Grab::InputMethod { .. })
     }
 
+    /// The real keyboard's keymap, once the grab (or focus) has sent it.
+    pub fn keymap(&self) -> Option<&str> {
+        self.state.keymap.as_deref()
+    }
+
+    /// The real keyboard's locks and layout, as last reported.
+    pub fn locks(&self) -> Locks {
+        self.state.locks
+    }
+
     /// Draws a new set of `tags` (their points in global coordinates) and
     /// starts accepting keys for them once the compositor confirms the
     /// frame: every key pressed before that was aimed at something else.
@@ -223,7 +239,7 @@ impl Overlay {
     /// aimed at the old tags. Two taps can arrive in one read; after the
     /// first picks a target, the second would pick from the next scan.
     fn new_tags(&mut self) -> u32 {
-        self.state.events.retain(|e| !matches!(e, Event::Key(_)));
+        self.state.events.retain(|e| !matches!(e, Event::Key(..)));
         self.state.gate.redrawn()
     }
 
