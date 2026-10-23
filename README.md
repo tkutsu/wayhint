@@ -66,6 +66,10 @@ your typing goes to the field. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
 go straight to right-clicking.
 
+When a run started from a keybind fails, or finds nothing to click, the
+reason shows as a Hyprland notification. From a terminal it's printed
+instead.
+
 `wayhint dump` prints what wayhint sees in the focused window as JSON, and
 `wayhint dump --explain` adds every control it left out and why. The output
 can contain private text from your windows.
@@ -73,12 +77,12 @@ can contain private text from your windows.
 ## Configuration
 
 `~/.config/wayhint/config.toml`. Every key is optional; `wayhint config`
-prints the settings in effect.
+prints the settings in effect, as a file you can save and edit to start
+one.
 
 ```toml
 [keys]
 alphabet = "ciaehtns"   # tag letters, most used first; default: the home row
-# layout = "us"         # layout the letters are written in; default: Hyprland's first
 
 right = ""              # "" makes this what a bare tag does (default: left)
 left = "."              # every other verb gets a key: one character or a name
@@ -101,9 +105,12 @@ background = "#1e1e2ef0"
 border = "#d0d0d0ff"
 ```
 
-Keys are matched by position, so switching to a second layout does not
-change the tags. The first layout, the one the config is written in, must
-be a Latin one (US, Colemak, AZERTY and so on); the second can be any.
+Keys are read with your keyboard's own keymap, the one the compositor
+gives every app, so a custom layout or a keymap file (Hyprland's
+`kb_file`) needs no setting. The config is written in its first layout,
+which must be a Latin one (US, Colemak, AZERTY and so on). Keys are matched
+by position, so switching to a second layout, in any script, does not
+change the tags.
 
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that

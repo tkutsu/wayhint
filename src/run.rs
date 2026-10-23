@@ -111,12 +111,10 @@ impl Session {
                     window.class
                 );
             }
+            // An error, not a quiet exit: from a keybind, it's the only way
+            // you learn why no tags came (`main` puts errors on screen).
             if snapshot.targets.is_empty() {
-                eprintln!(
-                    "wayhint: nothing to click in {} ({})",
-                    window.class, window.title
-                );
-                return Ok(());
+                bail!("nothing to click in {} ({})", window.class, window.title);
             }
 
             // `take` hands `--verb` to the first pick and leaves `None`, so

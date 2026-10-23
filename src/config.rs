@@ -41,8 +41,6 @@ struct File {
 struct FileKeys {
     /// Tag letters in priority order, as the first layout prints them.
     alphabet: Option<String>,
-    /// xkb layout to decode keys with; unset means Hyprland's first.
-    layout: Option<String>,
     /// Other keys that count as an alphabet letter: `";" = "c"`.
     aliases: BTreeMap<String, String>,
     // One field per verb: a key as written (`"."`, `"Home"`), or `""` for
@@ -123,7 +121,8 @@ const BUILT_IN: [KeyCode; 5] = [
 pub struct Config {
     pub alphabet: Alphabet,
     pub verbs: Verbs,
-    /// The layout the keys were decoded with, for `wayhint config`.
+    /// The name of the layout the keys were decoded with ("English (US)"),
+    /// for `wayhint config`.
     pub layout: String,
     pub style: Style,
     pub after: After,
@@ -464,37 +463,25 @@ fn decode_unshifted(ch: char, layout: &Layout) -> Result<KeyCode> {
 impl Config {
     /// Reads the file at `explicit`, or the default path if there is one.
     /// A missing default file is fine (all defaults); a missing explicit one
-    /// is an error. `first_layout` is only called when the file doesn't name
-    /// a layout, so a config with `layout = "us"` never asks Hyprland.
-    pub fn load(
-        explicit: Option<&Path>,
-        first_layout: impl FnOnce() -> Result<String>,
-    ) -> Result<Self> {
+    /// is an error. Keys are decoded with `layout`, your keyboard's first.
+    pub fn load(explicit: Option<&Path>, layout: &Layout) -> Result<Self> {
         let path = match explicit {
             Some(path) => path.to_path_buf(),
             None => match default_path() {
                 Some(path) if path.exists() => path,
-                _ => return Self::parse("", first_layout),
+                _ => return Self::parse("", layout),
             },
         };
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        Self::parse(&text, first_layout).with_context(|| format!("config {}", path.display()))
+        Self::parse(&text, layout).with_context(|| format!("config {}", path.display()))
     }
 
     /// Parses and validates config text. Separate from `load` so tests need
     /// no files.
-    pub fn parse(text: &str, first_layout: impl FnOnce() -> Result<String>) -> Result<Self> {
-        let mut file: File = toml::from_str(text)?;
-        // `take` moves the name out and leaves `None`, so `file.keys` stays
-        // whole for the verbs below to borrow.
-        let layout_name = match file.keys.layout.take() {
-            Some(name) => name,
-            None => first_layout()
-                .context("finding your keyboard layout (set [keys] layout to skip this)")?,
-        };
-        let layout = Layout::new(&layout_name)?;
-        let letters = Alphabet::decode_letters(file.keys.alphabet.as_deref(), &layout)?;
+    pub fn parse(text: &str, layout: &Layout) -> Result<Self> {
+        let file: File = toml::from_str(text)?;
+        let letters = Alphabet::decode_letters(file.keys.alphabet.as_deref(), layout)?;
         // The keys the file made tag keys, so default verbs can stay off
         // them. A broken alias is skipped here; `Alphabet::resolve` says why.
         let tag_keys: Vec<KeyCode> = letters
@@ -502,16 +489,16 @@ impl Config {
             .map(|l| l.code)
             .chain(file.keys.aliases.keys().filter_map(|from| {
                 let ch = single_char(from, "").ok()?;
-                decode_unshifted(ch, &layout).ok()
+                decode_unshifted(ch, layout).ok()
             }))
             .collect();
-        let verbs = Verbs::resolve(&file.keys, &layout, &tag_keys)?;
-        let alphabet = Alphabet::resolve(letters, &file.keys.aliases, &layout, &verbs.taken())?;
+        let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
+        let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
         Ok(Self {
             alphabet,
             verbs,
-            layout: layout_name,
+            layout: layout.name().to_string(),
             style: file.style,
             after: file.pointer.after,
         })
@@ -527,10 +514,11 @@ impl Config {
             "alphabet = {}   # priority order: earlier letters are used more",
             quote(&alphabet)
         );
+        // A comment, not a setting: the layout is your keyboard's own.
         let _ = writeln!(
             out,
-            "layout = {}         # keys above are decoded with this layout",
-            quote(&self.layout)
+            "# keys are read with your keyboard's first layout, {}",
+            self.layout
         );
         if !self.alphabet.dropped.is_empty() {
             let dropped: Vec<String> = self
@@ -608,9 +596,8 @@ pub fn default_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    #[allow(clippy::unnecessary_wraps)] // must match `first_layout`'s signature
-    fn us() -> Result<String> {
-        Ok("us".into())
+    fn us() -> Layout {
+        Layout::named("us", "")
     }
 
     fn labels(config: &Config) -> String {
@@ -619,14 +606,14 @@ mod tests {
 
     #[test]
     fn empty_file_is_all_defaults() {
-        let config = Config::parse("", us).unwrap();
+        let config = Config::parse("", &us()).unwrap();
         assert_eq!(labels(&config), "asdfghjkl");
-        assert_eq!(config.layout, "us");
+        assert_eq!(config.layout, "English (US)");
     }
 
     #[test]
     fn alphabet_is_decoded_in_order() {
-        let config = Config::parse("[keys]\nalphabet = \"ciaehtns\"", us).unwrap();
+        let config = Config::parse("[keys]\nalphabet = \"ciaehtns\"", &us()).unwrap();
         assert_eq!(labels(&config), "ciaehtns");
         assert_eq!(config.alphabet.letters()[0].code, KeyCode::from_evdev(46));
     }
@@ -635,22 +622,15 @@ mod tests {
     fn aliases_type_their_letter() {
         let config = Config::parse(
             "[keys]\nalphabet = \"ciaehtns\"\n[keys.aliases]\n\";\" = \"c\"",
-            us,
+            &us(),
         )
         .unwrap();
         assert_eq!(config.alphabet.index_of(KeyCode::from_evdev(39)), Some(0));
     }
 
     #[test]
-    fn layout_in_file_skips_the_lookup() {
-        let config =
-            Config::parse("[keys]\nlayout = \"gr\"", || bail!("must not be called")).unwrap();
-        assert_eq!(labels(&config), "ασδφγηξκλ");
-    }
-
-    #[test]
     fn broken_files_say_why() {
-        let err = |text: &str| format!("{:#}", Config::parse(text, us).unwrap_err());
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[keys]\nalpahbet = \"ab\"").contains("unknown field"));
         assert!(err("[keys\n").contains("TOML") || err("[keys\n").contains("expected"));
         assert!(err("[keys]\nalphabet = \"aA\"").contains("needs Shift"));
@@ -675,7 +655,7 @@ mod tests {
 
     #[test]
     fn default_verbs_sit_off_the_home_row() {
-        let config = Config::parse("", us).unwrap();
+        let config = Config::parse("", &us()).unwrap();
         assert_eq!(config.verbs.default_action(), Action::Left);
         assert_eq!(config.verbs.action_of(key(19, false)), Some(Action::Right));
         assert_eq!(config.verbs.action_of(key(19, true)), None, "R isn't r");
@@ -689,7 +669,7 @@ mod tests {
             "[keys]\nalphabet = \"ehatincsulodypmgf\"\nright = \"\"\nleft = \".\"\n\
              double = \"k\"\nmiddle = \"j\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
              [pointer]\nafter = \"leave\"",
-            us,
+            &us(),
         )
         .unwrap();
         assert_eq!(config.verbs.default_action(), Action::Right);
@@ -706,7 +686,7 @@ mod tests {
         // so the x position leaves the tags.
         let config = Config::parse(
             "[keys]\nalphabet = \"asdx\"\nhover = \"X\"\nright = \"q\"",
-            us,
+            &us(),
         )
         .unwrap();
         assert_eq!(labels(&config), "asd");
@@ -722,19 +702,19 @@ mod tests {
         // The file as it stood on 2026-10-23: an alphabet with m and o in
         // it, the verbs still commented out. Middle (m) and hover (o) lose
         // their defaults instead of taking two letters.
-        let config = Config::parse("[keys]\nalphabet = \"ehatincsulodypmgfbwv\"", us).unwrap();
+        let config = Config::parse("[keys]\nalphabet = \"ehatincsulodypmgfbwv\"", &us()).unwrap();
         assert_eq!(labels(&config), "ehatincsulodypmgfbwv");
         assert_eq!(config.verbs.action_of(key(50, false)), None);
         assert_eq!(config.verbs.action_of(key(19, false)), Some(Action::Right));
         let rendered = config.render();
         assert!(rendered.contains("# middle has no key: its default, \"m\", is one of your"));
-        let again = Config::parse(&rendered, || bail!("layout is in the file")).unwrap();
+        let again = Config::parse(&rendered, &us()).unwrap();
         assert_eq!(again.verbs, config.verbs);
     }
 
     #[test]
     fn broken_verbs_say_why() {
-        let err = |text: &str| format!("{:#}", Config::parse(text, us).unwrap_err());
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[keys]\nright = \"\"").contains("only one verb can be the default"));
         assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
         assert!(err("[keys]\nhover = \"esc\"").contains("built in"));
@@ -753,7 +733,7 @@ mod tests {
 
     #[test]
     fn the_repeat_key_takes_its_letter() {
-        let config = Config::parse("[keys]\nalphabet = \"asdf\"\nrepeat = \"f\"", us).unwrap();
+        let config = Config::parse("[keys]\nalphabet = \"asdf\"\nrepeat = \"f\"", &us()).unwrap();
         let f = Key {
             code: KeyCode::from_evdev(33),
             shift: false,
@@ -765,7 +745,7 @@ mod tests {
                 .render()
                 .contains("# left out of the alphabet: f (repeat)")
         );
-        let off = Config::parse("[keys]\nrepeat = \"\"", us).unwrap();
+        let off = Config::parse("[keys]\nrepeat = \"\"", &us()).unwrap();
         assert!(!off.verbs.is_repeat(f));
     }
 
@@ -773,8 +753,8 @@ mod tests {
     fn rendered_config_reads_back_the_same() {
         let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
                     [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"";
-        let config = Config::parse(text, us).unwrap();
-        let again = Config::parse(&config.render(), || bail!("layout is in the file")).unwrap();
+        let config = Config::parse(text, &us()).unwrap();
+        let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.alphabet, config.alphabet);
         assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
@@ -786,25 +766,26 @@ mod tests {
         // wayhint supports Latin layouts only (2026-10-23). These move the
         // home row and the verb keys the most: AZERTY puts `,` on middle,
         // BÉPO puts `,` in the alphabet and `è` on double.
-        for layout in [
-            "us",
-            "us(dvorak)",
-            "us(colemak)",
-            "fr",
-            "fr(bepo)",
-            "de(neo)",
+        for (name, variant) in [
+            ("us", ""),
+            ("us", "dvorak"),
+            ("us", "colemak"),
+            ("fr", ""),
+            ("fr", "bepo"),
+            ("de", "neo"),
         ] {
-            let config = Config::parse("", || Ok(layout.into())).unwrap();
+            let layout = Layout::named(name, variant);
+            let config = Config::parse("", &layout).unwrap();
             let rendered = config.render();
-            let again = Config::parse(&rendered, || bail!("layout is in the file"))
-                .unwrap_or_else(|e| panic!("{layout}: {e:#}\n{rendered}"));
-            assert_eq!(again.alphabet, config.alphabet, "{layout}");
-            assert_eq!(again.verbs, config.verbs, "{layout}");
+            let again = Config::parse(&rendered, &layout)
+                .unwrap_or_else(|e| panic!("{name}({variant}): {e:#}\n{rendered}"));
+            assert_eq!(again.alphabet, config.alphabet, "{name}({variant})");
+            assert_eq!(again.verbs, config.verbs, "{name}({variant})");
         }
     }
 
     #[test]
     fn missing_explicit_file_is_an_error() {
-        assert!(Config::load(Some(Path::new("/nonexistent/wayhint.toml")), us).is_err());
+        assert!(Config::load(Some(Path::new("/nonexistent/wayhint.toml")), &us()).is_err());
     }
 }

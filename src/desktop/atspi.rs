@@ -214,8 +214,8 @@ impl<'c> Walk<'c> {
         }
         let app = app.with_context(|| {
             format!(
-                "{} (pid {}) isn't on the accessibility bus: accessibility is off for it \
-                 (wayhint tags the focused window: run it from a keybind, not a terminal)",
+                "{} (pid {}) isn't on the accessibility bus, so wayhint can't see its \
+                 controls (run from a terminal, wayhint tags that terminal)",
                 window.class, window.pid
             )
         })?;

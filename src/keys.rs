@@ -11,7 +11,7 @@
 //! "ciaehtns"`. [`Layout`] turns each character into the key that types it on
 //! the user's first layout, once, at load time.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use xkbcommon::xkb;
 
 use crate::action::Mods;
@@ -133,29 +133,39 @@ pub struct Key {
     pub shift: bool,
 }
 
-/// One xkb layout, compiled into a keymap, for turning config characters
-/// into keys and keys back into the characters drawn on tags.
+/// The first layout of a keymap, for turning config characters into keys
+/// and keys back into the characters drawn on tags. The first, because a
+/// second one (Greek) is the one you switch to, and tags work there too.
 pub struct Layout {
     name: String,
     keymap: xkb::Keymap,
 }
 
 impl Layout {
-    /// Compiles a layout from xkb's `layout` or `layout(variant)` form:
-    /// `"us"`, `"de"`, `"us(colemak)"`.
-    pub fn new(spec: &str) -> Result<Self> {
-        let (layout, variant) = match spec.split_once('(') {
-            Some((layout, rest)) => {
-                let variant = rest
-                    .strip_suffix(')')
-                    .with_context(|| format!("layout {spec:?}: missing ')'"))?;
-                (layout, variant)
-            }
-            None => (spec, ""),
-        };
-        if layout.is_empty() {
-            bail!("layout {spec:?}: no layout name");
-        }
+    /// The first layout of `keymap`, xkb text as the compositor sends it
+    /// ([`crate::keyboard::seat_keymap`]). It's the keymap your keys really
+    /// type with, however it was made: a layout name, a custom layout, or a
+    /// whole keymap file (Hyprland's `kb_file`).
+    pub fn from_keymap(keymap: &str) -> Result<Self> {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_string(
+            &context,
+            keymap.to_string(),
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::COMPILE_NO_FLAGS,
+        )
+        .context("the keyboard's keymap doesn't compile")?;
+        Ok(Self::of(keymap))
+    }
+
+    /// A layout by its xkb names, `("us", "colemak")`, for tests: they
+    /// can't ask a compositor.
+    ///
+    /// # Panics
+    ///
+    /// If xkb doesn't know the layout.
+    #[cfg(test)]
+    pub fn named(layout: &str, variant: &str) -> Self {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         // RMLVO: rules, model, layout, variant, options. "evdev" and "pc105"
         // are what every Linux desktop uses; options don't move printable keys.
@@ -168,11 +178,16 @@ impl Layout {
             None,
             xkb::COMPILE_NO_FLAGS,
         )
-        .with_context(|| format!("layout {spec:?}: xkb doesn't know it"))?;
-        Ok(Self {
-            name: spec.to_string(),
+        .expect("xkb knows the layout");
+        Self::of(keymap)
+    }
+
+    /// Named as the keymap names its first layout: "English (US)".
+    fn of(keymap: xkb::Keymap) -> Self {
+        Self {
+            name: keymap.layout_get_name(0).to_string(),
             keymap,
-        })
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -214,7 +229,7 @@ mod tests {
 
     #[test]
     fn decodes_plain_and_shifted_us_keys() {
-        let us = Layout::new("us").unwrap();
+        let us = Layout::named("us", "");
         assert_eq!(
             us.decode('a'),
             Some(Key {
@@ -242,18 +257,24 @@ mod tests {
 
     #[test]
     fn same_position_prints_differently_per_layout() {
-        let gr = Layout::new("gr").unwrap();
+        let gr = Layout::named("gr", "");
         assert_eq!(gr.decode('α').map(|k| k.code), Some(KeyCode(30)));
         assert_eq!(gr.char_at(KeyCode(30)), Some('α'));
+        let colemak = Layout::named("us", "colemak");
+        // Colemak moves `s` to the position US calls `d`.
+        assert_eq!(colemak.decode('s').map(|k| k.code), Some(KeyCode(32)));
     }
 
     #[test]
-    fn variant_form_and_unknown_layouts() {
-        let colemak = Layout::new("us(colemak)").unwrap();
-        // Colemak moves `s` to the position US calls `d`.
-        assert_eq!(colemak.decode('s').map(|k| k.code), Some(KeyCode(32)));
-        assert!(Layout::new("no-such-layout").is_err());
-        assert!(Layout::new("us(colemak").is_err());
+    fn a_sent_keymap_decodes_with_its_first_layout() {
+        // What the compositor sends for `kb_layout = us,gr`: one keymap,
+        // two layouts. The config is read with the first.
+        let both = Layout::named("us,gr", "");
+        let sent = both.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        let layout = Layout::from_keymap(&sent).unwrap();
+        assert_eq!(layout.name(), "English (US)");
+        assert_eq!(layout.decode('a').map(|k| k.code), Some(KeyCode(30)));
+        assert_eq!(layout.decode('α'), None, "Greek is the second layout");
     }
 
     #[test]
@@ -278,7 +299,7 @@ mod tests {
 
     #[test]
     fn home_row_reads_asdfghjkl_on_us() {
-        let us = Layout::new("us").unwrap();
+        let us = Layout::named("us", "");
         let printed: String = HOME_ROW.iter().filter_map(|&k| us.char_at(k)).collect();
         assert_eq!(printed, "asdfghjkl");
     }

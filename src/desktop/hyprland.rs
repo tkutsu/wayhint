@@ -1,5 +1,5 @@
 //! Hyprland over its IPC socket: which window is focused, where the monitors
-//! are, where the cursor is, which keyboard layout comes first.
+//! are, where the cursor is, and a notification when a run fails.
 //!
 //! The protocol is one request per connection: connect to
 //! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, write
@@ -18,13 +18,16 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::geometry::{Point, Rect};
 
 /// External calls are bounded: a hung compositor must not hang wayhint.
 const TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long a notification stays: long enough to read one sentence.
+const NOTIFY_MS: u32 = 6000;
 
 /// A toplevel window, in global logical pixels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,12 +109,6 @@ impl From<WireMonitor> for Monitor {
 }
 
 #[derive(Deserialize)]
-struct WireOption {
-    #[serde(rename = "str")]
-    value: String,
-}
-
-#[derive(Deserialize)]
 struct WireCursor {
     x: f64,
     y: f64,
@@ -127,21 +124,42 @@ fn socket_path() -> Result<PathBuf> {
         .join(".socket.sock"))
 }
 
-/// Sends one command and parses the JSON reply into any type that can be
-/// deserialized. The caller picks the type: `request::<WireCursor>("cursorpos")`.
-fn request<T: DeserializeOwned>(command: &str) -> Result<T> {
+/// Sends one command and returns the reply as Hyprland wrote it.
+fn send(command: &str) -> Result<String> {
     let path = socket_path()?;
     let mut socket = UnixStream::connect(&path)
         .with_context(|| format!("Hyprland socket {}", path.display()))?;
     socket.set_read_timeout(Some(TIMEOUT))?;
     socket.set_write_timeout(Some(TIMEOUT))?;
-    socket.write_all(format!("j/{command}").as_bytes())?;
+    socket.write_all(command.as_bytes())?;
     let mut reply = String::new();
     socket
         .read_to_string(&mut reply)
         .with_context(|| format!("Hyprland {command}"))?;
+    Ok(reply)
+}
+
+/// Sends one command and parses the JSON reply into any type that can be
+/// deserialized. The caller picks the type: `request::<WireCursor>("cursorpos")`.
+/// The `j/` prefix asks Hyprland for JSON.
+fn request<T: DeserializeOwned>(command: &str) -> Result<T> {
+    let reply = send(&format!("j/{command}"))?;
     serde_json::from_str(&reply)
         .with_context(|| format!("Hyprland {command}: unexpected reply {reply:?}"))
+}
+
+/// Shows `message` in Hyprland's own notification for a few seconds. A run
+/// started from a keybind has nowhere else to say why it stopped: nobody
+/// reads its stderr.
+pub fn notify(message: &str) -> Result<()> {
+    // `notify ICON MS COLOR TEXT`: icon 0 is Hyprland's warning sign, color
+    // 0 its default. The text runs to the end of the line, so it's one line.
+    let text = message.replace('\n', " ");
+    let reply = send(&format!("notify 0 {NOTIFY_MS} 0 {text}"))?;
+    if reply.trim() != "ok" {
+        bail!("Hyprland notify: {reply}");
+    }
+    Ok(())
 }
 
 /// The focused window, or `None` when nothing has focus (an empty
@@ -177,40 +195,9 @@ pub fn cursor() -> Result<Point> {
     Ok(Point::new(c.x.round() as i32, c.y.round() as i32))
 }
 
-/// The first entry of `input:kb_layout`, with the first `input:kb_variant`
-/// in xkb's `layout(variant)` form: `us,gr` gives `us`.
-pub fn keyboard_layout() -> Result<String> {
-    let layouts: WireOption = request("getoption input:kb_layout")?;
-    let variants: WireOption = request("getoption input:kb_variant")?;
-    Ok(first_layout(&layouts.value, &variants.value))
-}
-
-/// The pure part of [`keyboard_layout`], so it can be tested.
-fn first_layout(layouts: &str, variants: &str) -> String {
-    let first = |list: &str| list.split(',').next().unwrap_or("").trim().to_string();
-    let (layout, variant) = (first(layouts), first(variants));
-    let layout = if layout.is_empty() {
-        "us".to_string()
-    } else {
-        layout
-    };
-    if variant.is_empty() {
-        layout
-    } else {
-        format!("{layout}({variant})")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn first_layout_takes_the_first_of_each() {
-        assert_eq!(first_layout("us,gr", ""), "us");
-        assert_eq!(first_layout("us,gr", "colemak,"), "us(colemak)");
-        assert_eq!(first_layout("", ""), "us", "Hyprland's own default");
-    }
 
     #[test]
     fn wire_window_becomes_a_rect() {
