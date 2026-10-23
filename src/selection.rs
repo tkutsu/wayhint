@@ -54,7 +54,8 @@ pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
 pub enum Input {
     /// A tag letter, by its index in the alphabet.
     Letter(usize, Mods),
-    /// A verb key: the next tag gets this action instead of the default.
+    /// A verb key: the tag being typed gets this action instead of the
+    /// default.
     Verb(Action, Mods),
     /// `Space`: act where the pointer already is, no tag.
     Here(Mods),
@@ -86,11 +87,12 @@ pub enum Step {
 /// The labels on screen, the letters typed so far, the armed verb and the
 /// nudge.
 ///
-/// The grammar is fixed slots, `[verb] (tag | Space)`, so nothing ever
-/// waits on a timeout: a verb key is never a tag letter (the config takes
-/// verb keys out of the alphabet), and labels are prefix-free. Arrows can
-/// go anywhere before the last key; they add up, and only this command
-/// lands where they moved it.
+/// A command is a tag or `Space`, with a verb and arrows anywhere before
+/// its last key: `k e h`, `e k h` and `e → k h` all double-click tag
+/// `eh`. Nothing ever waits on a timeout: a verb key is never a tag letter
+/// (the config takes verb keys out of the alphabet), and labels are
+/// prefix-free, so the last letter always acts. Arrows add up, and only
+/// this command lands where they moved it.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
@@ -100,6 +102,9 @@ pub struct Selector {
     armed: Option<Action>,
     /// The armed verb's key needed Shift (`_` is Shift and `-`).
     armed_shifted: bool,
+    /// How many letters were typed when the verb was, so Backspace takes
+    /// back whichever came last.
+    armed_at: usize,
     nudge: Point,
 }
 
@@ -111,6 +116,7 @@ impl Selector {
             default,
             armed: None,
             armed_shifted: false,
+            armed_at: 0,
             nudge: Point::default(),
         }
     }
@@ -195,14 +201,13 @@ impl Selector {
                     Step::Ignored
                 }
             }
-            // A verb starts the tag over: a second verb replaces the first,
-            // so a wrong one needs no Backspace, and letters typed before it
-            // are dropped (verbs come before the tag). The nudge stays: it
-            // says where, and the verb what.
+            // Letters typed before a verb stay, as before an arrow: the verb
+            // says what, the letters and the nudge where. A second verb
+            // replaces the first, so a wrong one needs no Backspace.
             Input::Verb(action, held) => {
-                self.typed.clear();
                 self.armed = Some(action);
                 self.armed_shifted = held.shift;
+                self.armed_at = self.typed.len();
                 Step::Typing
             }
             Input::Here(held) => {
@@ -221,11 +226,13 @@ impl Selector {
                 self.reset();
                 Step::Repeat
             }
-            // Backspace takes back the last letter, else the verb. The
-            // opposite arrow takes back a nudge.
+            // Backspace takes back the last letter or verb, whichever came
+            // last. The opposite arrow takes back a nudge.
             Input::Backspace => {
-                if self.typed.pop().is_none() {
+                if self.armed.is_some() && self.armed_at == self.typed.len() {
                     self.disarm();
+                } else {
+                    self.typed.pop();
                 }
                 Step::Typing
             }
@@ -344,16 +351,29 @@ mod tests {
     }
 
     #[test]
-    fn a_second_verb_replaces_the_first_and_clears_letters() {
+    fn a_verb_can_come_between_letters() {
+        let mut s = five();
+        s.press(letter(3));
+        s.press(verb(Action::Right));
+        assert_eq!((s.armed(), s.typed()), (Some(Action::Right), &[3][..]));
+        assert_eq!(
+            s.press(letter(1)),
+            picked(4, Action::Right),
+            "f r s is r fs"
+        );
+    }
+
+    #[test]
+    fn a_second_verb_replaces_the_first_and_keeps_letters() {
         let mut s = five();
         s.press(verb(Action::Right));
         s.press(letter(3));
         s.press(verb(Action::Double));
-        assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[][..]));
+        assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[3][..]));
     }
 
     #[test]
-    fn backspace_takes_the_letter_then_the_verb() {
+    fn backspace_takes_back_the_last_letter_or_verb() {
         let mut s = five();
         s.press(verb(Action::Hover));
         s.press(letter(3));
@@ -361,6 +381,14 @@ mod tests {
         assert_eq!(s.armed(), Some(Action::Hover), "the letter went first");
         s.press(Input::Backspace);
         assert_eq!(s.armed(), None);
+        s.press(letter(3));
+        s.press(verb(Action::Hover));
+        s.press(Input::Backspace);
+        assert_eq!(
+            (s.armed(), s.typed()),
+            (None, &[3][..]),
+            "the verb came last"
+        );
         s.press(verb(Action::Hover));
         assert_eq!(s.press(Input::Escape), Step::Typing, "Esc disarms first");
         assert_eq!(s.press(Input::Escape), Step::Exit);

@@ -55,13 +55,15 @@ bind = SUPER, slash, exec, wayhint
 | `o` then a tag | Hover: moves the pointer there and leaves it |
 | `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
 | `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection |
-| `Space` | Does the default action, or the verb typed first, where the pointer is |
+| `Space` | Does the default action, or the verb typed before it, where the pointer is |
 | arrows, before the tag's last letter or `Space` | Move where that one click lands, 14 px per press |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
-| `Backspace` | Removes the last typed letter, then the verb |
+| `Backspace` | Removes the last letter or verb typed |
 | `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
 
-A typed verb shows in front of every tag (`tAS` after `t`), and its name
+A verb can also come between a tag's letters: `a t s` double-clicks
+`as`, as `t a s` does. A typed verb shows in front of every tag (`tAS`
+after `t`, or after `a t`), and its name
 shows at the bottom of the screen, until the tag is typed. Typing another
 verb replaces it. Right Alt doesn't count as Alt, since on many layouts
 it's AltGr.
