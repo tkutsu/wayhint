@@ -34,7 +34,7 @@ use atspi::{
     AccessibilityConnection, CoordType, Interface, ObjectRefOwned, State, StateSet,
     proxy::{accessible::AccessibleProxy, action::ActionProxy, component::ComponentProxy},
 };
-use futures::{StreamExt as _, stream};
+use futures::{StreamExt as _, future, stream};
 use serde::Serialize;
 use zbus::proxy::CacheProperties;
 
@@ -118,10 +118,16 @@ impl Scanner {
         Ok((tree, stats))
     }
 
-    /// Asks one object again: role, name, states and box, in one bounded go.
-    pub async fn read(&self, object: &ObjectId, timeout: Duration) -> Result<Fresh> {
+    /// Asks one object again: role, name, states and box, and the boxes of
+    /// the scroll areas in `clips`, in one bounded go.
+    pub async fn read(
+        &self,
+        object: &ObjectId,
+        clips: &[ObjectId],
+        timeout: Duration,
+    ) -> Result<Fresh> {
         let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
-        walk.read_fresh(object).await
+        walk.read_fresh(object, clips).await
     }
 }
 
@@ -407,14 +413,18 @@ impl<'c> Walk<'c> {
         }
     }
 
-    /// The re-check's read of one object.
-    async fn read_fresh(&self, object: &ObjectId) -> Result<Fresh> {
+    /// The re-check's read of one object and the scroll areas above it.
+    async fn read_fresh(&self, object: &ObjectId, clips: &[ObjectId]) -> Result<Fresh> {
         let accessible: AccessibleProxy = self.proxy(object).await?;
-        let (role, name, states, bounds) = tokio::join!(
+        // A scroll area that fails to answer is `None`, not an error: the
+        // object itself answered, and the verdict says which part didn't.
+        let clips = future::join_all(clips.iter().map(|c| async { self.extents(c).await.ok() }));
+        let (role, name, states, bounds, clips) = tokio::join!(
             self.call(accessible.get_role()),
             self.call(accessible.name()),
             self.call(accessible.get_state()),
             self.extents(object),
+            clips,
         );
         let role = match role {
             Ok(role) => role.name().to_string(),
@@ -425,6 +435,7 @@ impl<'c> Walk<'c> {
             name: name?,
             states: states_from(states?),
             bounds: bounds?,
+            clips,
         })
     }
 }

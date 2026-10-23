@@ -22,8 +22,10 @@ const PILL_LIFT: i32 = 48;
 pub enum Pick {
     /// Do `act` at the target at `index`.
     Target { index: usize, act: Act },
-    /// Do `act` where the pointer is now (`Space`).
-    Here(Act),
+    /// Do `act` at the pointer (`Space`): `from`, moved by the nudge. A
+    /// bare `Space` reads the pointer as it's pressed; a nudged one keeps
+    /// the pointer its dot was drawn from, so it lands on the dot.
+    Here { act: Act, from: Point },
     /// Do the last command again, on its target.
     Repeat,
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
@@ -40,13 +42,15 @@ struct Scene<'a> {
 
 /// Shows tags for `targets` and reads keys until one is picked. `verb`
 /// (from `--verb`) is armed as if its key were the first one typed.
-/// `pointer` is where the cursor was as the pick began.
+/// `cursor` reads where the pointer is. The overlay never sees the mouse
+/// move, so it's read again at every key: a dot shows where a nudged
+/// `Space` lands from the pointer as of the last key.
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
     targets: &[Target],
     verb: Option<Action>,
-    pointer: Option<Point>,
+    cursor: &dyn Fn() -> Result<Point>,
 ) -> Result<Pick> {
     let mut selector = Selector::new(
         targets.len(),
@@ -56,10 +60,10 @@ pub fn pick(
     if let Some(action) = verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
-    let scene = Scene {
+    let mut scene = Scene {
         targets,
         screen: overlay.monitor().rect,
-        pointer,
+        pointer: cursor().ok(),
     };
     overlay.show(&frame(&selector, config, &scene))?;
     loop {
@@ -72,9 +76,18 @@ pub fn pick(
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
         };
         match selector.press(input) {
-            Step::Typing => overlay.update(&frame(&selector, config, &scene))?,
+            Step::Typing => {
+                scene.pointer = cursor().ok();
+                overlay.update(&frame(&selector, config, &scene))?;
+            }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
-            Step::Here(act) => return Ok(Pick::Here(act)),
+            Step::Here(act) => {
+                let from = match scene.pointer {
+                    Some(drawn) if act.nudge != Point::default() => drawn,
+                    _ => cursor()?,
+                };
+                return Ok(Pick::Here { act, from });
+            }
             Step::Repeat => return Ok(Pick::Repeat),
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
@@ -158,19 +171,26 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
         Vec::new()
     } else {
         let points = open.iter().map(|(_, target)| target.hit);
+        // A pointer on another monitor draws nothing here, as it should:
+        // `lands` keeps its dot on that monitor, off this overlay.
         points
             .chain(scene.pointer)
-            .map(|at| lands(at, nudge, scene.screen))
+            .map(|at| lands(at, nudge, &[scene.screen]))
             .collect()
     };
     Frame { tags, dots }
 }
 
-/// Where a command nudged by `nudge` lands for the point `at`: kept on
-/// `screen`, the monitor the tags are on, so an arrow too many stops at
-/// the edge instead of reaching a point no monitor has.
-pub fn lands(at: Point, nudge: Point, screen: Rect) -> Point {
-    screen.clamp(at.offset(nudge))
+/// Where a command nudged by `nudge` lands for the point `at`: kept on the
+/// one of `screens` (the monitors) that `at` is on, so an arrow too many
+/// stops at its edge instead of jumping to another monitor or a point no
+/// monitor has. Without a nudge that's `at` itself, wherever it is.
+pub fn lands(at: Point, nudge: Point, screens: &[Rect]) -> Point {
+    let moved = at.offset(nudge);
+    match screens.iter().find(|s| s.contains(at)) {
+        Some(screen) => screen.clamp(moved),
+        None => moved,
+    }
 }
 
 /// A letter in upper case when that's one character (`ß` would be `SS`,
@@ -239,10 +259,44 @@ mod tests {
     }
 
     #[test]
-    fn a_nudge_stops_at_the_monitors_edge() {
-        let screen = Rect::new(0, 0, 1920, 1080);
+    fn a_nudge_stops_at_the_edge_of_its_own_monitor() {
+        let screens = [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)];
         let at = Point::new(10, 500);
-        assert_eq!(lands(at, Point::new(28, -14), screen), Point::new(38, 486));
-        assert_eq!(lands(at, Point::new(-42, 0), screen), Point::new(0, 500));
+        assert_eq!(
+            lands(at, Point::new(28, -14), &screens),
+            Point::new(38, 486)
+        );
+        assert_eq!(lands(at, Point::new(-42, 0), &screens), Point::new(0, 500));
+        let right = Point::new(2100, 500);
+        assert_eq!(
+            lands(right, Point::default(), &screens[..1]),
+            right,
+            "no nudge: the pointer stays where it is, on any monitor"
+        );
+        assert_eq!(
+            lands(right, Point::new(-196, 0), &screens),
+            Point::new(1920, 500),
+            "a nudge from the right monitor stops at its left edge"
+        );
+    }
+
+    #[test]
+    fn a_nudged_space_dot_follows_the_pointer() {
+        let config = Config::parse("", &crate::keys::Layout::named("us", "")).unwrap();
+        let mut selector = Selector::new(0, config.alphabet.len(), Action::Left);
+        selector.press(Input::Nudge(Point::new(14, 0)));
+        let scene = |x| Scene {
+            targets: &[],
+            screen: Rect::new(0, 0, 1920, 1080),
+            pointer: Some(Point::new(x, 100)),
+        };
+        assert_eq!(
+            frame(&selector, &config, &scene(100)).dots,
+            [Point::new(114, 100)]
+        );
+        assert_eq!(
+            frame(&selector, &config, &scene(500)).dots,
+            [Point::new(514, 100)]
+        );
     }
 }

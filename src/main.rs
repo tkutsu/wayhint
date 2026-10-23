@@ -110,7 +110,8 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         snapshot.targets.len(),
         overlay.keyboard_mode()
     );
-    match pick::pick(&mut overlay, config, &snapshot.targets, None, None)? {
+    let cursor = || anyhow::bail!("no pointer when drawing from a file");
+    match pick::pick(&mut overlay, config, &snapshot.targets, None, &cursor)? {
         Pick::Target { index, act } => {
             let (x, y) = (act.nudge.x, act.nudge.y);
             eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());
@@ -119,7 +120,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
                 serde_json::to_string_pretty(&snapshot.targets[index])?
             );
         }
-        Pick::Here(act) => {
+        Pick::Here { act, .. } => {
             eprintln!("wayhint: {} where the pointer is", act.action.name());
         }
         Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),

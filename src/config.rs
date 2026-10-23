@@ -156,6 +156,10 @@ pub struct Alphabet {
     /// Letters left out because a command has their key, with the
     /// command's name, for `wayhint config`.
     dropped: Vec<(char, &'static str)>,
+    /// Every letter, the left-out ones too, in order: what `wayhint config`
+    /// writes back. Without the left-out ones a default verb would take a
+    /// key on reload that the alphabet had kept it off.
+    written: String,
 }
 
 /// Another key that types a letter: the Ferris Greek layer sends `;` from
@@ -235,6 +239,7 @@ impl Alphabet {
         taken: &[(KeyCode, &'static str)],
     ) -> Result<Self> {
         let command_of = |code: KeyCode| taken.iter().find(|t| t.0 == code).map(|t| t.1);
+        let written = letters.iter().map(|l| l.label).collect();
         let mut dropped = Vec::new();
         // `retain` keeps what the closure returns `true` for; this closure
         // also writes down each letter it throws out.
@@ -261,6 +266,7 @@ impl Alphabet {
             letters,
             aliases: Vec::new(),
             dropped,
+            written,
         };
         for (from, to) in aliases {
             let label = single_char(from, "[keys.aliases]")?;
@@ -522,11 +528,10 @@ impl Config {
     pub fn render(&self) -> String {
         let mut out =
             String::from("# wayhint config in effect: defaults merged with your file\n\n[keys]\n");
-        let alphabet: String = self.alphabet.letters.iter().map(|l| l.label).collect();
         let _ = writeln!(
             out,
             "alphabet = {}   # priority order: earlier letters are used more",
-            quote(&alphabet)
+            quote(&self.alphabet.written)
         );
         // A comment, not a setting: the layout is your keyboard's own.
         let _ = writeln!(
@@ -789,6 +794,20 @@ mod tests {
         assert_eq!(again.style, config.style);
         assert_eq!(again.after, config.after);
         assert_eq!(again.nudge, 9);
+    }
+
+    #[test]
+    fn a_left_out_letter_is_written_back_so_it_stays_out() {
+        // `r` is a tag letter, so right's default stays off it; then repeat
+        // takes it. Written as `"as"`, the reload would give right its `r`
+        // back, and right and repeat would clash.
+        let config = Config::parse("[keys]\nalphabet = \"asr\"\nrepeat = \"r\"", &us()).unwrap();
+        assert_eq!(labels(&config), "as");
+        let rendered = config.render();
+        assert!(rendered.contains("alphabet = \"asr\""), "{rendered}");
+        let again = Config::parse(&rendered, &us()).unwrap();
+        assert_eq!(again.alphabet, config.alphabet);
+        assert_eq!(again.verbs, config.verbs);
     }
 
     #[test]
