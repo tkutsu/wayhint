@@ -126,8 +126,9 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 /// where each would land if nudged.
 ///
 /// Each tag reads as the whole command: everything typed so far, dimmed,
-/// then the letters still to type. So an armed verb's key goes in front
-/// (`kEA` after `k`, with `k` and nothing else dimmed), where the eyes
+/// then the letters still to type. So an armed verb's key goes in front,
+/// wherever it was typed (`kEA` after `k`, with `k` and nothing else
+/// dimmed; `kEA` again after `e k`, with `kE` dimmed), where the eyes
 /// already are. Its name also shows as a pill at the bottom of the screen,
 /// for a verb that has no key (`--verb`) and for `Space`, which uses no
 /// tag. The pill is drawn as one more tag: same look, no new drawing code.

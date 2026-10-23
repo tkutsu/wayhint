@@ -10,8 +10,9 @@
 //! Every window the focused monitor shows gets tags, not just the focused
 //! one, except where another window covers them.
 //!
-//! The keys pick a target and a verb (`[verb] tag`), or a verb and the
-//! spot under the pointer (`[verb] Space`), which skips the re-check.
+//! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
+//! before the tag's last letter), or a verb and the spot under the
+//! pointer (`[verb] Space`), which skips the re-check.
 //! Shift, Ctrl or Alt held on the last key are held through the click.
 //! Arrows typed before the last key move where that one command lands,
 //! so a tag near the spot can click anywhere.
