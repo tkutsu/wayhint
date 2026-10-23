@@ -140,6 +140,11 @@ pub struct Alphabet {
     aliases: Vec<Alias>,
     /// Letters left out because a verb has their key, for `wayhint config`.
     dropped: Vec<(char, Action)>,
+    /// Whether `wayhint config` can write the letters back as they are.
+    /// Always for letters the file wrote. The default home row can hold a
+    /// position that types nothing on this layout (a dead key on Ethiopic
+    /// and Braille layouts), drawn as `?`, which reads back as another key.
+    writable: bool,
 }
 
 /// Another key that types a letter: the Ferris Greek layer sends `;` from
@@ -212,6 +217,9 @@ impl Alphabet {
         layout: &Layout,
         taken: &[(KeyCode, Action)],
     ) -> Result<Self> {
+        let writable = letters
+            .iter()
+            .all(|l| decode_unshifted(l.label, layout).is_ok_and(|code| code == l.code));
         let verb_of = |code: KeyCode| taken.iter().find(|t| t.0 == code).map(|t| t.1);
         let mut dropped = Vec::new();
         // `retain` keeps what the closure returns `true` for; this closure
@@ -239,6 +247,7 @@ impl Alphabet {
             letters,
             aliases: Vec::new(),
             dropped,
+            writable,
         };
         for (from, to) in aliases {
             let label = single_char(from, "[keys.aliases]")?;
@@ -273,7 +282,9 @@ impl Alphabet {
 pub struct Verbs {
     default: Action,
     /// Each bound verb, its key, and the key as `wayhint config` prints it.
-    keys: Vec<(Action, Key, String)>,
+    /// `None` for a default key that has no character which reads back as
+    /// that same key (see `resolve`).
+    keys: Vec<(Action, Key, Option<String>)>,
     /// Verbs left without a key because their default key is a tag key,
     /// with that default, for `wayhint config`.
     unbound: Vec<(Action, String)>,
@@ -297,7 +308,7 @@ impl Verbs {
         self.keys
             .iter()
             .find(|v| v.0 == action)
-            .map(|v| v.2.as_str())
+            .and_then(|v| v.2.as_deref())
     }
 
     /// Decodes the seven verb fields, fills in the defaults, checks them.
@@ -309,7 +320,7 @@ impl Verbs {
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
         let mut defaults = Vec::new();
         let mut unbound = Vec::new();
-        let mut keys: Vec<(Action, Key, String)> = Vec::new();
+        let mut keys: Vec<(Action, Key, Option<String>)> = Vec::new();
         for (action, default) in DEFAULT_VERBS {
             let field = action.name();
             let (key, label) = match (file.verb(action), default) {
@@ -323,26 +334,37 @@ impl Verbs {
                         decode_key(text, layout).with_context(|| format!("[keys] {field}"))?;
                     // A name is printed back as the table spells it: "home" is "Home".
                     let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
-                    (key, label)
+                    (key, Some(label))
                 }
                 (None, Some(code)) => {
+                    let key = Key { code, shift: false };
+                    // The character this position prints, kept only if
+                    // writing it back gives this same key. On French AZERTY
+                    // the `[` position is a dead circumflex and prints
+                    // nothing; a "?" stand-in read back as Shift and the `,`
+                    // position, and `wayhint config` moved back there
+                    // (audit, 2026-10-23).
                     let label = layout
                         .char_at(code)
-                        .map_or_else(|| "?".into(), String::from);
+                        .filter(|&c| layout.decode(c) == Some(key))
+                        .map(String::from);
                     if tag_keys.contains(&code) {
-                        unbound.push((action, label));
+                        // A tag key is a letter of the alphabet, so it prints.
+                        unbound.push((action, label.unwrap_or_default()));
                         continue;
                     }
-                    (Key { code, shift: false }, label)
+                    (key, label)
                 }
             };
+            // For the messages below.
+            let shown = label.as_deref().unwrap_or("its default key");
             if BUILT_IN.contains(&key.code) {
                 bail!(
-                    "[keys] {field} = {label:?}: Esc, Backspace, Space, Enter and Tab are built in"
+                    "[keys] {field} = {shown:?}: Esc, Backspace, Space, Enter and Tab are built in"
                 );
             }
             if let Some(other) = keys.iter().find(|v| v.1 == key) {
-                bail!("[keys] {} and {field} are both {label:?}", other.0.name());
+                bail!("[keys] {} and {field} are both {shown:?}", other.0.name());
             }
             keys.push((action, key, label));
         }
@@ -480,14 +502,23 @@ impl Config {
         let mut out =
             String::from("# wayhint config in effect: defaults merged with your file\n\n[keys]\n");
         let alphabet: String = self.alphabet.letters.iter().map(|l| l.label).collect();
+        if self.alphabet.writable {
+            let _ = writeln!(
+                out,
+                "alphabet = {}   # priority order: earlier letters are used more",
+                quote(&alphabet)
+            );
+        } else {
+            // Left out, it reads back as the same default.
+            let _ = writeln!(
+                out,
+                "# alphabet: the home row, drawn {alphabet}; some of its keys type no character here"
+            );
+        }
         let _ = writeln!(
             out,
-            "alphabet = {alphabet:?}   # priority order: earlier letters are used more"
-        );
-        let _ = writeln!(
-            out,
-            "layout = {:?}         # keys above are decoded with this layout",
-            self.layout
+            "layout = {}         # keys above are decoded with this layout",
+            quote(&self.layout)
         );
         if !self.alphabet.dropped.is_empty() {
             let dropped: Vec<String> = self
@@ -503,7 +534,15 @@ impl Config {
             if action == self.verbs.default {
                 let _ = writeln!(out, "{name} = \"\"   # a bare tag does this");
             } else if let Some((_, _, label)) = self.verbs.keys.iter().find(|v| v.0 == action) {
-                let _ = writeln!(out, "{name} = {label:?}");
+                // A default key with nothing to write it with stays out:
+                // left out, it reads back as the same default.
+                let _ = match label {
+                    Some(label) => writeln!(out, "{name} = {}", quote(label)),
+                    None => writeln!(
+                        out,
+                        "# {name} keeps its default key, which types no character on this layout"
+                    ),
+                };
             } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
                 let _ = writeln!(
                     out,
@@ -514,10 +553,13 @@ impl Config {
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
-                // `{:?}` of a `String` quotes and escapes it the way TOML
-                // reads it; of a `char` it would print `'c'`, which TOML doesn't.
                 let letter = self.alphabet.letters[alias.letter].label.to_string();
-                let _ = writeln!(out, "{:?} = {letter:?}", alias.label.to_string());
+                let _ = writeln!(
+                    out,
+                    "{} = {}",
+                    quote(&alias.label.to_string()),
+                    quote(&letter)
+                );
             }
         }
         out.push('\n');
@@ -533,6 +575,14 @@ impl Config {
         let _ = write!(out, "\n[pointer]\nafter = {after}\n");
         out
     }
+}
+
+/// `text` as a TOML string, quoted and escaped. Rust's `{:?}` looks the
+/// same for plain text, but writes a combining mark as `\u{17d2}`, which
+/// TOML can't read: the exported config of Khmer, Thai and six other
+/// layouts didn't load (found 2026-10-23).
+pub fn quote(text: &str) -> String {
+    toml::Value::String(text.into()).to_string()
 }
 
 /// `$XDG_CONFIG_HOME/wayhint/config.toml`, else `~/.config/wayhint/config.toml`.
@@ -699,6 +749,21 @@ mod tests {
         assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
         assert_eq!(again.after, config.after);
+    }
+
+    #[test]
+    fn defaults_read_back_the_same_on_every_kind_of_layout() {
+        // Khmer, Thai and Lao alphabets hold combining marks; Ethiopic and
+        // Braille have home-row keys that type nothing. Each broke the
+        // exported config once (2026-10-23).
+        for layout in ["us", "fr", "de", "gr", "ru", "kh", "th", "la", "et", "brai"] {
+            let config = Config::parse("", || Ok(layout.into())).unwrap();
+            let rendered = config.render();
+            let again = Config::parse(&rendered, || bail!("layout is in the file"))
+                .unwrap_or_else(|e| panic!("{layout}: {e:#}\n{rendered}"));
+            assert_eq!(again.alphabet, config.alphabet, "{layout}");
+            assert_eq!(again.verbs, config.verbs, "{layout}");
+        }
     }
 
     #[test]
