@@ -52,12 +52,16 @@ bind = SUPER, slash, exec, wayhint
 | `t` then a tag | Double click ("twice") |
 | `o` then a tag | Hover: moves the pointer there and leaves it |
 | `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
+| `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection |
 | `Space` | Does the default action, or the verb typed first, where the pointer is |
+| the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
 | `Backspace` | Removes the last typed letter, then the verb |
 | `Esc` | Clears typed letters and the verb; with none, exits |
 
-A verb key shows its name at the bottom of the screen until the tag is
-typed. Typing another verb replaces it. Clicking a text field exits, so
+A typed verb shows in front of every tag (`tAS` after `t`), and its name
+shows at the bottom of the screen, until the tag is typed. Typing another
+verb replaces it. Right Alt doesn't count as Alt, since on many layouts
+it's AltGr. Clicking a text field exits, so
 your typing goes to the field. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
 go straight to right-clicking.
@@ -80,6 +84,7 @@ right = ""              # "" makes this what a bare tag does (default: left)
 left = "."              # every other verb gets a key: one character or a name
 hover = "_"             # Shift works: _ is Shift and -
 back = "Home"           # names: Up Down Left Right PgUp PgDn Home End Delete
+repeat = "q"            # the last command again; no key unless you set one
 
 [keys.aliases]
 ";" = "c"               # another key that types the same letter
@@ -99,18 +104,22 @@ border = "#d0d0d0ff"
 Keys are matched by position, so switching to a second layout does not
 change the tags.
 
-A key is a tag letter or a verb, never both. A verb key you write is taken
-out of the alphabet. A default verb key that is in the alphabet you wrote
-stays off instead, and `wayhint config` lists which verbs have no key.
-`Esc`, `Backspace`, `Space`, `Enter` and `Tab` are never verb keys.
+A key is a tag letter or a command (a verb, or repeat), never both. A
+command key you write is taken out of the alphabet. A default verb key that
+is in the alphabet you wrote stays off instead, and `wayhint config` lists
+which verbs have no key. `Esc`, `Backspace`, `Space`, `Enter` and `Tab` are
+never command keys.
 
 ## Known gaps
 
 - A menu that opens after a click, such as a right-click menu, is usually a
   separate window to the accessibility tree and is not scanned yet, so its
   items get no tags.
-- Modifier clicks (Ctrl-click, Shift-click) are not supported yet.
-
+- A modifier click needs the compositor's virtual keyboard protocol
+  (`zwp_virtual_keyboard_v1`); without it, the click happens without the
+  modifier and wayhint prints a warning.
+- If the monitor changes size or scale during a run, the run ends; start
+  it again.
 - Elements hidden with `opacity: 0` on web pages still get a tag.
 - A control covered by something else inside the same app (a web modal)
   can still get a tag, and the click lands on whatever covers it.
