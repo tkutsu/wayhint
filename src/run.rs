@@ -122,18 +122,27 @@ impl Session {
             if ends || once {
                 return Ok(());
             }
+            // Takes the keyboard back if `act` let go of it; a no-op with
+            // the grab still held.
             self.overlay.grab_keyboard()?;
             sleep(SETTLE);
         }
     }
 
-    /// Hands the keyboard back, does `action` at `at`, and puts the cursor
-    /// back if `restore` (never after a hover: it's there to stay). The
-    /// grab is released first: spike test 4c proved clicks land that way,
-    /// and clicking with the grab held is still unproven (phase 1b test 1).
+    /// Does `action` at `at`, and puts the cursor back if `restore` (never
+    /// after a hover: it's there to stay).
+    ///
+    /// The input-method grab stays on through the click: spike test 7
+    /// (2026-10-23) clicked a field and a menu item through it. Keys typed
+    /// while the app reacts and wayhint rescans then come to wayhint, which
+    /// drops them as stale, instead of reaching the app: a fast next tag
+    /// was typed into the page. The focus fallback lets go first, the path
+    /// tests 2 and 3 proved, and `rounds` takes it back.
     fn act(&mut self, action: Action, at: Point, restore: bool) -> Result<()> {
         self.overlay.clear()?;
-        self.overlay.release_keyboard()?;
+        if !self.overlay.grabs_without_focus() {
+            self.overlay.release_keyboard()?;
+        }
         let back = if restore && action.clicks() {
             desktop::cursor().ok()
         } else {
