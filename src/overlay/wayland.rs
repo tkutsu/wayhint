@@ -147,6 +147,11 @@ impl State {
         else {
             anyhow::bail!("the overlay isn't configured yet");
         };
+        // The pixmap is copied row after row with the surface's width: a
+        // pixmap of another size would come out sheared.
+        if (pixmap.width(), pixmap.height()) != (w, h) {
+            anyhow::bail!("the monitor changed size; run wayhint again");
+        }
         let (w, h) = (i32::try_from(w)?, i32::try_from(h)?);
         // A buffer from the pool: a free slot is reused, so memory stays at
         // one or two frames.
@@ -289,6 +294,9 @@ impl LayerShellHandler for State {
         _: u32,
     ) {
         let size = configure.new_size;
+        if self.size.is_some_and(|old| old != size) {
+            self.events.push_back(Event::Resized);
+        }
         if self.size != Some(size) {
             self.size = Some(size);
             let bytes = size.0 as usize * size.1 as usize * 4;
