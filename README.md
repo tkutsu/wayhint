@@ -102,7 +102,8 @@ border = "#d0d0d0ff"
 ```
 
 Keys are matched by position, so switching to a second layout does not
-change the tags.
+change the tags. The first layout, the one the config is written in, must
+be a Latin one (US, Colemak, AZERTY and so on); the second can be any.
 
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that
