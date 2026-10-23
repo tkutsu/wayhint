@@ -15,7 +15,7 @@
 //! | `overlay`   | the Wayland surface: draws tags, reads keys              |
 //! | `pick`      | overlay plus selection: choose one target                |
 //! | `pointer`   | the virtual pointer: click, and never leave a button held |
-//! | `keyboard`  | the virtual keyboard: modifiers held around a click      |
+//! | `keyboard`  | your keymap, and modifiers held around a click           |
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
 //! | `dump`      | `wayhint dump`, printing each seam as JSON               |
 
@@ -35,7 +35,7 @@ mod selection;
 mod snapshot;
 mod style;
 
-use std::{path::Path, process::ExitCode};
+use std::{io::IsTerminal as _, path::Path, process::ExitCode};
 
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
@@ -44,6 +44,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     cli::{Cli, Command},
     config::Config,
+    keys::Layout,
     overlay::Overlay,
     pick::Pick,
     snapshot::Snapshot,
@@ -57,7 +58,13 @@ fn main() -> ExitCode {
         Err(error) => {
             // `{:#}` prints the whole context chain on one line:
             // "config ~/.config/wayhint/config.toml: [keys] alphabet: ..."
-            eprintln!("wayhint: {error:#}");
+            let message = format!("wayhint: {error:#}");
+            eprintln!("{message}");
+            // Started from a keybind, stderr goes nowhere anyone looks, so
+            // the error goes on screen too. From a terminal, once is enough.
+            if !std::io::stderr().is_terminal() {
+                let _ = desktop::notify(&message);
+            }
             ExitCode::FAILURE
         }
     }
@@ -65,8 +72,12 @@ fn main() -> ExitCode {
 
 /// One arm per command. The config is a closure, loaded only by the
 /// commands that need it: `dump` and `click` work even with a broken file.
+/// Its keys are decoded with the keymap your keyboard really has.
 fn dispatch(cli: &Cli) -> Result<()> {
-    let config = || Config::load(cli.config.as_deref(), desktop::keyboard_layout);
+    let config = || {
+        let layout = Layout::from_keymap(&keyboard::seat_keymap()?)?;
+        Config::load(cli.config.as_deref(), &layout)
+    };
     match &cli.command {
         None => run::run(&config()?, cli.once, cli.verb),
         Some(Command::Config) => {

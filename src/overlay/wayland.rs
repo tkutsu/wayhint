@@ -10,7 +10,7 @@
 //! small "user data" type implementing `Dispatch2`, which is where their
 //! events land: [`NoEvents`], [`ImeEvents`], [`Synced`], [`Answered`].
 
-use std::{collections::VecDeque, fs::File, os::fd::OwnedFd, os::unix::fs::FileExt as _};
+use std::collections::VecDeque;
 
 use smithay_client_toolkit::{
     compositor::CompositorHandler,
@@ -45,7 +45,7 @@ use tiny_skia::Pixmap;
 
 use crate::{
     action::Mods,
-    keyboard::Locks,
+    keyboard::{Locks, read_keymap},
     keys::{Key, KeyCode},
     overlay::{Event, draw, gate::KeyGate},
 };
@@ -199,17 +199,6 @@ impl State {
             self.events.push_back(Event::Key(key, mods));
         }
     }
-}
-
-/// Reads a keymap the compositor sent as a file descriptor. `read_exact_at`
-/// reads from the start without moving the file's position, which the
-/// compositor may share with every other client it sent the keymap to.
-fn read_keymap(fd: OwnedFd, size: u32) -> Option<String> {
-    let mut bytes = vec![0; usize::try_from(size).ok()?];
-    File::from(fd).read_exact_at(&mut bytes, 0).ok()?;
-    // A keymap ends with a C string's closing zero.
-    let text = bytes.split(|&b| b == 0).next()?;
-    String::from_utf8(text.to_vec()).ok()
 }
 
 /// User data for objects whose events don't matter (the input-method

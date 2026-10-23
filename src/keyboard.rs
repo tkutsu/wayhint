@@ -15,13 +15,31 @@
 //! Every modifier pressed is written down and released by
 //! [`Keyboard::release_all`]; `Drop` calls it too, as a backstop. A Ctrl
 //! left held makes every later click on the desktop a Ctrl-click.
+//!
+//! The real keyboard's keymap is read here too: [`seat_keymap`] asks for it
+//! before anything else, and the config is decoded with it.
 
-use std::{fs::File, io::Write as _, os::fd::AsFd as _};
+use std::{
+    fs::File,
+    io::Write as _,
+    os::{
+        fd::{AsFd as _, OwnedFd},
+        unix::fs::FileExt as _,
+    },
+};
 
 use anyhow::{Context as _, Result};
 use rustix::fs::{MemfdFlags, memfd_create};
 use smithay_client_toolkit::reexports::{
-    client::{Connection, EventQueue, globals::registry_queue_init, protocol::wl_seat::WlSeat},
+    client::{
+        Connection, Dispatch, EventQueue, Proxy as _, QueueHandle, WEnum,
+        globals::{GlobalListContents, registry_queue_init},
+        protocol::{
+            wl_keyboard::{self, WlKeyboard},
+            wl_registry::{self, WlRegistry},
+            wl_seat::WlSeat,
+        },
+    },
     protocols_misc::zwp_virtual_keyboard_v1::client::{
         zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
         zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
@@ -141,4 +159,76 @@ impl Drop for Keyboard {
         self.device.destroy();
         let _ = self.conn.flush();
     }
+}
+
+/// The keymap your keyboard types with, as xkb text: the one the compositor
+/// gives every app. It knows what a layout name can't say, such as a keymap
+/// file. A `wl_keyboard` is sent its keymap as soon as it's made, so this
+/// needs no window and no focus, and runs before any grab.
+pub fn seat_keymap() -> Result<String> {
+    let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+    let (globals, mut queue) = registry_queue_init::<SeatKeymap>(&conn)?;
+    let qh = queue.handle();
+    let seat: WlSeat = globals.bind(&qh, 1..=9, ())?;
+    let keyboard = seat.get_keyboard(&qh, ());
+    let mut state = SeatKeymap(None);
+    queue.roundtrip(&mut state)?;
+    // `release` exists from version 3; older keyboards end with the
+    // connection.
+    if keyboard.version() >= 3 {
+        keyboard.release();
+    }
+    state
+        .0
+        .context("the compositor sent no keymap for your keyboard")
+}
+
+/// [`seat_keymap`]'s queue state: the keymap, once it has come.
+struct SeatKeymap(Option<String>);
+
+impl Dispatch<WlRegistry, GlobalListContents> for SeatKeymap {
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+smithay_client_toolkit::reexports::client::delegate_noop!(SeatKeymap: ignore WlSeat);
+
+impl Dispatch<WlKeyboard, ()> for SeatKeymap {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // Keys, focus and repeat rate don't matter here; this keyboard is
+        // let go right after its first event.
+        if let wl_keyboard::Event::Keymap {
+            format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+            fd,
+            size,
+        } = event
+        {
+            state.0 = read_keymap(fd, size);
+        }
+    }
+}
+
+/// Reads a keymap the compositor sent as a file descriptor. `read_exact_at`
+/// reads from the start without moving the file's position, which the
+/// compositor may share with every other client it sent the keymap to.
+pub fn read_keymap(fd: OwnedFd, size: u32) -> Option<String> {
+    let mut bytes = vec![0; usize::try_from(size).ok()?];
+    File::from(fd).read_exact_at(&mut bytes, 0).ok()?;
+    // A keymap ends with a C string's closing zero.
+    let text = bytes.split(|&b| b == 0).next()?;
+    String::from_utf8(text.to_vec()).ok()
 }

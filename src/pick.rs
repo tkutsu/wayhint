@@ -166,7 +166,11 @@ mod tests {
 
     #[test]
     fn keys_decode_built_ins_then_verbs_then_letters() {
-        let config = Config::parse("[keys]\nhover = \"_\"", || Ok("us".into())).unwrap();
+        let config = Config::parse(
+            "[keys]\nhover = \"_\"",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
         // A key and the modifiers held on it, Shift alone or none.
         let input = |code, shift| {
             let key = Key {

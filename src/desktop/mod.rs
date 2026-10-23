@@ -22,9 +22,7 @@ use anyhow::Result;
 use self::atspi::Bounds;
 pub use self::{
     atspi::Stats,
-    hyprland::{
-        Monitor, Window, cursor, focused_window, keyboard_layout, monitors, window_by_address,
-    },
+    hyprland::{Monitor, Window, cursor, focused_window, monitors, notify, window_by_address},
     recheck::Verdict,
 };
 use crate::snapshot::{Snapshot, Target};
