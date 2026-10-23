@@ -110,6 +110,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         Pick::Here { action, .. } => {
             eprintln!("wayhint: {} where the pointer is", action.name());
         }
+        Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),
         Pick::Leave => {}
     }
     Ok(())

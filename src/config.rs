@@ -54,6 +54,9 @@ struct FileKeys {
     hover: Option<String>,
     back: Option<String>,
     forward: Option<String>,
+    /// Does the last action again, on the same target. No default key;
+    /// `""` is the same as leaving it out.
+    repeat: Option<String>,
 }
 
 impl FileKeys {
@@ -138,8 +141,9 @@ pub struct Letter {
 pub struct Alphabet {
     letters: Vec<Letter>,
     aliases: Vec<Alias>,
-    /// Letters left out because a verb has their key, for `wayhint config`.
-    dropped: Vec<(char, Action)>,
+    /// Letters left out because a command has their key, with the
+    /// command's name, for `wayhint config`.
+    dropped: Vec<(char, &'static str)>,
     /// Whether `wayhint config` can write the letters back as they are.
     /// Always for letters the file wrote. The default home row can hold a
     /// position that types nothing on this layout (a dead key on Ethiopic
@@ -209,24 +213,24 @@ impl Alphabet {
     }
 
     /// Builds the alphabet from its decoded `letters` and `[keys.aliases]`.
-    /// Keys in `taken` belong to a verb: a key is a tag letter or a
-    /// command, never both, so their letters are left out.
+    /// Keys in `taken` belong to a command (a verb, or repeat): a key is a
+    /// tag letter or a command, never both, so their letters are left out.
     fn resolve(
         mut letters: Vec<Letter>,
         aliases: &BTreeMap<String, String>,
         layout: &Layout,
-        taken: &[(KeyCode, Action)],
+        taken: &[(KeyCode, &'static str)],
     ) -> Result<Self> {
         let writable = letters
             .iter()
             .all(|l| decode_unshifted(l.label, layout).is_ok_and(|code| code == l.code));
-        let verb_of = |code: KeyCode| taken.iter().find(|t| t.0 == code).map(|t| t.1);
+        let command_of = |code: KeyCode| taken.iter().find(|t| t.0 == code).map(|t| t.1);
         let mut dropped = Vec::new();
         // `retain` keeps what the closure returns `true` for; this closure
         // also writes down each letter it throws out.
-        letters.retain(|l| match verb_of(l.code) {
-            Some(action) => {
-                dropped.push((l.label, action));
+        letters.retain(|l| match command_of(l.code) {
+            Some(command) => {
+                dropped.push((l.label, command));
                 false
             }
             None => true,
@@ -235,7 +239,7 @@ impl Alphabet {
             let why = if dropped.is_empty() {
                 ""
             } else {
-                " once verb keys are left out"
+                " once command keys are left out"
             };
             bail!(
                 "[keys] alphabet: needs at least two letters, got {}{why}",
@@ -254,11 +258,8 @@ impl Alphabet {
             let code = decode_unshifted(label, layout).context("[keys.aliases]")?;
             let target = decode_unshifted(single_char(to, "[keys.aliases]")?, layout)
                 .context("[keys.aliases]")?;
-            if let Some(action) = verb_of(code).or_else(|| verb_of(target)) {
-                bail!(
-                    "[keys.aliases] {from:?} = {to:?}: that key is the {} verb",
-                    action.name()
-                );
+            if let Some(command) = command_of(code).or_else(|| command_of(target)) {
+                bail!("[keys.aliases] {from:?} = {to:?}: that key is {command}'s");
             }
             let Some(letter) = alphabet.letters.iter().position(|l| l.code == target) else {
                 bail!("[keys.aliases] {from:?} = {to:?}: {to:?} isn't in the alphabet");
@@ -288,6 +289,10 @@ pub struct Verbs {
     /// Verbs left without a key because their default key is a tag key,
     /// with that default, for `wayhint config`.
     unbound: Vec<(Action, String)>,
+    /// The repeat key and how it was written, if the file gives one. It
+    /// lives with the verbs because it's checked against them: one key,
+    /// one command.
+    repeat: Option<(Key, String)>,
 }
 
 impl Verbs {
@@ -299,6 +304,11 @@ impl Verbs {
     /// The verb a key arms. Shift is part of the key: `_` isn't `-`.
     pub fn action_of(&self, key: Key) -> Option<Action> {
         self.keys.iter().find(|v| v.1 == key).map(|v| v.0)
+    }
+
+    /// Whether `key` is the repeat key.
+    pub fn is_repeat(&self, key: Key) -> bool {
+        self.repeat.as_ref().is_some_and(|(k, _)| *k == key)
     }
 
     /// The key that arms `action`, as `wayhint config` prints it (`k`,
@@ -379,18 +389,39 @@ impl Verbs {
                 a.name()
             ),
         };
+        let repeat = match file.repeat.as_deref() {
+            None | Some("") => None,
+            Some(text) => {
+                let key = decode_key(text, layout).context("[keys] repeat")?;
+                if BUILT_IN.contains(&key.code) {
+                    bail!(
+                        "[keys] repeat = {text:?}: Esc, Backspace, Space, Enter and Tab are built in"
+                    );
+                }
+                if let Some(other) = keys.iter().find(|v| v.1 == key) {
+                    bail!("[keys] {} and repeat are both {text:?}", other.0.name());
+                }
+                let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
+                Some((key, label))
+            }
+        };
         Ok(Self {
             default,
             keys,
             unbound,
+            repeat,
         })
     }
 
-    /// The bound keys' positions: these leave the alphabet. A shifted verb
-    /// takes its base key too, because Shift on a tag letter is kept for
-    /// Shift-click.
-    fn taken(&self) -> Vec<(KeyCode, Action)> {
-        self.keys.iter().map(|v| (v.1.code, v.0)).collect()
+    /// The bound keys' positions and their commands' names: these leave
+    /// the alphabet. A shifted key takes its base key too, because Shift on
+    /// a tag letter means Shift-click.
+    fn taken(&self) -> Vec<(KeyCode, &'static str)> {
+        self.keys
+            .iter()
+            .map(|v| (v.1.code, v.0.name()))
+            .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
+            .collect()
     }
 }
 
@@ -525,7 +556,7 @@ impl Config {
                 .alphabet
                 .dropped
                 .iter()
-                .map(|(label, action)| format!("{label} ({})", action.name()))
+                .map(|(label, command)| format!("{label} ({command})"))
                 .collect();
             let _ = writeln!(out, "# left out of the alphabet: {}", dropped.join(", "));
         }
@@ -549,6 +580,12 @@ impl Config {
                     "# {name} has no key: its default, {label:?}, is one of your tag letters"
                 );
             }
+        }
+        match &self.verbs.repeat {
+            Some((_, label)) => {
+                let _ = writeln!(out, "repeat = {}", quote(label));
+            }
+            None => out.push_str("# repeat has no key: give it one to do the last action again\n"),
         }
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
@@ -733,15 +770,36 @@ mod tests {
         assert!(err("[keys]\nback = \"PageUp\"").contains("the names are Up, Down"));
         assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));
         assert!(
-            err("[keys]\nalphabet = \"ab\"\nhover = \"a\"").contains("once verb keys are left out")
+            err("[keys]\nalphabet = \"ab\"\nhover = \"a\"")
+                .contains("once command keys are left out")
         );
-        assert!(err("[keys]\nright = \"r\"\n[keys.aliases]\n\"r\" = \"a\"").contains("right verb"));
+        assert!(err("[keys]\nright = \"r\"\n[keys.aliases]\n\"r\" = \"a\"").contains("right's"));
+        assert!(err("[keys]\nright = \"x\"\nrepeat = \"x\"").contains("right and repeat"));
+        assert!(err("[keys]\nrepeat = \"Enter\"").contains("built in"));
         assert!(err("[pointer]\nafter = \"stay\"").contains("unknown variant"));
     }
 
     #[test]
+    fn the_repeat_key_takes_its_letter() {
+        let config = Config::parse("[keys]\nalphabet = \"asdf\"\nrepeat = \"f\"", us).unwrap();
+        let f = Key {
+            code: KeyCode::from_evdev(33),
+            shift: false,
+        };
+        assert!(config.verbs.is_repeat(f));
+        assert_eq!(config.alphabet.len(), 3, "f left the alphabet");
+        assert!(
+            config
+                .render()
+                .contains("# left out of the alphabet: f (repeat)")
+        );
+        let off = Config::parse("[keys]\nrepeat = \"\"", us).unwrap();
+        assert!(!off.verbs.is_repeat(f));
+    }
+
+    #[test]
     fn rendered_config_reads_back_the_same() {
-        let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\n\
+        let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
                     [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"";
         let config = Config::parse(text, us).unwrap();
         let again = Config::parse(&config.render(), || bail!("layout is in the file")).unwrap();
