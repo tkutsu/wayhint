@@ -4,6 +4,7 @@
 //! - Drawing: software, into a pixmap the size of the monitor (`draw.rs`).
 //! - Keys: an input-method keyboard grab, or keyboard focus as the
 //!   fallback (`wayland.rs`), filtered by the stale-key rule (`gate.rs`).
+//!   What the grab takes and wayhint doesn't use goes on to the app.
 //! - Clicks: the surface's input region is empty, so every pointer event
 //!   goes straight through to the app underneath.
 //!
@@ -46,7 +47,12 @@ use self::{
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 use crate::{
-    action::Mods, desktop::Monitor, geometry::Point, keyboard::Locks, keys::Key, style::Style,
+    action::Mods,
+    desktop::Monitor,
+    geometry::Point,
+    keyboard::{self, Keyboard, Locks},
+    keys::Key,
+    style::Style,
 };
 
 /// Something the run loop has to react to.
@@ -107,6 +113,8 @@ impl Overlay {
             keyboard: None,
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
+            seen: gate::Seen::default(),
+            passthrough: None,
             held: Mods::NONE,
             keymap: None,
             locks: Locks::default(),
@@ -262,6 +270,14 @@ impl Overlay {
     }
 
     pub fn grab_keyboard(&mut self) -> Result<()> {
+        // The grab sends its keymap once it has started, which is too late:
+        // the app must be reachable from the grab's first event.
+        if self.state.input_methods.is_some() && self.state.passthrough.is_none() {
+            match keyboard::seat_keymap().and_then(|keymap| Keyboard::new(&self.conn, &keymap)) {
+                Ok(passthrough) => self.state.passthrough = Some(passthrough),
+                Err(e) => eprintln!("wayhint: a key let go now may stay held in the app: {e:#}"),
+            }
+        }
         self.state.take_keys(&self.qh);
         // Let the grab's `unavailable`, if it comes, arrive before any key.
         self.roundtrip()?;
