@@ -77,6 +77,18 @@ const SHIFT: u32 = 1 << 0;
 const CONTROL: u32 = 1 << 2;
 const MOD1: u32 = 1 << 3;
 
+/// The modifiers in a mask from the real keyboard's `modifiers` event:
+/// pass it the depressed and latched ones. The keymap decides which keys
+/// set them, so Caps Lock made a Ctrl (`ctrl:nocaps`) holds Ctrl, and
+/// `AltGr`, which sets Mod5 on layouts that have it, isn't Alt.
+pub const fn held(mask: u32) -> Mods {
+    Mods {
+        shift: mask & SHIFT != 0,
+        ctrl: mask & CONTROL != 0,
+        alt: mask & MOD1 != 0,
+    }
+}
+
 pub struct Keyboard {
     conn: Connection,
     // Kept alive with the keyboard, as `Pointer` keeps its own.
@@ -231,4 +243,49 @@ pub fn read_keymap(fd: OwnedFd, size: u32) -> Option<String> {
     // A keymap ends with a C string's closing zero.
     let text = bytes.split(|&b| b == 0).next()?;
     String::from_utf8(text.to_vec()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use xkbcommon::xkb;
+
+    use super::*;
+
+    /// What the compositor reports held while the key at `code` (evdev) is
+    /// down: xkb's own state for the keymap, as Hyprland keeps it.
+    fn held_by(layout: &str, options: &str, code: u32) -> Mods {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            "evdev",
+            "pc105",
+            layout,
+            "",
+            Some(options.into()),
+            xkb::COMPILE_NO_FLAGS,
+        )
+        .expect("xkb knows the layout");
+        let mut state = xkb::State::new(&keymap);
+        state.update_key(xkb::Keycode::new(code + 8), xkb::KeyDirection::Down);
+        held(state.serialize_mods(xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED))
+    }
+
+    #[test]
+    fn the_keymap_decides_which_key_holds_what() {
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(held_by("us", "", 29), ctrl, "left Ctrl");
+        assert_eq!(held_by("us", "ctrl:nocaps", 58), ctrl, "Caps made a Ctrl");
+        assert_eq!(
+            held_by("us", "ctrl:swapcaps", 29),
+            Mods::NONE,
+            "Ctrl made a Caps"
+        );
+        assert_eq!(held_by("us", "", 58), Mods::NONE, "Caps Lock isn't Shift");
+        assert!(held_by("us", "", 54).shift, "right Shift");
+        assert!(held_by("us", "", 56).alt, "left Alt");
+        assert_eq!(held_by("de", "", 100), Mods::NONE, "AltGr isn't Alt");
+    }
 }
