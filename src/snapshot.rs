@@ -1,4 +1,5 @@
-//! The scan's output: which targets one window has, where, and what they are.
+//! The scan's output: which targets the windows on a monitor have, where,
+//! and what they are.
 //!
 //! The snapshot is the one seam between the parts. `wayhint dump` writes
 //! it as JSON, `wayhint overlay --from snap.json` draws it, the re-check
@@ -20,9 +21,19 @@ pub struct Snapshot {
     /// Counts up per run, so a result from an older scan is never taken for
     /// the current one.
     pub scan: u32,
-    pub window: Window,
-    /// In reading order: top to bottom, then left to right.
+    /// The monitor the windows are on, as in `Monitor::id`.
+    pub monitor: i64,
+    /// The windows scanned, bottom to top.
+    pub windows: Vec<Scanned>,
+    /// In reading order across all windows: top to bottom, then left to
+    /// right.
     pub targets: Vec<Target>,
+}
+
+/// One window, and what scanning it cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Scanned {
+    pub window: Window,
     pub stats: Stats,
 }
 
@@ -31,6 +42,8 @@ pub struct Snapshot {
 pub struct Target {
     /// The accessible object, to ask again before clicking.
     pub object: ObjectId,
+    /// Its window, as an index into [`Snapshot::windows`].
+    pub window: usize,
     /// The whole box, as the app reports it.
     pub rect: Rect,
     /// Where a click goes: the centre of the box's visible part.
@@ -42,19 +55,25 @@ pub struct Target {
 }
 
 impl Snapshot {
-    /// Turns the filter's verdict on a tree into targets, moving every box
-    /// from window-relative to global.
-    pub fn build(scan: u32, tree: &Tree, filtered: &Filtered, stats: Stats) -> Self {
-        let origin = tree.window.rect.origin();
-        let mut targets: Vec<Target> = filtered
-            .kept
-            .iter()
-            .map(|kept| {
+    /// Turns the filter's verdict on each window's tree into targets,
+    /// moving every box from window-relative to global. `scans` go bottom
+    /// to top, as the windows stack.
+    pub fn build<'a>(
+        scan: u32,
+        monitor: i64,
+        scans: impl IntoIterator<Item = (&'a Tree, &'a Filtered, &'a Stats)>,
+    ) -> Self {
+        let mut windows = Vec::new();
+        let mut targets = Vec::new();
+        for (window, (tree, filtered, stats)) in scans.into_iter().enumerate() {
+            let origin = tree.window.rect.origin();
+            targets.extend(filtered.kept.iter().map(|kept| {
                 let node = &tree.nodes[kept.node];
                 // The filter only keeps nodes with a box and details.
                 let bounds = node.bounds.unwrap_or(kept.visible);
                 Target {
                     object: node.object.clone(),
+                    window,
                     rect: bounds.offset(origin),
                     hit: kept.visible.offset(origin).center(),
                     role: node.role.clone(),
@@ -65,16 +84,20 @@ impl Snapshot {
                         .unwrap_or_default(),
                     editable: node.states.editable,
                 }
-            })
-            .collect();
+            }));
+            windows.push(Scanned {
+                window: tree.window.clone(),
+                stats: stats.clone(),
+            });
+        }
         // `sort_by_key` with a tuple sorts by y first, then x: tuples compare
         // field by field.
         targets.sort_by_key(|t| (t.hit.y, t.hit.x));
         Self {
             scan,
-            window: tree.window.clone(),
+            monitor,
+            windows,
             targets,
-            stats,
         }
     }
 

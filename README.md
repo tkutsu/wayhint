@@ -2,19 +2,21 @@
 
 Keyboard hints for everything clickable on a Wayland desktop.
 
-Press a keybind and every button, link, tab and field in the focused window
-gets a short letter tag. Type a tag and wayhint clicks that control, then
-tags the window again for the next one. `Esc` ends it.
+Press a keybind and every button, link, tab and field in the windows on
+your screen gets a short letter tag. Type a tag and wayhint clicks that
+control, then tags the windows again for the next one. `Esc` ends it.
 
-Status: early development. Continuous clicking in the focused window, on
-Hyprland, works on the author's setup and has not been packaged yet.
+Status: early development. Continuous clicking on Hyprland works on the
+author's setup and has not been packaged yet.
 
 ## How it works
 
 wayhint reads the accessibility tree (AT-SPI), the same one screen readers
 use, so tags sit on real controls, not on boxes guessed from a screenshot.
-Keys come through an input-method keyboard grab, so an open menu stays open
-while you type its tag. Clicks go through the compositor's virtual pointer,
+Hyprland says which windows the focused monitor shows and how they stack,
+so a control under a floating window gets no tag. Keys come through an
+input-method keyboard grab, so an open menu stays open while you type its
+tag. Clicks go through the compositor's virtual pointer,
 and the cursor goes back where it was.
 
 ## Requirements
@@ -128,6 +130,11 @@ never command keys.
   modifier and wayhint prints a warning.
 - If the monitor changes size or scale during a run, the run ends; start
   it again.
+- On a workspace with a fullscreen or maximized window, only that window
+  and a focused floating window over it get tags: Hyprland doesn't say
+  which other floating windows it shows over a fullscreen one.
+- Two windows of one app with the same title get no tags unless one of
+  them has focus: wayhint can't tell their accessibility trees apart.
 - Elements hidden with `opacity: 0` on web pages still get a tag.
 - A control covered by something else inside the same app (a web modal)
   can still get a tag, and the click lands on whatever covers it.

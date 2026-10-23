@@ -96,11 +96,11 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
     let snapshot = Snapshot::load(path)?;
     let monitor = desktop::monitors()?
         .into_iter()
-        .find(|m| m.id == snapshot.window.monitor)
+        .find(|m| m.id == snapshot.monitor)
         .with_context(|| {
             format!(
                 "monitor {} from the snapshot isn't connected",
-                snapshot.window.monitor
+                snapshot.monitor
             )
         })?;
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
