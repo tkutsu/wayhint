@@ -79,7 +79,12 @@ impl FileKeys {
 #[serde(default, deny_unknown_fields)]
 struct FilePointer {
     after: After,
+    /// Px per arrow press. `u16`, so serde itself refuses a negative.
+    nudge: Option<u16>,
 }
+
+/// How far one arrow press moves a command, in px, unless the file says.
+const NUDGE: u16 = 14;
 
 /// Where the cursor goes after a click: `[pointer] after`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,14 +112,20 @@ const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
     (Action::Forward, Some(KeyCode::from_evdev(49))),
 ];
 
-/// Keys every mode reads itself, so no verb may take them.
-const BUILT_IN: [KeyCode; 5] = [
+/// Keys every mode reads itself, so no verb may take them, and how the
+/// message that says so lists them.
+const BUILT_IN: [KeyCode; 9] = [
     KeyCode::ESC,
     KeyCode::BACKSPACE,
     KeyCode::SPACE,
     KeyCode::ENTER,
     KeyCode::TAB,
+    KeyCode::UP,
+    KeyCode::DOWN,
+    KeyCode::LEFT,
+    KeyCode::RIGHT,
 ];
+const BUILT_IN_NAMES: &str = "Esc, Backspace, Space, Enter, Tab and the arrows";
 
 /// Everything wayhint needs from the settings, checked.
 #[derive(Debug)]
@@ -126,6 +137,8 @@ pub struct Config {
     pub layout: String,
     pub style: Style,
     pub after: After,
+    /// Px one arrow press moves a command: `[pointer] nudge`.
+    pub nudge: i32,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -357,9 +370,7 @@ impl Verbs {
                 }
             };
             if BUILT_IN.contains(&key.code) {
-                bail!(
-                    "[keys] {field} = {label:?}: Esc, Backspace, Space, Enter and Tab are built in"
-                );
+                bail!("[keys] {field} = {label:?}: {BUILT_IN_NAMES} are built in");
             }
             if let Some(other) = keys.iter().find(|v| v.1 == key) {
                 bail!("[keys] {} and {field} are both {label:?}", other.0.name());
@@ -382,9 +393,7 @@ impl Verbs {
             Some(text) => {
                 let key = decode_key(text, layout).context("[keys] repeat")?;
                 if BUILT_IN.contains(&key.code) {
-                    bail!(
-                        "[keys] repeat = {text:?}: Esc, Backspace, Space, Enter and Tab are built in"
-                    );
+                    bail!("[keys] repeat = {text:?}: {BUILT_IN_NAMES} are built in");
                 }
                 if let Some(other) = keys.iter().find(|v| v.1 == key) {
                     bail!("[keys] {} and repeat are both {text:?}", other.0.name());
@@ -495,12 +504,17 @@ impl Config {
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
+        let nudge = file.pointer.nudge.unwrap_or(NUDGE);
+        if nudge == 0 {
+            bail!("[pointer] nudge = 0: an arrow press must move at least 1 px");
+        }
         Ok(Self {
             alphabet,
             verbs,
             layout: layout.name().to_string(),
             style: file.style,
             after: file.pointer.after,
+            nudge: nudge.into(),
         })
     }
 
@@ -570,7 +584,11 @@ impl Config {
                 "\"leave\"   # the cursor stays on the target; \"restore\" puts it back"
             }
         };
-        let _ = write!(out, "\n[pointer]\nafter = {after}\n");
+        let _ = write!(
+            out,
+            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click\n",
+            self.nudge
+        );
         out
     }
 }
@@ -728,7 +746,18 @@ mod tests {
         assert!(err("[keys]\nright = \"r\"\n[keys.aliases]\n\"r\" = \"a\"").contains("right's"));
         assert!(err("[keys]\nright = \"x\"\nrepeat = \"x\"").contains("right and repeat"));
         assert!(err("[keys]\nrepeat = \"Enter\"").contains("built in"));
+        assert!(err("[keys]\nback = \"Left\"").contains("and the arrows are built in"));
         assert!(err("[pointer]\nafter = \"stay\"").contains("unknown variant"));
+    }
+
+    #[test]
+    fn nudge_is_14_px_unless_set() {
+        assert_eq!(Config::parse("", &us()).unwrap().nudge, 14);
+        let five = Config::parse("[pointer]\nnudge = 5", &us()).unwrap();
+        assert_eq!(five.nudge, 5);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[pointer]\nnudge = 0").contains("at least 1 px"));
+        assert!(err("[pointer]\nnudge = -3").contains("invalid value"));
     }
 
     #[test]
@@ -752,13 +781,14 @@ mod tests {
     #[test]
     fn rendered_config_reads_back_the_same() {
         let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
-                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"";
+                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"\nnudge = 9";
         let config = Config::parse(text, &us()).unwrap();
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.alphabet, config.alphabet);
         assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
         assert_eq!(again.after, config.after);
+        assert_eq!(again.nudge, 9);
     }
 
     #[test]

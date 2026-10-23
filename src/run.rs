@@ -13,6 +13,8 @@
 //! The keys pick a target and a verb (`[verb] tag`), or a verb and the
 //! spot under the pointer (`[verb] Space`), which skips the re-check.
 //! Shift, Ctrl or Alt held on the last key are held through the click.
+//! Arrows typed before the last key move where that one command lands,
+//! so a tag near the spot can click anywhere.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was.
@@ -26,13 +28,13 @@ use anyhow::{Context as _, Result, bail};
 use smithay_client_toolkit::reexports::client::Connection;
 
 use crate::{
-    action::{Action, Mods},
+    action::{Act, Action, Mods},
     config::{After, Config},
     desktop::{self, Desktop, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
-    pick::{self, Pick},
+    pick::{self, Pick, lands},
     pointer::Pointer,
     snapshot::Snapshot,
 };
@@ -54,14 +56,14 @@ struct Session {
     last: Option<Command>,
 }
 
-/// A command on a target, as the repeat key does it again. The target is
-/// kept as its accessibility object, which stays the same across scans for
-/// as long as the control exists; its tag and position may not.
+/// A command on a target, as the repeat key does it again, nudge and all.
+/// The target is kept as its accessibility object, which stays the same
+/// across scans for as long as the control exists; its tag and position
+/// may not.
 #[derive(Debug, Clone)]
 struct Command {
     object: ObjectId,
-    action: Action,
-    mods: Mods,
+    act: Act,
 }
 
 /// How a pick ended for the loop.
@@ -111,29 +113,29 @@ impl Session {
             report(&snapshot, &unread)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
-            // later rounds start with the default action again.
-            let picked = pick::pick(&mut self.overlay, config, &snapshot.targets, verb.take())?;
+            // later rounds start with the default action again. The cursor
+            // is only for drawing where a nudged `Space` lands.
+            let picked = pick::pick(
+                &mut self.overlay,
+                config,
+                &snapshot.targets,
+                verb.take(),
+                desktop::cursor().ok(),
+            )?;
             let done = match picked {
                 Pick::Leave => return Ok(()),
-                // `Space`: the cursor is already there, and there's no
-                // target to re-check, or to repeat on.
-                Pick::Here { action, mods } => {
+                // `Space`: the cursor is already there, give or take the
+                // nudge, and there's no target to re-check, or to repeat on.
+                Pick::Here(act) => {
                     self.last = None;
-                    self.act(action, mods, desktop::cursor()?, false)?;
+                    let screen = self.overlay.monitor().rect;
+                    let at = lands(desktop::cursor()?, act.nudge, screen);
+                    self.act(act.action, act.mods, at, false)?;
                     Done::Acted { ends: false }
                 }
-                Pick::Target {
-                    index,
-                    action,
-                    mods,
-                } => {
+                Pick::Target { index, act } => {
                     let object = snapshot.targets[index].object.clone();
-                    let command = Command {
-                        object,
-                        action,
-                        mods,
-                    };
-                    self.command(config, &snapshot, index, command)?
+                    self.command(config, &snapshot, index, Command { object, act })?
                 }
                 Pick::Repeat => {
                     // `clone`: `self.command` needs all of `self`, so
@@ -174,6 +176,9 @@ impl Session {
 
     /// Re-checks the target at `index` and, if it's still the same, does
     /// `command` on it and keeps it for the repeat key.
+    ///
+    /// The re-check is of the target, not of where a nudge takes the click:
+    /// that spot is anywhere you chose, and has nothing to check it against.
     fn command(
         &mut self,
         config: &Config,
@@ -185,10 +190,17 @@ impl Session {
         match self.desktop.recheck(snapshot, target)? {
             Verdict::Click { editable } => {
                 let restore = config.after == After::Restore;
-                self.act(command.action, command.mods, target.hit, restore)?;
+                let Act {
+                    action,
+                    mods,
+                    nudge,
+                } = command.act;
+                let at = lands(target.hit, nudge, self.overlay.monitor().rect);
+                self.act(action, mods, at, restore)?;
                 // A click on a text field ends the mode, so typing goes to
-                // it. A hover only looks.
-                let ends = editable && command.action.clicks();
+                // it: a nudged one too, if it stayed inside the field, which
+                // places the caret. A hover only looks.
+                let ends = editable && action.clicks() && target.rect.contains(at);
                 self.last = Some(command);
                 Ok(Done::Acted { ends })
             }

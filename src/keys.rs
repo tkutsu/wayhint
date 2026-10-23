@@ -29,6 +29,10 @@ impl KeyCode {
     pub const TAB: Self = Self(15);
     pub const ENTER: Self = Self(28);
     pub const SPACE: Self = Self(57);
+    pub const UP: Self = Self(103);
+    pub const DOWN: Self = Self(108);
+    pub const LEFT: Self = Self(105);
+    pub const RIGHT: Self = Self(106);
     // The keys a modifier click presses on the virtual keyboard. Which
     // modifiers the user holds comes from the compositor instead (see
     // `keyboard::held`): the keymap can put Ctrl on any key.
@@ -54,10 +58,10 @@ impl KeyCode {
 /// The keys a config writes by name, in evdev codes. Names match in any
 /// case (`home`, `Home`); [`name_of`] gives them back as written here.
 const NAMED: [(&str, KeyCode); 14] = [
-    ("Up", KeyCode(103)),
-    ("Down", KeyCode(108)),
-    ("Left", KeyCode(105)),
-    ("Right", KeyCode(106)),
+    ("Up", KeyCode::UP),
+    ("Down", KeyCode::DOWN),
+    ("Left", KeyCode::LEFT),
+    ("Right", KeyCode::RIGHT),
     ("PgUp", KeyCode(104)),
     ("PgDn", KeyCode(109)),
     ("Home", KeyCode(102)),
