@@ -616,7 +616,7 @@ impl Config {
 
 /// `text` as a TOML string, quoted and escaped. Rust's `{:?}` looks the
 /// same for plain text, but writes a combining mark as `\u{17d2}`, which
-/// TOML can't read: the exported config of Khmer, Thai and six other
+/// TOML can't read: the exported config of Khmer, Thai and eight other
 /// layouts didn't load (found 2026-10-23).
 pub fn quote(text: &str) -> String {
     toml::Value::String(text.into()).to_string()

@@ -215,10 +215,10 @@ impl Session {
     /// The input-method grab stays on through a plain click: spike test 7
     /// (2026-10-23) clicked a field and a menu item through it. Keys typed
     /// while the app reacts and wayhint rescans then come to wayhint, which
-    /// drops them as stale, instead of reaching the app: a fast next tag
-    /// was typed into the page. A modifier click lets go first, as spike
-    /// test 9 did it, and so does the focus fallback, the path tests 2 and
-    /// 3 proved; `rounds` takes the keyboard back.
+    /// drops them as stale, instead of reaching the app, where a fast next
+    /// tag would be typed into the page. A modifier click lets go first, as
+    /// spike test 9 did it, and so does the focus fallback, the path tests
+    /// 2 and 3 proved; `rounds` takes the keyboard back.
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
         let mods = if action.clicks() { mods } else { Mods::NONE };
         self.overlay.clear()?;
