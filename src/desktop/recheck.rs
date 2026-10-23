@@ -74,17 +74,17 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> 
     let Some(fresh) = fresh else {
         return Verdict::Refuse(Why::Gone);
     };
+    let now = fresh.bounds.offset(window.origin());
     let why = if !fresh.states.showing {
         Some(Why::Hidden)
     } else if !fresh.states.enabled && !fresh.states.sensitive {
         Some(Why::Disabled)
     } else if fresh.role != target.role || fresh.name != target.name {
         Some(Why::Replaced)
-    } else if !fresh
-        .bounds
-        .offset(window.origin())
-        .near(target.rect, TOLERANCE)
-    {
+    } else if !now.near(target.rect, TOLERANCE) || !now.contains(target.hit) {
+        // The hit point is the middle of the part that showed, so on a
+        // clipped box it can sit a pixel from the edge: a move the
+        // tolerance allows can still leave it outside.
         Some(Why::Moved)
     } else if !window.contains(target.hit) {
         Some(Why::Outside)
@@ -166,6 +166,25 @@ mod tests {
         // The window itself moved by 40 px: the target moved with it.
         assert_eq!(
             verdict(&target(), Some(&fresh()), Some(Rect { x: 140, ..WINDOW })),
+            Verdict::Refuse(Why::Moved)
+        );
+    }
+
+    #[test]
+    fn a_small_move_that_leaves_the_hit_point_outside_refuses() {
+        // A button clipped by the window's left edge: only x 100 to 104
+        // showed, so the hit point is x 102, 2 px from the right edge.
+        let clipped = Target {
+            rect: Rect::new(4, 60, 100, 30),
+            hit: Point::new(102, 75),
+            ..target()
+        };
+        let nudged = Fresh {
+            bounds: Rect::new(-98, 10, 100, 30),
+            ..fresh()
+        };
+        assert_eq!(
+            verdict(&clipped, Some(&nudged), Some(WINDOW)),
             Verdict::Refuse(Why::Moved)
         );
     }

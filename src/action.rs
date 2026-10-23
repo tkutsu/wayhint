@@ -74,16 +74,6 @@ impl Mods {
     pub const fn is_empty(self) -> bool {
         !self.shift && !self.ctrl && !self.alt
     }
-
-    /// Both sets together: Ctrl held with Shift is both.
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self {
-            shift: self.shift || other.shift,
-            ctrl: self.ctrl || other.ctrl,
-            alt: self.alt || other.alt,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -14,8 +14,6 @@
 use anyhow::{Context as _, Result};
 use xkbcommon::xkb;
 
-use crate::action::Mods;
-
 /// A key by physical position: its evdev code.
 ///
 /// The field is private, so the only ways to make one are `from_evdev` (the
@@ -31,10 +29,11 @@ impl KeyCode {
     pub const TAB: Self = Self(15);
     pub const ENTER: Self = Self(28);
     pub const SPACE: Self = Self(57);
+    // The keys a modifier click presses on the virtual keyboard. Which
+    // modifiers the user holds comes from the compositor instead (see
+    // `keyboard::held`): the keymap can put Ctrl on any key.
     pub const LEFT_SHIFT: Self = Self(42);
-    const RIGHT_SHIFT: Self = Self(54);
     pub const LEFT_CTRL: Self = Self(29);
-    const RIGHT_CTRL: Self = Self(97);
     pub const LEFT_ALT: Self = Self(56);
 
     /// A code as the input-method grab or `wl_keyboard` reports it.
@@ -49,18 +48,6 @@ impl KeyCode {
 
     fn to_xkb(self) -> xkb::Keycode {
         xkb::Keycode::new(self.0 + 8)
-    }
-
-    /// The modifier this key is, by position, or none. The overlay follows
-    /// these like every other key, so Caps Lock never counts as Shift.
-    /// Right Alt is left out: on many layouts it's `AltGr`, which picks a
-    /// key's third character, and holding it means no Alt-click.
-    pub const fn modifier(self) -> Mods {
-        Mods {
-            shift: self.0 == Self::LEFT_SHIFT.0 || self.0 == Self::RIGHT_SHIFT.0,
-            ctrl: self.0 == Self::LEFT_CTRL.0 || self.0 == Self::RIGHT_CTRL.0,
-            alt: self.0 == Self::LEFT_ALT.0,
-        }
     }
 }
 
@@ -282,19 +269,6 @@ mod tests {
         assert_eq!(named("pgup"), Some(KeyCode(104)));
         assert_eq!(named("HOME").and_then(name_of), Some("Home"));
         assert_eq!(named("PageUp"), None);
-    }
-
-    #[test]
-    fn modifiers_go_by_position() {
-        let shift = Mods {
-            shift: true,
-            ..Mods::NONE
-        };
-        assert_eq!(KeyCode(54).modifier(), shift, "right Shift");
-        assert_eq!(KeyCode(58).modifier(), Mods::NONE, "Caps Lock isn't Shift");
-        assert!(KeyCode(97).modifier().ctrl, "right Ctrl");
-        assert_eq!(KeyCode(100).modifier(), Mods::NONE, "right Alt is AltGr");
-        assert_eq!(KeyCode(30).modifier(), Mods::NONE, "a letter");
     }
 
     #[test]

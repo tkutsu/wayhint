@@ -53,7 +53,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// A key was released, and its press counted (see `gate.rs`), with
-    /// the modifiers held at its press; a modifier alone is never one.
+    /// the modifiers held at its press. Modifier keys come too, and mean
+    /// nothing to `pick`.
     /// Shift is in both: in the [`Key`], because `_` and `-` are different
     /// keys to the config, and in the [`Mods`], for a Shift-click.
     Key(Key, Mods),
@@ -106,7 +107,7 @@ impl Overlay {
             keyboard: None,
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
-            modifiers: Vec::new(),
+            held: Mods::NONE,
             keymap: None,
             locks: Locks::default(),
             events: VecDeque::new(),

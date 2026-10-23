@@ -45,7 +45,7 @@ use tiny_skia::Pixmap;
 
 use crate::{
     action::Mods,
-    keyboard::{Locks, read_keymap},
+    keyboard::{Locks, held, read_keymap},
     keys::{Key, KeyCode},
     overlay::{Event, draw, gate::KeyGate},
 };
@@ -79,8 +79,8 @@ pub struct State {
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub grab: Grab,
     pub gate: KeyGate,
-    /// The modifier keys held down right now, by position.
-    pub modifiers: Vec<KeyCode>,
+    /// The modifiers held right now, as the compositor last reported them.
+    pub held: Mods,
     /// The real keyboard's keymap as xkb text, and its locks and layout,
     /// for the virtual keyboard of a modifier click to copy.
     pub keymap: Option<String>,
@@ -102,9 +102,10 @@ impl State {
         if !matches!(self.grab, Grab::Released) {
             return;
         }
-        // A modifier held across the click was pressed before this grab,
-        // and its release may never come here: start with none held.
-        self.modifiers.clear();
+        // A new grab is told what's held as it starts, a Ctrl kept down
+        // across the click included (Hyprland sends `modifiers` with the
+        // keymap). Until then none, so one let go meanwhile can't stick.
+        self.held = Mods::NONE;
         if let (Some(manager), Some(seat)) = (&self.input_methods, self.seat()) {
             let method = manager.get_input_method(&seat, qh, ImeEvents);
             let grab = method.grab_keyboard(qh, ImeEvents);
@@ -170,29 +171,16 @@ impl State {
         Ok(())
     }
 
+    /// Modifier keys come through here too, as keys nothing in the config
+    /// is, so `pick` skips them; what they hold arrives as `modifiers`.
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
-        // A modifier is never a key of its own here, only state for the
-        // others.
-        if !code.modifier().is_empty() {
-            self.modifiers.retain(|&k| k != code);
-            if pressed {
-                self.modifiers.push(code);
-            }
-            return;
-        }
         if pressed {
-            let mods = self
-                .modifiers
-                .iter()
-                .fold(Mods::NONE, |all, k| all.union(k.modifier()));
-            self.gate.press(
-                Key {
-                    code,
-                    shift: mods.shift,
-                },
-                mods,
-            );
+            let key = Key {
+                code,
+                shift: self.held.shift,
+            };
+            self.gate.press(key, self.held);
         } else if let Some((key, mods)) = self.gate.release(code) {
             // Acting on release: press and release were both swallowed, so
             // nothing reaches the app once the grab ends.
@@ -279,9 +267,9 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
         _: &Connection,
         _: &QueueHandle<State>,
     ) {
-        // Keys are matched by position, so tags only need the codes
-        // (modifiers are followed by their codes too, in `State::key`). The
-        // keymap and the lock state are kept for modifier clicks.
+        // Keys are matched by position, so tags only need the codes. The
+        // modifiers held are the compositor's word, read with the keymap it
+        // knows; the keymap and the lock state are kept for modifier clicks.
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Key {
                 key,
@@ -292,8 +280,13 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
                 state.keymap = read_keymap(fd, size);
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
-                mods_locked, group, ..
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
             } => {
+                state.held = held(mods_depressed | mods_latched);
                 state.locks = Locks {
                     locked: mods_locked,
                     group,
@@ -410,6 +403,7 @@ impl KeyboardHandler for State {
         raw: RawModifiers,
         layout: u32,
     ) {
+        self.held = held(raw.depressed | raw.latched);
         self.locks = Locks {
             locked: raw.locked,
             group: layout,
