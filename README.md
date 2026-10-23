@@ -56,14 +56,20 @@ bind = SUPER, slash, exec, wayhint
 | `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
 | `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection |
 | `Space` | Does the default action, or the verb typed first, where the pointer is |
+| arrows, before the tag's last letter or `Space` | Move where that one click lands, 14 px per press |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
 | `Backspace` | Removes the last typed letter, then the verb |
-| `Esc` | Clears typed letters and the verb; with none, exits |
+| `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
 
 A typed verb shows in front of every tag (`tAS` after `t`), and its name
 shows at the bottom of the screen, until the tag is typed. Typing another
 verb replaces it. Right Alt doesn't count as Alt, since on many layouts
-it's AltGr. Clicking a text field exits, so
+it's AltGr.
+
+Arrows let a tag click anywhere near it: `→ → ↓` then a tag clicks 28 px
+right of the control and 14 px below. A dot marks where each tag would
+land, so the tags stay readable. The move is for that one click, and the
+repeat key does it again. Clicking a text field exits, so
 your typing goes to the field. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
 go straight to right-clicking.
@@ -89,7 +95,7 @@ alphabet = "ciaehtns"   # tag letters, most used first; default: the home row
 right = ""              # "" makes this what a bare tag does (default: left)
 left = "."              # every other verb gets a key: one character or a name
 hover = "_"             # Shift works: _ is Shift and -
-back = "Home"           # names: Up Down Left Right PgUp PgDn Home End Delete
+back = "Home"           # names: PgUp PgDn Home End Delete
 repeat = "q"            # the last command again; no key unless you set one
 
 [keys.aliases]
@@ -97,6 +103,7 @@ repeat = "q"            # the last command again; no key unless you set one
 
 [pointer]
 after = "restore"       # cursor back after a click; "leave" keeps it on the target
+nudge = 14              # px one arrow press moves a click
 
 [style]
 font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
@@ -117,8 +124,8 @@ change the tags.
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that
 is in the alphabet you wrote stays off instead, and `wayhint config` lists
-which verbs have no key. `Esc`, `Backspace`, `Space`, `Enter` and `Tab` are
-never command keys.
+which verbs have no key. `Esc`, `Backspace`, `Space`, `Enter`, `Tab` and
+the arrows are never command keys.
 
 ## Known gaps
 

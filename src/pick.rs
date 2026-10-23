@@ -5,11 +5,11 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    action::{Action, Mods},
+    action::{Act, Action, Mods},
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Event, Overlay, Tag},
+    overlay::{Event, Frame, Overlay, Tag},
     selection::{Input, Selector, Step},
     snapshot::Target,
 };
@@ -20,27 +20,33 @@ const PILL_LIFT: i32 = 48;
 /// How a pick ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
-    /// Do `action` at the target at `index`, with `mods` held.
-    Target {
-        index: usize,
-        action: Action,
-        mods: Mods,
-    },
-    /// Do `action` where the pointer is now (`Space`), with `mods` held.
-    Here { action: Action, mods: Mods },
+    /// Do `act` at the target at `index`.
+    Target { index: usize, act: Act },
+    /// Do `act` where the pointer is now (`Space`).
+    Here(Act),
     /// Do the last command again, on its target.
     Repeat,
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
 }
 
+/// What the screen holds while a pick runs: the targets, the monitor they
+/// are on, and the pointer, if known, for where a nudged `Space` lands.
+struct Scene<'a> {
+    targets: &'a [Target],
+    screen: Rect,
+    pointer: Option<Point>,
+}
+
 /// Shows tags for `targets` and reads keys until one is picked. `verb`
 /// (from `--verb`) is armed as if its key were the first one typed.
+/// `pointer` is where the cursor was as the pick began.
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
     targets: &[Target],
     verb: Option<Action>,
+    pointer: Option<Point>,
 ) -> Result<Pick> {
     let mut selector = Selector::new(
         targets.len(),
@@ -50,8 +56,12 @@ pub fn pick(
     if let Some(action) = verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
-    let screen = overlay.monitor().rect;
-    overlay.show(&tags(&selector, config, targets, screen))?;
+    let scene = Scene {
+        targets,
+        screen: overlay.monitor().rect,
+        pointer,
+    };
+    overlay.show(&frame(&selector, config, &scene))?;
     loop {
         let input = match overlay.next_event()? {
             Event::Key(key, mods) => match input_of(key, mods, config) {
@@ -62,19 +72,9 @@ pub fn pick(
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
         };
         match selector.press(input) {
-            Step::Typing => overlay.update(&tags(&selector, config, targets, screen))?,
-            Step::Picked {
-                index,
-                action,
-                mods,
-            } => {
-                return Ok(Pick::Target {
-                    index,
-                    action,
-                    mods,
-                });
-            }
-            Step::Here { action, mods } => return Ok(Pick::Here { action, mods }),
+            Step::Typing => overlay.update(&frame(&selector, config, &scene))?,
+            Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
+            Step::Here(act) => return Ok(Pick::Here(act)),
             Step::Repeat => return Ok(Pick::Repeat),
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
@@ -85,12 +85,18 @@ pub fn pick(
 /// What a key means: a built-in key, else a verb or repeat, else a tag
 /// letter, else nothing. The config keeps command keys out of the alphabet
 /// and apart from each other, so the order never decides anything. A tag letter matches with or
-/// without Shift: Shift on it is a Shift-click, carried in `mods`.
+/// without Shift: Shift on it is a Shift-click, carried in `mods`. An
+/// arrow moves the command `[pointer] nudge` px its way, whatever is held.
 fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
+    let nudge = |x, y| Some(Input::Nudge(Point::new(x * config.nudge, y * config.nudge)));
     match key.code {
         KeyCode::ESC => Some(Input::Escape),
         KeyCode::BACKSPACE => Some(Input::Backspace),
         KeyCode::SPACE => Some(Input::Here(mods)),
+        KeyCode::UP => nudge(0, -1),
+        KeyCode::DOWN => nudge(0, 1),
+        KeyCode::LEFT => nudge(-1, 0),
+        KeyCode::RIGHT => nudge(1, 0),
         _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
         code => config
             .verbs
@@ -103,26 +109,34 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     }
 }
 
-/// The tags still possible after what's been typed, drawn upper case.
+/// The tags still possible after what's been typed, drawn upper case, and
+/// where each would land if nudged.
 ///
 /// Each tag reads as the whole command: everything typed so far, dimmed,
 /// then the letters still to type. So an armed verb's key goes in front
 /// (`kEA` after `k`, with `k` and nothing else dimmed), where the eyes
-/// already are. Its name also shows as a pill at the bottom of `screen`,
+/// already are. Its name also shows as a pill at the bottom of the screen,
 /// for a verb that has no key (`--verb`) and for `Space`, which uses no
 /// tag. The pill is drawn as one more tag: same look, no new drawing code.
-fn tags(selector: &Selector, config: &Config, targets: &[Target], screen: Rect) -> Vec<Tag> {
+///
+/// A nudge leaves the tags where they are and puts a dot where each one
+/// lands, one for `Space` too, at the pointer: a tag moved by the arrows
+/// would cover the very spot being aimed at.
+fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     let letters = config.alphabet.letters();
     let prefix = selector
         .armed()
         .and_then(|action| config.verbs.label(action))
         .unwrap_or("");
     let typed = prefix.chars().count() + selector.typed().len();
-    let mut tags: Vec<Tag> = selector
+    let open: Vec<(&Vec<usize>, &Target)> = selector
         .labels()
         .iter()
-        .zip(targets)
+        .zip(scene.targets)
         .filter(|(label, _)| selector.matches(label))
+        .collect();
+    let mut tags: Vec<Tag> = open
+        .iter()
         .map(|(label, target)| Tag {
             at: target.hit,
             text: prefix
@@ -134,12 +148,29 @@ fn tags(selector: &Selector, config: &Config, targets: &[Target], screen: Rect) 
         .collect();
     if let Some(action) = selector.armed() {
         tags.push(Tag {
-            at: Point::new(screen.center().x, screen.bottom() - PILL_LIFT),
+            at: Point::new(scene.screen.center().x, scene.screen.bottom() - PILL_LIFT),
             text: action.name().into(),
             typed: 0,
         });
     }
-    tags
+    let nudge = selector.nudge();
+    let dots = if nudge == Point::default() {
+        Vec::new()
+    } else {
+        let points = open.iter().map(|(_, target)| target.hit);
+        points
+            .chain(scene.pointer)
+            .map(|at| lands(at, nudge, scene.screen))
+            .collect()
+    };
+    Frame { tags, dots }
+}
+
+/// Where a command nudged by `nudge` lands for the point `at`: kept on
+/// `screen`, the monitor the tags are on, so an arrow too many stops at
+/// the edge instead of reaching a point no monitor has.
+pub fn lands(at: Point, nudge: Point, screen: Rect) -> Point {
+    screen.clamp(at.offset(nudge))
 }
 
 /// A letter in upper case when that's one character (`ß` would be `SS`,
@@ -199,5 +230,19 @@ mod tests {
             Some(Input::Letter(0, shift)),
             "a Shift-click on a"
         );
+        assert_eq!(input(105, false), Some(Input::Nudge(Point::new(-14, 0))));
+        assert_eq!(
+            input(103, true),
+            Some(Input::Nudge(Point::new(0, -14))),
+            "Shift changes nothing on an arrow"
+        );
+    }
+
+    #[test]
+    fn a_nudge_stops_at_the_monitors_edge() {
+        let screen = Rect::new(0, 0, 1920, 1080);
+        let at = Point::new(10, 500);
+        assert_eq!(lands(at, Point::new(28, -14), screen), Point::new(38, 486));
+        assert_eq!(lands(at, Point::new(-42, 0), screen), Point::new(0, 500));
     }
 }

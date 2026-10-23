@@ -4,7 +4,8 @@
 //! `Pixmap`; `fontdue` rasterizes each letter into a coverage map (how much
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
-//! CPU draws that in well under a millisecond.
+//! CPU draws that in well under a millisecond. Dots, for where a nudged
+//! command lands, are two filled circles.
 
 use std::collections::HashMap;
 
@@ -22,6 +23,18 @@ use crate::{
 
 /// Gap kept between a tag and the monitor's edge, in px.
 const EDGE: f32 = 2.0;
+/// A dot's radius, and the width of the ring around it, in px.
+const DOT: f32 = 3.0;
+const RING: f32 = 2.0;
+
+/// Everything one picture shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Frame {
+    pub tags: Vec<Tag>,
+    /// Where nudged commands land: a small dot each, drawn over the tags,
+    /// so the tag says which and the dot says where.
+    pub dots: Vec<Point>,
+}
 
 /// One tag to draw, in overlay coordinates (the monitor's top-left is 0, 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,13 +82,35 @@ impl Painter {
         })
     }
 
-    /// Clears `pixmap` and draws every tag on it.
-    pub fn paint(&mut self, pixmap: &mut Pixmap, tags: &[Tag]) {
+    /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
+    pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
         let area = (pixmap.width() as f32, pixmap.height() as f32);
-        for tag in tags {
+        for tag in &frame.tags {
             self.paint_tag(pixmap, tag, area);
+        }
+        for &dot in &frame.dots {
+            self.paint_dot(pixmap, dot);
+        }
+    }
+
+    /// A dot in the letters' colour inside a ring in the tags' background:
+    /// the pair a tag is already legible in, so the dot shows on light and
+    /// dark windows alike. Centred on the pixel, not its corner.
+    fn paint_dot(&self, pixmap: &mut Pixmap, at: Point) {
+        #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
+        let (x, y) = (at.x as f32 + 0.5, at.y as f32 + 0.5);
+        for (radius, color) in [(DOT + RING, self.style.background), (DOT, self.style.text)] {
+            if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
+                pixmap.fill_path(
+                    &circle,
+                    &paint(color),
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
     }
 

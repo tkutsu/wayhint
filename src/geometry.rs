@@ -22,6 +22,13 @@ impl Point {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
+
+    /// The same point moved by `by`, a distance written as a point:
+    /// `(14, 0)` is 14 px to the right.
+    #[must_use]
+    pub const fn offset(self, by: Self) -> Self {
+        Self::new(self.x + by.x, self.y + by.y)
+    }
 }
 
 /// An axis-aligned rectangle: top-left corner plus size.
@@ -66,6 +73,16 @@ impl Rect {
     /// and bottom ones are the next rectangle's.
     pub const fn contains(self, point: Point) -> bool {
         point.x >= self.x && point.x < self.right() && point.y >= self.y && point.y < self.bottom()
+    }
+
+    /// The point inside nearest to `point`: `point` itself if it's in.
+    /// Only for a rectangle that isn't empty, such as a monitor's:
+    /// `i32::clamp` panics when its minimum is above its maximum.
+    pub fn clamp(self, point: Point) -> Point {
+        Point::new(
+            point.x.clamp(self.x, self.right() - 1),
+            point.y.clamp(self.y, self.bottom() - 1),
+        )
     }
 
     /// The same rectangle moved by `by`.
@@ -171,6 +188,18 @@ mod tests {
             Some(Rect::new(-1920, 0, 4480, 1440))
         );
         assert_eq!(Rect::bounding([]), None);
+    }
+
+    #[test]
+    fn clamp_keeps_a_point_inside() {
+        let r = Rect::new(0, 0, 100, 50);
+        assert_eq!(r.clamp(Point::new(40, 20)), Point::new(40, 20));
+        assert_eq!(r.clamp(Point::new(-5, 70)), Point::new(0, 49));
+        assert_eq!(
+            r.clamp(Point::new(100, 0)),
+            Point::new(99, 0),
+            "the right edge is the next rectangle's"
+        );
     }
 
     #[test]

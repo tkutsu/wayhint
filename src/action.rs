@@ -1,6 +1,9 @@
-//! What wayhint does at a target: the verbs. Pure data, so the config can
-//! bind them, the selection can arm them and the pointer can carry them
-//! out without any of the three knowing about the others.
+//! What wayhint does at a target: the verbs, and the whole command they
+//! are part of. Pure data, so the config can bind them, the selection can
+//! arm them and the pointer can carry them out without any of the three
+//! knowing about the others.
+
+use crate::geometry::Point;
 
 /// One pointer action.
 ///
@@ -74,6 +77,17 @@ impl Mods {
     pub const fn is_empty(self) -> bool {
         !self.shift && !self.ctrl && !self.alt
     }
+}
+
+/// One command, all but where: the action, the modifiers held through it,
+/// and the arrows' nudge, how far from its point it lands. A tag or
+/// `Space` gives the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Act {
+    pub action: Action,
+    pub mods: Mods,
+    /// In px, `(0, 0)` with no arrow pressed.
+    pub nudge: Point,
 }
 
 #[cfg(test)]

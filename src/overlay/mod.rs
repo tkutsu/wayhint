@@ -41,7 +41,7 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 
-pub use self::draw::Tag;
+pub use self::draw::{Frame, Tag};
 use self::{
     draw::Painter,
     wayland::{Answered, Grab, NoEvents, State, Synced},
@@ -206,28 +206,33 @@ impl Overlay {
         self.state.locks
     }
 
-    /// Draws a new set of `tags` (their points in global coordinates) and
-    /// starts accepting keys for them once the compositor confirms the
-    /// frame: every key pressed before that was aimed at something else.
-    pub fn show(&mut self, tags: &[Tag]) -> Result<()> {
-        self.update(tags)?;
+    /// Draws a new set of tags (`frame` in global coordinates) and starts
+    /// accepting keys for them once the compositor confirms the frame:
+    /// every key pressed before that was aimed at something else.
+    pub fn show(&mut self, frame: &Frame) -> Result<()> {
+        self.update(frame)?;
         let generation = self.new_tags();
         self.conn.display().sync(&self.qh, Synced(generation));
         self.conn.flush()?;
         Ok(())
     }
 
-    /// Redraws the same tags (a letter was typed). Keys stay live: a fast
-    /// second letter must not count as stale.
-    pub fn update(&mut self, tags: &[Tag]) -> Result<()> {
+    /// Redraws the same tags (a letter or an arrow was typed). Keys stay
+    /// live: a fast second letter must not count as stale.
+    pub fn update(&mut self, frame: &Frame) -> Result<()> {
         let origin = self.monitor.rect.origin();
-        let local: Vec<Tag> = tags
-            .iter()
-            .map(|t| Tag {
-                at: Point::new(t.at.x - origin.x, t.at.y - origin.y),
-                ..t.clone()
-            })
-            .collect();
+        let to_local = |p: Point| Point::new(p.x - origin.x, p.y - origin.y);
+        let local = Frame {
+            tags: frame
+                .tags
+                .iter()
+                .map(|t| Tag {
+                    at: to_local(t.at),
+                    ..t.clone()
+                })
+                .collect(),
+            dots: frame.dots.iter().copied().map(to_local).collect(),
+        };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;
         self.conn.flush()?;
@@ -236,7 +241,7 @@ impl Overlay {
 
     /// Shows nothing. Keys are refused until the next `show`.
     pub fn clear(&mut self) -> Result<()> {
-        self.painter.paint(&mut self.pixmap, &[]);
+        self.painter.paint(&mut self.pixmap, &Frame::default());
         self.state.present(&self.pixmap)?;
         self.new_tags();
         self.conn.flush()?;
