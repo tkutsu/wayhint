@@ -290,6 +290,16 @@ impl Verbs {
         self.keys.iter().find(|v| v.1 == key).map(|v| v.0)
     }
 
+    /// The key that arms `action`, as `wayhint config` prints it (`k`,
+    /// `_`, `Home`), for the prefix drawn in front of the tags. `None` for
+    /// a verb with no key, such as the default action.
+    pub fn label(&self, action: Action) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|v| v.0 == action)
+            .map(|v| v.2.as_str())
+    }
+
     /// Decodes the seven verb fields, fills in the defaults, checks them.
     ///
     /// A default never takes a tag key: a verb the file doesn't bind gets

@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::{
     action::Action,
-    config::{Alphabet, Config},
+    config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
     overlay::{Event, Overlay, Tag},
@@ -45,7 +45,7 @@ pub fn pick(
         selector.press(Input::Verb(action));
     }
     let screen = overlay.monitor().rect;
-    overlay.show(&tags(&selector, &config.alphabet, targets, screen))?;
+    overlay.show(&tags(&selector, config, targets, screen))?;
     loop {
         let input = match overlay.next_event()? {
             Event::Key(key) => match input_of(key, config) {
@@ -55,7 +55,7 @@ pub fn pick(
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
         };
         match selector.press(input) {
-            Step::Typing => overlay.update(&tags(&selector, &config.alphabet, targets, screen))?,
+            Step::Typing => overlay.update(&tags(&selector, config, targets, screen))?,
             Step::Picked { index, action } => return Ok(Pick::Target { index, action }),
             Step::Here(action) => return Ok(Pick::Here(action)),
             Step::Ignored => {}
@@ -81,11 +81,21 @@ fn input_of(key: Key, config: &Config) -> Option<Input> {
     }
 }
 
-/// The tags still possible after what's been typed, drawn upper case, plus
-/// the armed verb's name as a pill at the bottom of `screen`. The pill is
-/// drawn as one more tag: same look, no new drawing code.
-fn tags(selector: &Selector, alphabet: &Alphabet, targets: &[Target], screen: Rect) -> Vec<Tag> {
-    let letters = alphabet.letters();
+/// The tags still possible after what's been typed, drawn upper case.
+///
+/// Each tag reads as the whole command: everything typed so far, dimmed,
+/// then the letters still to type. So an armed verb's key goes in front
+/// (`kEA` after `k`, with `k` and nothing else dimmed), where the eyes
+/// already are. Its name also shows as a pill at the bottom of `screen`,
+/// for a verb that has no key (`--verb`) and for `Space`, which uses no
+/// tag. The pill is drawn as one more tag: same look, no new drawing code.
+fn tags(selector: &Selector, config: &Config, targets: &[Target], screen: Rect) -> Vec<Tag> {
+    let letters = config.alphabet.letters();
+    let prefix = selector
+        .armed()
+        .and_then(|action| config.verbs.label(action))
+        .unwrap_or("");
+    let typed = prefix.chars().count() + selector.typed().len();
     let mut tags: Vec<Tag> = selector
         .labels()
         .iter()
@@ -93,8 +103,11 @@ fn tags(selector: &Selector, alphabet: &Alphabet, targets: &[Target], screen: Re
         .filter(|(label, _)| selector.matches(label))
         .map(|(label, target)| Tag {
             at: target.hit,
-            text: label.iter().map(|&i| upper(letters[i].label)).collect(),
-            typed: selector.typed().len(),
+            text: prefix
+                .chars()
+                .chain(label.iter().map(|&i| upper(letters[i].label)))
+                .collect(),
+            typed,
         })
         .collect();
     if let Some(action) = selector.armed() {
