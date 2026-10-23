@@ -2,7 +2,7 @@
 //! the user leaves. The glue between `overlay` (pixels and keys) and
 //! `selection` (what the keys mean), so neither has to know the other.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::{
     action::Action,
@@ -53,6 +53,7 @@ pub fn pick(
                 None => continue,
             },
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
+            Event::Resized => bail!("the monitor changed size; run wayhint again"),
         };
         match selector.press(input) {
             Step::Typing => overlay.update(&tags(&selector, config, targets, screen))?,

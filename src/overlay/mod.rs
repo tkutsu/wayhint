@@ -57,6 +57,10 @@ pub enum Event {
     Interrupted,
     /// The compositor closed the overlay (its monitor went away).
     Closed,
+    /// The monitor changed size (a new mode or scale). The tags were placed
+    /// for the old one and the drawing buffer has the old size, so the run
+    /// can't go on.
+    Resized,
     /// Keyboard focus left the overlay in the Exclusive fallback.
     KeyboardLost,
 }
