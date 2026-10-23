@@ -130,8 +130,8 @@ impl Style {
         let mut out = String::from("[style]\n");
         let _ = writeln!(
             out,
-            "font = {:?}   # a fontconfig pattern, as fc-match takes it",
-            self.font
+            "font = {}   # a fontconfig pattern, as fc-match takes it",
+            crate::config::quote(&self.font)
         );
         let _ = writeln!(out, "size = {}", self.size);
         for (name, color) in [
