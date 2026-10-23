@@ -175,6 +175,12 @@ impl Overlay {
         }
     }
 
+    /// Whether keys come through the input-method grab, which takes no
+    /// keyboard focus: an app can be clicked while wayhint holds it.
+    pub fn grabs_without_focus(&self) -> bool {
+        matches!(self.state.grab, Grab::InputMethod { .. })
+    }
+
     /// Draws a new set of `tags` (their points in global coordinates) and
     /// starts accepting keys for them once the compositor confirms the
     /// frame: every key pressed before that was aimed at something else.
