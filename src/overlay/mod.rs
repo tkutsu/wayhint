@@ -41,7 +41,7 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 
-pub use self::draw::{Frame, Tag};
+pub use self::draw::{Dot, Frame, Tag};
 use self::{
     draw::Painter,
     wayland::{Answered, Grab, NoEvents, State, Synced},
@@ -231,7 +231,14 @@ impl Overlay {
                     ..t.clone()
                 })
                 .collect(),
-            dots: frame.dots.iter().copied().map(to_local).collect(),
+            dots: frame
+                .dots
+                .iter()
+                .map(|d| Dot {
+                    from: to_local(d.from),
+                    at: to_local(d.at),
+                })
+                .collect(),
         };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;

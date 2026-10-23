@@ -9,7 +9,7 @@ use crate::{
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Event, Frame, Overlay, Tag},
+    overlay::{Dot, Event, Frame, Overlay, Tag},
     selection::{Input, Selector, Step},
     snapshot::Target,
 };
@@ -134,7 +134,9 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 ///
 /// A nudge leaves the tags where they are and puts a dot where each one
 /// lands, one for `Space` too, at the pointer: a tag moved by the arrows
-/// would cover the very spot being aimed at.
+/// would cover the very spot being aimed at. A line joins each dot to its
+/// tag. Only the tags still open get them, so they thin out with every
+/// letter typed, nudged before it or after.
 fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     let letters = config.alphabet.letters();
     let prefix = selector
@@ -175,7 +177,10 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
         // `lands` keeps its dot on that monitor, off this overlay.
         points
             .chain(scene.pointer)
-            .map(|at| lands(at, nudge, &[scene.screen]))
+            .map(|from| Dot {
+                from,
+                at: lands(from, nudge, &[scene.screen]),
+            })
             .collect()
     };
     Frame { tags, dots }
@@ -290,13 +295,59 @@ mod tests {
             screen: Rect::new(0, 0, 1920, 1080),
             pointer: Some(Point::new(x, 100)),
         };
+        let dot = |x| Dot {
+            from: Point::new(x, 100),
+            at: Point::new(x + 14, 100),
+        };
+        assert_eq!(frame(&selector, &config, &scene(100)).dots, [dot(100)]);
+        assert_eq!(frame(&selector, &config, &scene(500)).dots, [dot(500)]);
+    }
+
+    #[test]
+    fn dots_thin_out_as_letters_are_typed() {
+        // Two letters, three targets: labels a, ba, bb.
+        let config = Config::parse(
+            "[keys]\nalphabet = \"ab\"\nleft = \"\"",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let target = |x| Target {
+            object: crate::desktop::tree::ObjectId {
+                bus: ":1.7".into(),
+                path: format!("/{x}"),
+            },
+            window: 0,
+            rect: Rect::new(x - 20, 90, 40, 20),
+            hit: Point::new(x, 100),
+            role: "button".into(),
+            name: String::new(),
+            editable: false,
+            clips: Vec::new(),
+        };
+        let targets = [target(100), target(200), target(300)];
+        let scene = Scene {
+            targets: &targets,
+            screen: Rect::new(0, 0, 1920, 1080),
+            pointer: None,
+        };
+        let mut selector = Selector::new(3, 2, Action::Left);
+        let froms = |selector: &Selector| -> Vec<i32> {
+            frame(selector, &config, &scene)
+                .dots
+                .iter()
+                .map(|d| d.from.x)
+                .collect()
+        };
+        selector.press(Input::Nudge(Point::new(0, 14)));
+        assert_eq!(froms(&selector), [100, 200, 300], "nudged before typing");
+        selector.press(Input::Letter(1, Mods::NONE));
+        assert_eq!(froms(&selector), [200, 300], "b leaves ba and bb");
+        selector.press(Input::Nudge(Point::new(14, 0)));
+        let dots = frame(&selector, &config, &scene).dots;
         assert_eq!(
-            frame(&selector, &config, &scene(100)).dots,
-            [Point::new(114, 100)]
-        );
-        assert_eq!(
-            frame(&selector, &config, &scene(500)).dots,
-            [Point::new(514, 100)]
+            dots.iter().map(|d| d.at).collect::<Vec<_>>(),
+            [Point::new(214, 114), Point::new(314, 114)],
+            "nudged after a letter: both arrows count, on the open tags only"
         );
     }
 }

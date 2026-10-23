@@ -5,7 +5,7 @@
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
 //! CPU draws that in well under a millisecond. Dots, for where a nudged
-//! command lands, are two filled circles.
+//! command lands, are two filled circles, each on a line back to its tag.
 
 use std::collections::HashMap;
 
@@ -26,14 +26,25 @@ const EDGE: f32 = 2.0;
 /// A dot's radius, and the width of the ring around it, in px.
 const DOT: f32 = 3.0;
 const RING: f32 = 2.0;
+/// The width of the line from a tag to its dot, in px. Its ring adds
+/// `RING` px in all, half on each side.
+const LINE: f32 = 1.0;
 
 /// Everything one picture shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frame {
     pub tags: Vec<Tag>,
-    /// Where nudged commands land: a small dot each, drawn over the tags,
-    /// so the tag says which and the dot says where.
-    pub dots: Vec<Point>,
+    /// Where nudged commands land: the tag says which, the dot says where,
+    /// and the line between says which dot is whose.
+    pub dots: Vec<Dot>,
+}
+
+/// Where a nudged command lands, `at`, and the point it was nudged from:
+/// its tag's hit point, or the pointer for `Space`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dot {
+    pub from: Point,
+    pub at: Point,
 }
 
 /// One tag to draw, in overlay coordinates (the monitor's top-left is 0, 0).
@@ -83,24 +94,51 @@ impl Painter {
     }
 
     /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
+    ///
+    /// Lines go first, under the tags, so a line never crosses the letters:
+    /// it comes out from under its own tag. Dots go last, over everything.
     pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
         let area = (pixmap.width() as f32, pixmap.height() as f32);
+        for &dot in &frame.dots {
+            self.paint_line(pixmap, dot);
+        }
         for tag in &frame.tags {
             self.paint_tag(pixmap, tag, area);
         }
         for &dot in &frame.dots {
-            self.paint_dot(pixmap, dot);
+            self.paint_dot(pixmap, dot.at);
+        }
+    }
+
+    /// The line from where a command was nudged from to where it lands, in
+    /// the dot's two colours, so it shows on light and dark windows alike.
+    fn paint_line(&self, pixmap: &mut Pixmap, dot: Dot) {
+        let ((x0, y0), (x1, y1)) = (centre(dot.from), centre(dot.at));
+        let mut path = PathBuilder::new();
+        path.move_to(x0, y0);
+        path.line_to(x1, y1);
+        let Some(path) = path.finish() else {
+            return;
+        };
+        for (width, color) in [
+            (LINE + RING, self.style.background),
+            (LINE, self.style.text),
+        ] {
+            let stroke = Stroke {
+                width,
+                ..Stroke::default()
+            };
+            pixmap.stroke_path(&path, &paint(color), &stroke, Transform::identity(), None);
         }
     }
 
     /// A dot in the letters' colour inside a ring in the tags' background:
     /// the pair a tag is already legible in, so the dot shows on light and
-    /// dark windows alike. Centred on the pixel, not its corner.
+    /// dark windows alike.
     fn paint_dot(&self, pixmap: &mut Pixmap, at: Point) {
-        #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
-        let (x, y) = (at.x as f32 + 0.5, at.y as f32 + 0.5);
+        let (x, y) = centre(at);
         for (radius, color) in [(DOT + RING, self.style.background), (DOT, self.style.text)] {
             if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
                 pixmap.fill_path(
@@ -227,6 +265,13 @@ fn place(at: Point, (w, h): (f32, f32), (area_w, area_h): (f32, f32)) -> Option<
         .round()
         .clamp(EDGE, (area_h - h - EDGE).max(EDGE));
     Rect::from_xywh(x, y, w, h)
+}
+
+/// A point as tiny-skia coordinates: the centre of its pixel, not the
+/// corner.
+#[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
+fn centre(at: Point) -> (f32, f32) {
+    (at.x as f32 + 0.5, at.y as f32 + 0.5)
 }
 
 /// A rectangle with rounded corners, as a path. Each corner is a cubic
