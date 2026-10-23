@@ -10,11 +10,7 @@
 
 use std::fmt;
 
-use crate::{
-    desktop::tree::States,
-    geometry::{Point, Rect},
-    snapshot::Target,
-};
+use crate::{desktop::tree::States, geometry::Rect, snapshot::Target};
 
 /// How far a box may move and still count as the same place, in px.
 const TOLERANCE: i32 = 2;
@@ -47,6 +43,10 @@ pub enum Why {
     /// Different role or name: the path now names something else.
     Replaced,
     Moved,
+    /// The window shrank and the hit point is outside it now. AT-SPI can
+    /// keep reporting the old box, and the click would land on whatever is
+    /// next to the window.
+    Outside,
 }
 
 impl fmt::Display for Why {
@@ -58,15 +58,17 @@ impl fmt::Display for Why {
             Self::Disabled => "it's disabled now",
             Self::Replaced => "something else is there now",
             Self::Moved => "it moved",
+            Self::Outside => "its window no longer covers it",
         })
     }
 }
 
-/// `fresh` is `None` when the read failed; `origin` is where the window is
-/// now, to put the fresh box in global coordinates.
-pub fn verdict(target: &Target, fresh: Option<&Fresh>, origin: Option<Point>) -> Verdict {
+/// `fresh` is `None` when the read failed; `window` is the window's box
+/// now, in global coordinates, `None` if it lost focus. Its origin puts the
+/// fresh box in global coordinates too, so a moved window counts as moved.
+pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> Verdict {
     // `let ... else` names the happy path and leaves early otherwise.
-    let Some(origin) = origin else {
+    let Some(window) = window else {
         return Verdict::Refuse(Why::Unfocused);
     };
     let Some(fresh) = fresh else {
@@ -78,8 +80,14 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, origin: Option<Point>) ->
         Some(Why::Disabled)
     } else if fresh.role != target.role || fresh.name != target.name {
         Some(Why::Replaced)
-    } else if !fresh.bounds.offset(origin).near(target.rect, TOLERANCE) {
+    } else if !fresh
+        .bounds
+        .offset(window.origin())
+        .near(target.rect, TOLERANCE)
+    {
         Some(Why::Moved)
+    } else if !window.contains(target.hit) {
+        Some(Why::Outside)
     } else {
         None
     };
@@ -94,9 +102,10 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, origin: Option<Point>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop::tree::ObjectId;
+    use crate::{desktop::tree::ObjectId, geometry::Point};
 
-    const ORIGIN: Point = Point::new(100, 50);
+    /// The window: at (100, 50), big enough for the target at (150, 75).
+    const WINDOW: Rect = Rect::new(100, 50, 400, 300);
 
     fn target() -> Target {
         Target {
@@ -131,7 +140,7 @@ mod tests {
     #[test]
     fn same_thing_same_place_clicks() {
         assert_eq!(
-            verdict(&target(), Some(&fresh()), Some(ORIGIN)),
+            verdict(&target(), Some(&fresh()), Some(WINDOW)),
             Verdict::Click { editable: false }
         );
     }
@@ -143,7 +152,7 @@ mod tests {
             ..fresh()
         };
         assert!(matches!(
-            verdict(&target(), Some(&nudged), Some(ORIGIN)),
+            verdict(&target(), Some(&nudged), Some(WINDOW)),
             Verdict::Click { .. }
         ));
         let scrolled = Fresh {
@@ -151,12 +160,12 @@ mod tests {
             ..fresh()
         };
         assert_eq!(
-            verdict(&target(), Some(&scrolled), Some(ORIGIN)),
+            verdict(&target(), Some(&scrolled), Some(WINDOW)),
             Verdict::Refuse(Why::Moved)
         );
         // The window itself moved by 40 px: the target moved with it.
         assert_eq!(
-            verdict(&target(), Some(&fresh()), Some(Point::new(140, 50))),
+            verdict(&target(), Some(&fresh()), Some(Rect { x: 140, ..WINDOW })),
             Verdict::Refuse(Why::Moved)
         );
     }
@@ -164,7 +173,7 @@ mod tests {
     #[test]
     fn vanished_hidden_disabled_replaced_unfocused() {
         let t = target();
-        assert_eq!(verdict(&t, None, Some(ORIGIN)), Verdict::Refuse(Why::Gone));
+        assert_eq!(verdict(&t, None, Some(WINDOW)), Verdict::Refuse(Why::Gone));
         assert_eq!(
             verdict(&t, Some(&fresh()), None),
             Verdict::Refuse(Why::Unfocused)
@@ -172,14 +181,14 @@ mod tests {
         let mut hidden = fresh();
         hidden.states.showing = false;
         assert_eq!(
-            verdict(&t, Some(&hidden), Some(ORIGIN)),
+            verdict(&t, Some(&hidden), Some(WINDOW)),
             Verdict::Refuse(Why::Hidden)
         );
         let mut off = fresh();
         off.states.enabled = false;
         off.states.sensitive = false;
         assert_eq!(
-            verdict(&t, Some(&off), Some(ORIGIN)),
+            verdict(&t, Some(&off), Some(WINDOW)),
             Verdict::Refuse(Why::Disabled)
         );
         let other = Fresh {
@@ -187,8 +196,19 @@ mod tests {
             ..fresh()
         };
         assert_eq!(
-            verdict(&t, Some(&other), Some(ORIGIN)),
+            verdict(&t, Some(&other), Some(WINDOW)),
             Verdict::Refuse(Why::Replaced)
+        );
+    }
+
+    #[test]
+    fn a_shrunk_window_that_no_longer_covers_the_target_refuses() {
+        // Same box as before (AT-SPI didn't update it), but the window is
+        // now 40 px wide: the hit point at x 150 is past its right edge.
+        let narrow = Rect { w: 40, ..WINDOW };
+        assert_eq!(
+            verdict(&target(), Some(&fresh()), Some(narrow)),
+            Verdict::Refuse(Why::Outside)
         );
     }
 
@@ -197,7 +217,7 @@ mod tests {
         let mut field = fresh();
         field.states.editable = true;
         assert_eq!(
-            verdict(&target(), Some(&field), Some(ORIGIN)),
+            verdict(&target(), Some(&field), Some(WINDOW)),
             Verdict::Click { editable: true }
         );
     }
