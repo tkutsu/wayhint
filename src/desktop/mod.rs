@@ -78,15 +78,14 @@ impl Desktop {
     /// Asks a target's object again, right before clicking it: still there,
     /// still the same thing, same place, and its window still focused.
     pub fn recheck(&self, snapshot: &Snapshot, target: &Target) -> Result<Verdict> {
-        // Where the window is now, if it still has focus; the box is
-        // compared in global coordinates, so a moved window counts as moved.
-        let origin = focused_window()?
+        // Where the window is now and how big, if it still has focus.
+        let window = focused_window()?
             .filter(|w| w.address == snapshot.window.address)
-            .map(|w| w.rect.origin());
+            .map(|w| w.rect);
         let fresh = self
             .runtime
             .block_on(self.scanner.read(&target.object, RECHECK_TIMEOUT))
             .ok();
-        Ok(recheck::verdict(target, fresh.as_ref(), origin))
+        Ok(recheck::verdict(target, fresh.as_ref(), window))
     }
 }

@@ -62,6 +62,12 @@ impl Rect {
         Point::new(self.x, self.y)
     }
 
+    /// Whether `point` is inside: the left and top edges count, the right
+    /// and bottom ones are the next rectangle's.
+    pub const fn contains(self, point: Point) -> bool {
+        point.x >= self.x && point.x < self.right() && point.y >= self.y && point.y < self.bottom()
+    }
+
     /// The same rectangle moved by `by`.
     #[must_use]
     pub const fn offset(self, by: Point) -> Self {
