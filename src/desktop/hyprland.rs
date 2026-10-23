@@ -59,6 +59,7 @@ pub struct Monitor {
 }
 
 #[derive(Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // shaped like Hyprland's JSON, flags and all
 struct WireWindow {
     address: String,
     pid: u32,
@@ -75,6 +76,17 @@ struct WireWindow {
     fullscreen: u8,
     /// A window group's tabs other than the shown one.
     hidden: bool,
+    /// False when clicks go through it, as Hyprland's own hit test skips
+    /// it: a window under a fullscreen one, or one whose input is blocked.
+    #[serde(rename = "acceptsInput")]
+    accepts_input: bool,
+    /// On a workspace with a fullscreen (or maximized) window: whether
+    /// this one may show above it. Hyprland clears it on the workspace's
+    /// other windows when one goes fullscreen and sets it again on a
+    /// floating window that's raised, focused or newly opened. It means
+    /// nothing on other workspaces.
+    #[serde(rename = "allowedOverFullscreen")]
+    allowed_over_fullscreen: bool,
     /// 0 for the focused window, then 1, 2... back through focus history.
     #[serde(rename = "focusHistoryID")]
     focus_history_id: i64,
@@ -106,10 +118,14 @@ struct WireMonitor {
     name: String,
     x: i32,
     y: i32,
-    /// Physical pixels: divide by the scale for logical ones.
+    /// Physical pixels, before rotation: divide by the scale for logical
+    /// ones.
     width: i32,
     height: i32,
     scale: f64,
+    /// `wl_output`'s transform: 0 to 3 turn by 90° steps, 4 to 7 flip and
+    /// turn. The odd ones stand the output on its side.
+    transform: u8,
     focused: bool,
     #[serde(rename = "activeWorkspace")]
     active_workspace: WireWorkspace,
@@ -121,9 +137,16 @@ impl From<WireMonitor> for Monitor {
     #[allow(clippy::cast_possible_truncation)] // monitor sizes are far inside i32
     fn from(m: WireMonitor) -> Self {
         let logical = |px: i32| (f64::from(px) / m.scale).round() as i32;
+        // Hyprland swaps the sides of a turned output before scaling
+        // (`CMonitor::m_transformedSize`); IPC sends them unswapped.
+        let (w, h) = if m.transform % 2 == 1 {
+            (m.height, m.width)
+        } else {
+            (m.width, m.height)
+        };
         Self {
             id: m.id,
-            rect: Rect::new(m.x, m.y, logical(m.width), logical(m.height)),
+            rect: Rect::new(m.x, m.y, logical(w), logical(h)),
             name: m.name,
             scale: m.scale,
             focused: m.focused,
@@ -225,11 +248,11 @@ pub fn uncovered(stack: &[Window], address: &str, point: Point) -> Option<Rect> 
 /// lists windows in stacking order (a raised window moves to the end), so
 /// a stable sort by layer keeps the order inside one.
 ///
-/// A fullscreen or maximized window hides the rest of its workspace, but
-/// not the floating windows Hyprland lets over it, and IPC doesn't say
-/// which those are. Raising one lets it over, and focus raises, so a
-/// workspace with one shows just two: the fullscreen window and, above it,
-/// the focused window if that floats.
+/// A fullscreen or maximized window hides the rest of its workspace, except
+/// the floating windows Hyprland lets over it (`allowedOverFullscreen`).
+/// A window clicks go through (`acceptsInput` false) is left out
+/// everywhere: it takes no click, so it neither gets tags nor covers any.
+/// Both rules are the ones `ViewHitTester::windowAt` reads.
 fn stack_of(monitor: &WireMonitor, clients: Vec<WireWindow>) -> Vec<Window> {
     let (active, special) = (monitor.active_workspace.id, monitor.special_workspace.id);
     let fullscreen: Vec<i64> = clients
@@ -238,7 +261,7 @@ fn stack_of(monitor: &WireMonitor, clients: Vec<WireWindow>) -> Vec<Window> {
         .map(|c| c.workspace.id)
         .collect();
     let layer = |c: &WireWindow| -> Option<u8> {
-        if c.hidden {
+        if c.hidden || !c.accepts_input {
             return None;
         }
         if c.pinned {
@@ -251,7 +274,7 @@ fn stack_of(monitor: &WireMonitor, clients: Vec<WireWindow>) -> Vec<Window> {
         let floats = c.floating && c.fullscreen == 0;
         if fullscreen.contains(&c.workspace.id)
             && c.fullscreen == 0
-            && !(floats && c.focus_history_id == 0)
+            && !(floats && c.allowed_over_fullscreen)
         {
             return None;
         }
@@ -295,7 +318,8 @@ mod tests {
     fn wire_window_becomes_a_rect() {
         let json = r#"{"address":"0x1","pid":7,"class":"kitty","title":"t","at":[8,38],"size":[1262,1394],
                        "monitor":0,"workspace":{"id":1,"name":"1"},"floating":false,"pinned":false,
-                       "fullscreen":0,"hidden":false,"focusHistoryID":0}"#;
+                       "fullscreen":0,"hidden":false,"acceptsInput":true,"allowedOverFullscreen":true,
+                       "focusHistoryID":0}"#;
         let window: Window = serde_json::from_str::<WireWindow>(json).unwrap().into();
         assert_eq!(window.rect, Rect::new(8, 38, 1262, 1394));
         assert!(window.focused);
@@ -303,10 +327,27 @@ mod tests {
 
     #[test]
     fn monitor_size_is_logical() {
-        let json = r#"{"id":1,"name":"DP-1","x":2560,"y":0,"width":3840,"height":2160,"scale":2.0,"focused":true,
-                "activeWorkspace":{"id":1,"name":"1"},"specialWorkspace":{"id":0,"name":""}}"#;
+        let json = r#"{"id":1,"name":"DP-1","x":2560,"y":0,"width":3840,"height":2160,"scale":2.0,
+                "transform":0,"focused":true,"activeWorkspace":{"id":1,"name":"1"},
+                "specialWorkspace":{"id":0,"name":""}}"#;
         let monitor: Monitor = serde_json::from_str::<WireMonitor>(json).unwrap().into();
         assert_eq!(monitor.rect, Rect::new(2560, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn a_turned_monitor_stands_on_its_side() {
+        for (transform, size) in [(1, (1080, 1920)), (2, (1920, 1080)), (7, (1080, 1920))] {
+            let turned: Monitor = WireMonitor {
+                transform,
+                ..monitor(0)
+            }
+            .into();
+            assert_eq!(
+                (turned.rect.w, turned.rect.h),
+                size,
+                "transform {transform}"
+            );
+        }
     }
 
     /// Monitor 0, showing workspace 1 and, if `special` isn't 0, that one.
@@ -319,6 +360,7 @@ mod tests {
             width: 1920,
             height: 1080,
             scale: 1.0,
+            transform: 0,
             focused: true,
             active_workspace: WireWorkspace { id: 1 },
             special_workspace: WireWorkspace { id: special },
@@ -340,6 +382,8 @@ mod tests {
             pinned: false,
             fullscreen: 0,
             hidden: false,
+            accepts_input: true,
+            allowed_over_fullscreen: true,
             focus_history_id: 1,
         }
     }
@@ -398,26 +442,51 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_shows_itself_and_a_focused_floating_window() {
+    fn fullscreen_shows_itself_and_the_floating_windows_let_over_it() {
+        // Hyprland clears the flag on the tiled window as `full` goes
+        // fullscreen; focus doesn't decide anything.
         let full = || WireWindow {
             fullscreen: 2,
             ..client("full")
         };
-        let dialog = |focus| WireWindow {
+        let float = |address, over| WireWindow {
             floating: true,
-            focus_history_id: focus,
-            ..client("dialog")
+            allowed_over_fullscreen: over,
+            ..client(address)
         };
-        let other = || client("other");
+        let other = WireWindow {
+            allowed_over_fullscreen: false,
+            ..client("other")
+        };
+        let focused = WireWindow {
+            focus_history_id: 0,
+            ..float("focused", true)
+        };
+        let clients = vec![
+            float("dialog", true),
+            full(),
+            other,
+            float("under", false),
+            focused,
+        ];
         assert_eq!(
-            addresses(&stack_of(&monitor(0), vec![dialog(0), full(), other()])),
-            ["full", "dialog"]
+            addresses(&stack_of(&monitor(0), clients)),
+            ["full", "dialog", "focused"],
+            "an unfocused dialog over it still covers it"
         );
-        assert_eq!(
-            addresses(&stack_of(&monitor(0), vec![dialog(1), full(), other()])),
-            ["full"],
-            "an unfocused dialog may be under it or over it: left out"
-        );
+    }
+
+    #[test]
+    fn a_window_clicks_go_through_is_left_out() {
+        let clients = vec![
+            client("tiled"),
+            WireWindow {
+                floating: true,
+                accepts_input: false,
+                ..client("blocked")
+            },
+        ];
+        assert_eq!(addresses(&stack_of(&monitor(0), clients)), ["tiled"]);
     }
 
     #[test]

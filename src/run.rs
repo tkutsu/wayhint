@@ -4,7 +4,7 @@
 //! windows shown -> scan -> tags -> keys -> re-check -> act -> settle --+
 //!      ^                                                               |
 //!      +---------------------------------------------------------------+
-//! Esc, Ctrl+C, --once or a click on a text field -> clean up -> exit
+//! Esc, Ctrl+C, --once or a click that may take typing -> clean up -> exit
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
@@ -52,6 +52,8 @@ struct Session {
     pointer: Pointer,
     /// Made at the first modifier click: most runs never need one.
     keyboard: Option<Keyboard>,
+    /// Every monitor's box, for where a nudge stops (`pick::lands`).
+    screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
 }
@@ -68,7 +70,8 @@ struct Command {
 
 /// How a pick ended for the loop.
 enum Done {
-    /// Acted. `ends` when the run is over: a text field took focus.
+    /// Acted. `ends` when the run is over: a text field may have taken
+    /// focus.
     Acted { ends: bool },
     /// Didn't act: the target changed, or was gone. Scan again.
     Refused,
@@ -92,6 +95,7 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
         desktop: Desktop::connect()?,
         pointer: Pointer::new(&conn, outputs)?,
         keyboard: None,
+        screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
         conn,
     };
@@ -113,25 +117,27 @@ impl Session {
             report(&snapshot, &unread)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
-            // later rounds start with the default action again. The cursor
-            // is only for drawing where a nudged `Space` lands.
+            // later rounds start with the default action again.
             let picked = pick::pick(
                 &mut self.overlay,
                 config,
                 &snapshot.targets,
                 verb.take(),
-                desktop::cursor().ok(),
+                &desktop::cursor,
             )?;
             let done = match picked {
                 Pick::Leave => return Ok(()),
                 // `Space`: the cursor is already there, give or take the
                 // nudge, and there's no target to re-check, or to repeat on.
-                Pick::Here(act) => {
+                // Nor any telling what's under it, so a click there ends
+                // the run in case it was a text field (see `command`).
+                Pick::Here { act, from } => {
                     self.last = None;
-                    let screen = self.overlay.monitor().rect;
-                    let at = lands(desktop::cursor()?, act.nudge, screen);
+                    let at = lands(from, act.nudge, &self.screens);
                     self.act(act.action, act.mods, at, false)?;
-                    Done::Acted { ends: false }
+                    Done::Acted {
+                        ends: act.action.clicks(),
+                    }
                 }
                 Pick::Target { index, act } => {
                     let object = snapshot.targets[index].object.clone();
@@ -195,12 +201,14 @@ impl Session {
                     mods,
                     nudge,
                 } = command.act;
-                let at = lands(target.hit, nudge, self.overlay.monitor().rect);
+                let at = lands(target.hit, nudge, &self.screens);
                 self.act(action, mods, at, restore)?;
                 // A click on a text field ends the mode, so typing goes to
-                // it: a nudged one too, if it stayed inside the field, which
-                // places the caret. A hover only looks.
-                let ends = editable && action.clicks() && target.rect.contains(at);
+                // it. So does one nudged out of the target's box: wayhint
+                // doesn't know what's there, and a field next door would
+                // take the focus while the tags took the typing. Staying on
+                // is for clicks it can vouch for. A hover only looks.
+                let ends = action.clicks() && (editable || !target.rect.contains(at));
                 self.last = Some(command);
                 Ok(Done::Acted { ends })
             }

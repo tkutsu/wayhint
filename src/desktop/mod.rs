@@ -98,16 +98,16 @@ impl Desktop {
     }
 
     /// Asks a target's object again, right before clicking it: still there,
-    /// still the same thing, same place, and nothing over it.
+    /// still the same thing, same place, still in view, and nothing over it.
     pub fn recheck(&self, snapshot: &Snapshot, target: &Target) -> Result<Verdict> {
         // Where the window is now and how big, unless it's gone or another
         // window came over the spot (a dialog opened).
         let address = &snapshot.windows[target.window].window.address;
         let window = uncovered(&stack(snapshot.monitor)?, address, target.hit);
-        let fresh = self
-            .runtime
-            .block_on(self.scanner.read(&target.object, RECHECK_TIMEOUT))
-            .ok();
+        let read = self
+            .scanner
+            .read(&target.object, &target.clips, RECHECK_TIMEOUT);
+        let fresh = self.runtime.block_on(read).ok();
         Ok(recheck::verdict(target, fresh.as_ref(), window))
     }
 }

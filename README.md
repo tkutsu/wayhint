@@ -68,9 +68,15 @@ it's AltGr.
 
 Arrows let a tag click anywhere near it: `→ → ↓` then a tag clicks 28 px
 right of the control and 14 px below. A dot marks where each tag would
-land, so the tags stay readable. The move is for that one click, and the
-repeat key does it again. Clicking a text field exits, so
-your typing goes to the field. `wayhint --once` exits after one action, and
+land, so the tags stay readable. A move stops at the edge of its monitor.
+It is for that one click, and the repeat key does it again. With `Space`,
+the dot follows the pointer at each key you press, and the click lands on
+the dot.
+
+Clicking a text field exits, so your typing goes to the field. So does a
+click wayhint can't vouch for: one an arrow moved outside its control, or
+one made with `Space`, since a field there would take the focus while
+wayhint kept your keys. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
 go straight to right-clicking.
 
@@ -137,16 +143,14 @@ the arrows are never command keys.
   modifier and wayhint prints a warning.
 - If the monitor changes size or scale during a run, the run ends; start
   it again.
-- On a workspace with a fullscreen or maximized window, only that window
-  and a focused floating window over it get tags: Hyprland doesn't say
-  which other floating windows it shows over a fullscreen one.
 - Two windows of one app with the same title get no tags unless one of
   them has focus: wayhint can't tell their accessibility trees apart.
 - Elements hidden with `opacity: 0` on web pages still get a tag.
 - A control covered by something else inside the same app (a web modal)
   can still get a tag, and the click lands on whatever covers it.
 - One monitor at scale 1 is the tested setup. On a scaled monitor the tags
-  are drawn at scale 1 and look blurry; several monitors are untested.
+  are drawn at scale 1 and look blurry; several monitors and rotated ones
+  are untested.
 
 ## License
 

@@ -12,7 +12,11 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    desktop::{Stats, Window, filter::Filtered, tree::ObjectId, tree::Tree},
+    desktop::{
+        Stats, Window,
+        filter::{self, Filtered},
+        tree::{ObjectId, Tree},
+    },
     geometry::{Point, Rect},
 };
 
@@ -52,6 +56,12 @@ pub struct Target {
     pub name: String,
     /// A text field: clicking it ends the mode, so typing goes to the app.
     pub editable: bool,
+    /// The scroll areas above it, nearest first, whose boxes clipped it
+    /// (see `filter::clip`). The re-check reads them again: a pane that
+    /// shrank since the scan can leave the hit point out of view while
+    /// the target's own box stays the same.
+    #[serde(default)]
+    pub clips: Vec<ObjectId>,
 }
 
 impl Snapshot {
@@ -67,6 +77,7 @@ impl Snapshot {
         let mut targets = Vec::new();
         for (window, (tree, filtered, stats)) in scans.into_iter().enumerate() {
             let origin = tree.window.rect.origin();
+            let scrollers = filter::scroll_areas(tree);
             targets.extend(filtered.kept.iter().map(|kept| {
                 let node = &tree.nodes[kept.node];
                 // The filter only keeps nodes with a box and details.
@@ -83,6 +94,11 @@ impl Snapshot {
                         .map(|d| d.name.clone())
                         .unwrap_or_default(),
                     editable: node.states.editable,
+                    clips: tree
+                        .ancestors(kept.node)
+                        .filter(|a| scrollers.contains(a))
+                        .map(|a| tree.nodes[a].object.clone())
+                        .collect(),
                 }
             }));
             windows.push(Scanned {

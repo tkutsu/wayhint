@@ -10,7 +10,11 @@
 
 use std::fmt;
 
-use crate::{desktop::tree::States, geometry::Rect, snapshot::Target};
+use crate::{
+    desktop::tree::States,
+    geometry::{Point, Rect},
+    snapshot::Target,
+};
 
 /// How far a box may move and still count as the same place, in px.
 const TOLERANCE: i32 = 2;
@@ -22,6 +26,9 @@ pub struct Fresh {
     pub name: String,
     pub states: States,
     pub bounds: Rect,
+    /// The box of each scroll area in the target's `clips` now, in the
+    /// same order; `None` for one that didn't answer.
+    pub clips: Vec<Option<Rect>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +54,11 @@ pub enum Why {
     /// keep reporting the old box, and the click would land on whatever is
     /// next to the window.
     Outside,
+    /// A scroll area above it no longer shows the hit point: a pane
+    /// grew over it, say. GTK and Qt keep calling it "showing".
+    Scrolled,
+    /// A scroll area above it didn't answer, so what's in view is unknown.
+    ScrollAreaUnread,
 }
 
 impl fmt::Display for Why {
@@ -59,6 +71,8 @@ impl fmt::Display for Why {
             Self::Replaced => "something else is there now",
             Self::Moved => "it moved",
             Self::Outside => "its window no longer covers it",
+            Self::Scrolled => "it's scrolled out of view",
+            Self::ScrollAreaUnread => "a scroll area above it didn't answer",
         })
     }
 }
@@ -90,7 +104,7 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> 
     } else if !window.contains(target.hit) {
         Some(Why::Outside)
     } else {
-        None
+        clipped(&fresh.clips, window.origin(), target.hit)
     };
     match why {
         Some(why) => Verdict::Refuse(why),
@@ -100,10 +114,22 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> 
     }
 }
 
+/// Why a scroll area above the target hides `hit` now, if one does. The
+/// filter's rule again (`filter::clip`): an empty box says nothing, one
+/// that didn't answer hides everything. `origin` is the window's, which
+/// puts the window-relative boxes in global coordinates.
+fn clipped(clips: &[Option<Rect>], origin: Point, hit: Point) -> Option<Why> {
+    clips.iter().find_map(|clip| match clip {
+        None => Some(Why::ScrollAreaUnread),
+        Some(area) if area.is_empty() => None,
+        Some(area) => (!area.offset(origin).contains(hit)).then_some(Why::Scrolled),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{desktop::tree::ObjectId, geometry::Point};
+    use crate::desktop::tree::ObjectId;
 
     /// The window: at (100, 50), big enough for the target at (150, 75).
     const WINDOW: Rect = Rect::new(100, 50, 400, 300);
@@ -120,6 +146,7 @@ mod tests {
             role: "button".into(),
             name: "OK".into(),
             editable: false,
+            clips: Vec::new(),
         }
     }
 
@@ -136,6 +163,7 @@ mod tests {
             name: "OK".into(),
             states,
             bounds: Rect::new(10, 10, 80, 30),
+            clips: Vec::new(),
         }
     }
 
@@ -230,6 +258,34 @@ mod tests {
         assert_eq!(
             verdict(&target(), Some(&fresh()), Some(narrow)),
             Verdict::Refuse(Why::Outside)
+        );
+    }
+
+    #[test]
+    fn a_scroll_area_that_shrank_over_the_hit_point_refuses() {
+        // The target's own box is unchanged and "showing", as GTK and Qt
+        // report it; only its pane got shorter. The hit point is at window
+        // y 25 (global 75).
+        let pane = |h| Fresh {
+            clips: vec![Some(Rect::new(0, 0, 400, h))],
+            ..fresh()
+        };
+        assert!(matches!(
+            verdict(&target(), Some(&pane(200)), Some(WINDOW)),
+            Verdict::Click { .. }
+        ));
+        assert_eq!(
+            verdict(&target(), Some(&pane(20)), Some(WINDOW)),
+            Verdict::Refuse(Why::Scrolled)
+        );
+        let unread = Fresh {
+            clips: vec![Some(Rect::default()), None],
+            ..fresh()
+        };
+        assert_eq!(
+            verdict(&target(), Some(&unread), Some(WINDOW)),
+            Verdict::Refuse(Why::ScrollAreaUnread),
+            "an empty box says nothing; no answer hides it"
         );
     }
 
