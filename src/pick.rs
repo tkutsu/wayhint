@@ -28,6 +28,8 @@ pub enum Pick {
     },
     /// Do `action` where the pointer is now (`Space`), with `mods` held.
     Here { action: Action, mods: Mods },
+    /// Do the last command again, on its target.
+    Repeat,
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
 }
@@ -73,21 +75,23 @@ pub fn pick(
                 });
             }
             Step::Here { action, mods } => return Ok(Pick::Here { action, mods }),
+            Step::Repeat => return Ok(Pick::Repeat),
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
         }
     }
 }
 
-/// What a key means: a built-in key, else a verb, else a tag letter, else
-/// nothing. The config keeps verb keys out of the alphabet, so the order of
-/// the last two never decides anything. A tag letter matches with or
+/// What a key means: a built-in key, else a verb or repeat, else a tag
+/// letter, else nothing. The config keeps command keys out of the alphabet
+/// and apart from each other, so the order never decides anything. A tag letter matches with or
 /// without Shift: Shift on it is a Shift-click, carried in `mods`.
 fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     match key.code {
         KeyCode::ESC => Some(Input::Escape),
         KeyCode::BACKSPACE => Some(Input::Backspace),
         KeyCode::SPACE => Some(Input::Here(mods)),
+        _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
         code => config
             .verbs
             .action_of(key)

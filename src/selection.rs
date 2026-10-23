@@ -55,6 +55,8 @@ pub enum Input {
     Verb(Action, Mods),
     /// `Space`: act where the pointer already is, no tag.
     Here(Mods),
+    /// The repeat key: the last command again, on the same target.
+    Repeat,
     Backspace,
     Escape,
 }
@@ -73,6 +75,8 @@ pub enum Step {
     },
     /// `Space`: do `action` where the pointer is, with `mods` held.
     Here { action: Action, mods: Mods },
+    /// The repeat key. The run knows what the last command was.
+    Repeat,
     /// A letter no label continues with. Nothing changes, nothing runs.
     Ignored,
     /// `Esc` with nothing typed or armed: leave.
@@ -185,6 +189,12 @@ impl Selector {
                 let (action, mods) = (self.action(), self.mods(held));
                 self.reset();
                 Step::Here { action, mods }
+            }
+            // A whole command of its own: whatever was typed before it is
+            // dropped, a verb too.
+            Input::Repeat => {
+                self.reset();
+                Step::Repeat
             }
             // Backspace takes back the last key: a letter, else the verb.
             Input::Backspace => {
@@ -375,6 +385,15 @@ mod tests {
             },
             "the next command starts clean"
         );
+    }
+
+    #[test]
+    fn repeat_drops_what_was_typed() {
+        let mut s = five();
+        s.press(verb(Action::Right));
+        s.press(letter(3));
+        assert_eq!(s.press(Input::Repeat), Step::Repeat);
+        assert_eq!((s.armed(), s.typed()), (None, &[][..]));
     }
 
     #[test]

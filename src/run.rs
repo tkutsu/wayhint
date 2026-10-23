@@ -10,6 +10,9 @@
 //! The keys pick a target and a verb (`[verb] tag`), or a verb and the
 //! spot under the pointer (`[verb] Space`), which skips the re-check.
 //! Shift, Ctrl or Alt held on the last key are held through the click.
+//! The repeat key does the last command on a target again: the target is
+//! found in the new scan by its accessibility object, not by its tag or
+//! where it was.
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
@@ -22,12 +25,13 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     action::{Action, Mods},
     config::{After, Config},
-    desktop::{self, Desktop, Monitor, Verdict},
+    desktop::{self, Desktop, Monitor, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
     pick::{self, Pick},
     pointer::Pointer,
+    snapshot::Snapshot,
 };
 
 /// How long the app gets to react to a click before the rescan. A fixed
@@ -43,6 +47,26 @@ struct Session {
     pointer: Pointer,
     /// Made at the first modifier click: most runs never need one.
     keyboard: Option<Keyboard>,
+    /// The last command on a target, for the repeat key.
+    last: Option<Command>,
+}
+
+/// A command on a target, as the repeat key does it again. The target is
+/// kept as its accessibility object, which stays the same across scans for
+/// as long as the control exists; its tag and position may not.
+#[derive(Debug, Clone)]
+struct Command {
+    object: ObjectId,
+    action: Action,
+    mods: Mods,
+}
+
+/// How a pick ended for the loop.
+enum Done {
+    /// Acted. `ends` when the run is over: a text field took focus.
+    Acted { ends: bool },
+    /// Didn't act: the target changed, or was gone. Scan again.
+    Refused,
 }
 
 /// The run: `verb` (from `--verb`) arms the first pick.
@@ -61,6 +85,7 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
         desktop: Desktop::connect()?,
         pointer: Pointer::new(&conn, outputs)?,
         keyboard: None,
+        last: None,
         conn,
     };
 
@@ -97,47 +122,89 @@ impl Session {
             // `take` hands `--verb` to the first pick and leaves `None`, so
             // later rounds start with the default action again.
             let picked = pick::pick(&mut self.overlay, config, &snapshot.targets, verb.take())?;
-            let ends = match picked {
+            let done = match picked {
                 Pick::Leave => return Ok(()),
                 // `Space`: the cursor is already there, and there's no
-                // target to re-check.
+                // target to re-check, or to repeat on.
                 Pick::Here { action, mods } => {
+                    self.last = None;
                     self.act(action, mods, desktop::cursor()?, false)?;
-                    false
+                    Done::Acted { ends: false }
                 }
                 Pick::Target {
                     index,
                     action,
                     mods,
                 } => {
-                    let target = &snapshot.targets[index];
-                    match self.desktop.recheck(&snapshot, target)? {
-                        Verdict::Click { editable } => {
-                            let restore = config.after == After::Restore;
-                            self.act(action, mods, target.hit, restore)?;
-                            // A click on a text field ends the mode, so
-                            // typing goes to it. A hover only looks.
-                            editable && action.clicks()
+                    let object = snapshot.targets[index].object.clone();
+                    let command = Command {
+                        object,
+                        action,
+                        mods,
+                    };
+                    self.command(config, &snapshot, index, command)?
+                }
+                Pick::Repeat => {
+                    // `clone`: `self.command` needs all of `self`, so
+                    // `self.last` can't stay borrowed through the call.
+                    let last = self.last.clone();
+                    let found = last.as_ref().and_then(|last| {
+                        let mut targets = snapshot.targets.iter();
+                        targets.position(|t| t.object == last.object)
+                    });
+                    match (last, found) {
+                        (Some(last), Some(index)) => {
+                            self.command(config, &snapshot, index, last)?
                         }
-                        Verdict::Refuse(why) => {
-                            eprintln!("wayhint: not clicking {:?}: {why}", target.name);
-                            if once {
-                                return Ok(());
-                            }
-                            // Loop around: a fresh scan, fresh tags. The
-                            // keyboard was never let go.
-                            continue;
+                        (Some(_), None) => {
+                            eprintln!("wayhint: not repeating: the target is gone");
+                            Done::Refused
+                        }
+                        (None, _) => {
+                            eprintln!("wayhint: nothing to repeat yet");
+                            Done::Refused
                         }
                     }
                 }
             };
-            if ends || once {
-                return Ok(());
+            match done {
+                // Loop around: a fresh scan, fresh tags. A refusal never let
+                // go of the keyboard.
+                Done::Refused if !once => continue,
+                Done::Acted { ends: false } if !once => {}
+                _ => return Ok(()),
             }
             // Takes the keyboard back if `act` let go of it; a no-op with
             // the grab still held.
             self.overlay.grab_keyboard()?;
             sleep(SETTLE);
+        }
+    }
+
+    /// Re-checks the target at `index` and, if it's still the same, does
+    /// `command` on it and keeps it for the repeat key.
+    fn command(
+        &mut self,
+        config: &Config,
+        snapshot: &Snapshot,
+        index: usize,
+        command: Command,
+    ) -> Result<Done> {
+        let target = &snapshot.targets[index];
+        match self.desktop.recheck(snapshot, target)? {
+            Verdict::Click { editable } => {
+                let restore = config.after == After::Restore;
+                self.act(command.action, command.mods, target.hit, restore)?;
+                // A click on a text field ends the mode, so typing goes to
+                // it. A hover only looks.
+                let ends = editable && command.action.clicks();
+                self.last = Some(command);
+                Ok(Done::Acted { ends })
+            }
+            Verdict::Refuse(why) => {
+                eprintln!("wayhint: not clicking {:?}: {why}", target.name);
+                Ok(Done::Refused)
+            }
         }
     }
 
