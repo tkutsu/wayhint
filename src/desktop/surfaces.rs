@@ -12,17 +12,23 @@
 //! The boxes come from Qt, which never learns where a layer is: it reports
 //! every layer at its screen's corner, and a popup relative to its layer
 //! (checked in a nested Hyprland, 2026-10-24, `mds/spike-quickshell/`).
-//! That's the truth only for layers in the corner of the monitor at the
-//! global origin, which is where a bar and full-screen overlays are. So:
+//! That's the truth only for layers in their monitor's corner, which is
+//! where a bar and full-screen overlays are, and for popups only on the
+//! monitor at the global origin. So:
 //!
-//! - A frame is a layer's only when its box is exactly the layer's. A layer
-//!   elsewhere (a dock with a margin) gets no tags; it still covers its box.
+//! - A frame is a layer's only when its box is the one Qt reports for the
+//!   layer, the layer really is there, and no layer elsewhere reports that
+//!   box too. A layer elsewhere (a dock with a margin) gets no tags; it
+//!   still covers its box.
 //! - Leftover frames are placed as popups only when every one of the app's
-//!   layers matched, on the monitor at the origin. Otherwise they're
-//!   reported, not guessed at.
+//!   layers is in the corner of the monitor at the origin, with its frame.
+//!   Otherwise they may be anywhere, so they cover the whole monitor
+//!   ([`unknown`]).
 //!
 //! The rule behind both: a missing tag is fine, a click that lands on
 //! something other than the tagged control is not.
+
+use std::collections::HashMap;
 
 use crate::{
     desktop::{Kind, Window, tree::ObjectId},
@@ -86,38 +92,59 @@ pub fn uncovered(stack: &Stack, address: &str, point: Point) -> Option<Rect> {
 }
 
 /// Sorts one app's `frames` out against its mapped `layers` on every
-/// monitor (bottom to top within each). `origin` is the monitor at the
-/// global origin.
+/// monitor (bottom to top within each). `corners` are the monitors'
+/// top-left corners, by id.
 ///
-/// Frames whose box is a layer's go to that layer. Two layers with one box
-/// (a full-screen backdrop and a full-screen launcher) get all of that
-/// box's frames given to the upper one, and the scan reads whichever of
-/// them has controls, if just one does.
-pub fn place(layers: &[Window], frames: &[Frame], origin: Option<i64>) -> Placed {
+/// A layer's frame has the box Qt reports for it: its monitor's corner and
+/// its size. Frames with that box go to the layer if it really is there.
+/// Two layers with one box (a full-screen backdrop and a full-screen
+/// launcher) get all of that box's frames given to the upper one, and the
+/// scan reads whichever of them has controls, if just one does. If one of
+/// the layers that report a box is elsewhere, which frame is whose can't be
+/// told, and none of them get its frames.
+pub fn place(layers: &[Window], frames: &[Frame], corners: &HashMap<i64, Point>) -> Placed {
+    let reported = |l: &Window| {
+        corners
+            .get(&l.monitor)
+            .map(|c| Rect::new(c.x, c.y, l.rect.w, l.rect.h))
+    };
     let mut placed = Placed::default();
     let mut left: Vec<&Frame> = frames.iter().collect();
-    let mut all_matched = true;
+    // A popup's box is right only if its layer is in the corner of the
+    // monitor at the origin, and it can't be told which layer is its.
+    let mut trusted = layers.iter().all(|l| l.rect.origin() == Point::new(0, 0));
     // Upper layers first, so the upper of two with one box takes the frames.
     for (i, layer) in layers.iter().enumerate().rev() {
+        let Some(at) = reported(layer) else {
+            // Its monitor is gone, so where Qt has its frame isn't known.
+            trusted = false;
+            continue;
+        };
+        if layers[i + 1..].iter().any(|l| reported(l) == Some(at)) {
+            continue; // the upper one with this box took the frames
+        }
         let mine: Vec<ObjectId> = left
             .iter()
-            .filter(|f| f.rect == layer.rect)
+            .filter(|f| f.rect == at)
             .map(|f| f.object.clone())
             .collect();
-        left.retain(|f| f.rect != layer.rect);
-        if !mine.is_empty() {
+        left.retain(|f| f.rect != at);
+        let owners: Vec<&Window> = layers.iter().filter(|l| reported(l) == Some(at)).collect();
+        if mine.is_empty() {
+            // Its frame is somewhere else than where Qt should report it.
+            trusted = false;
+        } else if owners.iter().all(|l| l.rect == at) {
             placed.layers.push((layer.address.clone(), mine));
-        } else if !layers[i + 1..].iter().any(|l| l.rect == layer.rect) {
-            // No frame and no upper twin that took its frames: this one's
-            // frame is somewhere Qt put it, not where the layer is.
-            all_matched = false;
+        } else {
+            // Each layer has one frame: any more are something else, a
+            // popup maybe, somewhere unknown.
+            placed.unplaced += mine.len().saturating_sub(owners.len());
         }
     }
-    let trusted = all_matched && layers.iter().all(|l| Some(l.monitor) == origin);
     if trusted {
         placed.popups = left.into_iter().cloned().collect();
     } else {
-        placed.unplaced = left.len();
+        placed.unplaced += left.len();
     }
     placed
 }
@@ -135,6 +162,23 @@ pub fn popup(frame: &Frame, pid: u32, monitor: i64) -> Window {
         focused: false,
         kind: Kind::Popup,
         frames: vec![frame.object.clone()],
+    }
+}
+
+/// Stands for `pid`'s popups that couldn't be placed, or read at all: they
+/// may be anywhere on the monitor, so they cover all of `screen`. It has no
+/// frame, so it gets no tags.
+pub fn unknown(pid: u32, monitor: i64, screen: Rect) -> Window {
+    Window {
+        address: format!("unplaced {pid}"),
+        pid,
+        class: "unplaced".into(),
+        title: String::new(),
+        rect: screen,
+        monitor,
+        focused: false,
+        kind: Kind::Popup,
+        frames: Vec::new(),
     }
 }
 
@@ -177,6 +221,11 @@ mod tests {
 
     fn paths(ids: &[ObjectId]) -> Vec<&str> {
         ids.iter().map(|o| o.path.as_str()).collect()
+    }
+
+    /// Monitor 0 at the origin, monitor 1 to its right.
+    fn corners() -> HashMap<i64, Point> {
+        HashMap::from([(0, Point::new(0, 0)), (1, Point::new(2560, 0))])
     }
 
     #[test]
@@ -283,7 +332,7 @@ mod tests {
             frame("/backdrop", SCREEN),
             frame("/audio", AUDIO),
         ];
-        let placed = place(&layers, &frames, Some(0));
+        let placed = place(&layers, &frames, &corners());
         let mut matched: Vec<(&str, Vec<&str>)> = placed
             .layers
             .iter()
@@ -306,7 +355,7 @@ mod tests {
     fn two_layers_with_one_box_give_its_frames_to_the_upper() {
         let layers = [layer("backdrop", 0, SCREEN), layer("settings", 3, SCREEN)];
         let frames = [frame("/a", SCREEN), frame("/b", SCREEN)];
-        let placed = place(&layers, &frames, Some(0));
+        let placed = place(&layers, &frames, &corners());
         assert_eq!(placed.layers.len(), 1);
         let (address, ids) = &placed.layers[0];
         assert_eq!(
@@ -318,8 +367,9 @@ mod tests {
 
     #[test]
     fn a_layer_off_the_corner_matches_nothing_and_popups_stay_unplaced() {
-        // Qt reports a layer at 100,300 as being at 0,0. That frame and a
-        // popup's look the same, so neither gets placed.
+        // Qt reports a layer at 100,300 as being at 0,0: that frame is the
+        // dock's, but it's not where the dock is. The popup's place can't be
+        // trusted then.
         let layers = [
             layer("bar", 1, BAR),
             layer("dock", 2, Rect::new(100, 300, 300, 200)),
@@ -329,10 +379,59 @@ mod tests {
             frame("/dock", Rect::new(0, 0, 300, 200)),
             frame("/audio", AUDIO),
         ];
-        let placed = place(&layers, &frames, Some(0));
+        let placed = place(&layers, &frames, &corners());
         assert_eq!(placed.layers.len(), 1);
         assert_eq!(placed.popups, []);
-        assert_eq!(placed.unplaced, 2);
+        assert_eq!(placed.unplaced, 1);
+    }
+
+    #[test]
+    fn a_layer_elsewhere_with_a_corner_layers_size_leaves_both_frames_alone() {
+        // The audit's case: both frames say 0,0,300,200, and the one with
+        // controls may be the layer at 100,300. Neither layer gets a frame.
+        let corner = Rect::new(0, 0, 300, 200);
+        let layers = [
+            layer("decor", 2, corner),
+            layer("panel", 2, Rect::new(100, 300, 300, 200)),
+        ];
+        let frames = [frame("/a", corner), frame("/b", corner)];
+        let placed = place(&layers, &frames, &corners());
+        assert_eq!(placed, Placed::default(), "two frames, both the layers'");
+        let more = [
+            frame("/a", corner),
+            frame("/b", corner),
+            frame("/c", corner),
+        ];
+        assert_eq!(place(&layers, &more, &corners()).unplaced, 1);
+    }
+
+    #[test]
+    fn an_unknown_popup_covers_the_whole_monitor() {
+        // The audit's case: Audio open on a bar that isn't at 0,0, over a
+        // window under the bar.
+        let screen = Rect::new(2560, 0, 1920, 1080);
+        let bar = Rect::new(2560, 0, 1920, 38);
+        let layers = [Window {
+            monitor: 1,
+            ..layer("bar", 2, bar)
+        }];
+        let frames = [
+            frame("/bar", bar),
+            frame("/audio", Rect::new(2670, 38, 300, 200)),
+        ];
+        let placed = place(&layers, &frames, &corners());
+        assert_eq!(placed.unplaced, 1);
+        let stack = Stack {
+            windows: vec![
+                surface("app", Kind::Client, Rect::new(2560, 38, 1920, 1042)),
+                layers[0].clone(),
+                unknown(7, 1, screen),
+            ],
+            popup_floor: 2,
+            ..Stack::default()
+        };
+        assert_eq!(uncovered(&stack, "app", Point::new(2700, 100)), None);
+        assert_eq!(uncovered(&stack, "bar", Point::new(2600, 10)), None);
     }
 
     #[test]
@@ -346,7 +445,7 @@ mod tests {
             frame("/bar", Rect::new(2560, 0, 1920, 38)),
             frame("/audio", Rect::new(5120, 34, 324, 186)),
         ];
-        let placed = place(&layers, &frames, Some(0));
+        let placed = place(&layers, &frames, &corners());
         assert_eq!(placed.layers.len(), 1);
         assert_eq!((placed.popups.len(), placed.unplaced), (0, 1));
     }

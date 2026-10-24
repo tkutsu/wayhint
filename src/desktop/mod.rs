@@ -24,7 +24,7 @@ use futures::future;
 
 use self::{
     atspi::Bounds,
-    surfaces::{place, popup, uncovered},
+    surfaces::{place, popup, uncovered, unknown},
 };
 pub use self::{
     atspi::Stats,
@@ -78,6 +78,8 @@ impl Desktop {
     /// (see `hyprland::shown`), each layer with the frames that may be its
     /// own, then the popups. Frames are read only for the apps that have a
     /// layer and no client: an app's own menus are left out, as before.
+    /// An app with a layer here whose popups can't be placed, or whose
+    /// frames didn't answer, covers the whole monitor (`surfaces::unknown`).
     pub fn stack(&self, monitor: i64) -> Result<Stack> {
         let shown = hyprland::shown(monitor)?;
         let pids: BTreeSet<u32> = shown
@@ -91,12 +93,19 @@ impl Desktop {
             .block_on(self.scanner.frames(&pids, FRAMES_TIMEOUT));
         let mut stack = shown.stack;
         for (pid, frames) in frames {
+            let here = shown
+                .layers
+                .iter()
+                .any(|l| l.pid == pid && l.monitor == monitor);
             let frames = match frames {
                 Ok(frames) => frames,
                 Err(e) => {
-                    stack
-                        .unplaced
-                        .push(format!("pid {pid}: its frames didn't answer: {e:#}"));
+                    stack.unplaced.push(format!(
+                        "pid {pid}: its frames didn't answer, so its popups may be anywhere: {e:#}"
+                    ));
+                    if here {
+                        stack.windows.push(unknown(pid, monitor, shown.screen));
+                    }
                     continue;
                 }
             };
@@ -106,7 +115,7 @@ impl Desktop {
                 .filter(|l| l.pid == pid)
                 .cloned()
                 .collect();
-            let placed = place(&layers, &frames, shown.origin);
+            let placed = place(&layers, &frames, &shown.corners);
             for (address, frames) in placed.layers {
                 if let Some(layer) = stack.windows.iter_mut().find(|w| w.address == address) {
                     layer.frames = frames;
@@ -121,10 +130,13 @@ impl Desktop {
                 .extend(on_screen.map(|p| popup(p, pid, monitor)));
             if placed.unplaced > 0 {
                 stack.unplaced.push(format!(
-                    "pid {pid}: {} surfaces it can't place (popups are placed only while all \
-                     its layers sit in the corner of the monitor at 0,0)",
+                    "pid {pid}: {} surfaces it can't place, so they may be anywhere (popups are \
+                     placed only while all its layers sit in the corner of the monitor at 0,0)",
                     placed.unplaced
                 ));
+                if here {
+                    stack.windows.push(unknown(pid, monitor, shown.screen));
+                }
             }
         }
         Ok(stack)
@@ -177,8 +189,10 @@ impl Desktop {
     /// One surface's tree: a client's from the frame with its title, a
     /// layer's or popup's from its frame. Of several frames that may be a
     /// layer's (two layers with one box, as a backdrop and a launcher
-    /// over it), the one with controls, if just one has: which of the two
-    /// is on top can't be told, so two with controls get no tags.
+    /// over it), the one with controls, if just one has and every one was
+    /// read whole: which of the two is on top can't be told, so two with
+    /// controls get no tags. The tree keeps the one frame it came from, for
+    /// [`Desktop::recheck`].
     async fn read(&self, window: &Window) -> Result<(tree::Tree, Stats)> {
         match window.frames.as_slice() {
             [] => self.scanner.scan(window, self.bounds).await,
@@ -188,19 +202,31 @@ impl Desktop {
                     .iter()
                     .map(|f| self.scanner.scan_frame(window, f, self.bounds));
                 let mut reads = future::join_all(reads).await;
+                // A scan cut short may have missed the controls that would
+                // make two frames with them.
+                if let Some(why) = reads.iter().find_map(|(_, s)| s.incomplete.as_ref()) {
+                    bail!(
+                        "{}: {} frames its size, and one couldn't be read whole: {why}",
+                        window.class,
+                        frames.len()
+                    );
+                }
                 let with: Vec<usize> = (0..reads.len())
                     .filter(|&i| !filter::filter(&reads[i].0).kept.is_empty())
                     .collect();
-                match with.as_slice() {
+                let pick = match with.as_slice() {
                     // None has controls: any of them gives no tags.
-                    [] => Ok(reads.swap_remove(0)),
-                    &[one] => Ok(reads.swap_remove(one)),
+                    [] => 0,
+                    &[one] => one,
                     many => bail!(
                         "{}: {} frames its size have controls, and which is on top can't be told",
                         window.class,
                         many.len()
                     ),
-                }
+                };
+                let mut read = reads.swap_remove(pick);
+                read.0.window.frames = vec![frames[pick].clone()];
+                Ok(read)
             }
         }
     }
@@ -208,10 +234,20 @@ impl Desktop {
     /// Asks a target's object again, right before clicking it: still there,
     /// still the same thing, same place, still in view, and nothing over it.
     pub fn recheck(&self, snapshot: &Snapshot, target: &Target) -> Result<Verdict> {
-        // Where the surface is now and how big, unless it's gone or
-        // something came over the spot (a dialog opened, a popup closed).
-        let address = &snapshot.windows[target.window].window.address;
-        let window = uncovered(&self.stack(snapshot.monitor)?, address, target.hit);
+        // Where the surface is now and how big, unless it's gone, something
+        // came over the spot (a dialog opened, a popup closed), or the frame
+        // its tags came from isn't clearly its own any more (a layer that
+        // reports the same box was mapped).
+        let then = &snapshot.windows[target.window].window;
+        let stack = self.stack(snapshot.monitor)?;
+        let same_frames = stack
+            .windows
+            .iter()
+            .find(|w| w.address == then.address)
+            .is_some_and(|now| then.frames.iter().all(|f| now.frames.contains(f)));
+        let window = same_frames
+            .then(|| uncovered(&stack, &then.address, target.hit))
+            .flatten();
         let read = self
             .scanner
             .read(&target.object, &target.clips, RECHECK_TIMEOUT);

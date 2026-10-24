@@ -293,8 +293,8 @@ pub struct Shown {
     /// Every mapped layer on every monitor, bottom to top within each, for
     /// telling a layer's frame from a popup's.
     pub layers: Vec<Window>,
-    /// The monitor at the global origin, if one is.
-    pub origin: Option<i64>,
+    /// Every monitor's top-left corner, by id: where Qt reports a layer.
+    pub corners: HashMap<i64, Point>,
     /// Every process with a client, on any workspace.
     pub client_pids: BTreeSet<u32>,
 }
@@ -385,7 +385,10 @@ fn shown_of(
     // so the same desktop gives the same list.
     layers.sort_by_key(|l| l.monitor);
 
-    let origin = monitors.iter().find(|m| m.x == 0 && m.y == 0).map(|m| m.id);
+    let corners = monitors
+        .iter()
+        .map(|m| (m.id, Point::new(m.x, m.y)))
+        .collect();
     let shown = monitors
         .into_iter()
         .find(|m| m.id == monitor)
@@ -425,7 +428,7 @@ fn shown_of(
         },
         screen: Monitor::from(shown).rect,
         layers,
-        origin,
+        corners,
         client_pids,
     })
 }
@@ -734,7 +737,7 @@ mod tests {
             "every mapped layer but no client"
         );
         assert_eq!(shown.stack.windows[2].kind, Kind::Layer { level: 1 });
-        assert_eq!(shown.origin, Some(0));
+        assert_eq!(shown.corners[&0], Point::new(0, 0));
         assert!(shown.client_pids.contains(&7));
     }
 
