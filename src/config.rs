@@ -52,7 +52,7 @@ enum Pixels {
     /// Both passes: the most targets, the fewest stray tags.
     #[default]
     Full,
-    /// One pass in about a third of the time, for slower CPUs.
+    /// One pass instead of two, about half the work, for slower CPUs.
     Fast,
     /// No tags in those windows.
     Off,
