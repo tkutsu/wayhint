@@ -150,8 +150,9 @@ the arrows are never command keys.
   with a margin from the same app.
 - Popups get tags only when all of the app's layers are in the corner of
   the monitor at 0,0. Otherwise, such as with a bar on a second monitor,
-  an open popup could be anywhere, so it hides every tag on its monitor
-  until it closes. The same happens if the app doesn't answer in time.
+  an open popup could be anywhere, even across monitors, so it hides
+  every tag on whichever monitor you hint until it closes. The same
+  happens if the app doesn't answer in time.
 - A popup gets no tags where a full-screen overlay (a launcher, a
   settings window) or a fullscreen window may be above it. Wayhint can't
   tell which layer a popup belongs to, so a settings window's own
