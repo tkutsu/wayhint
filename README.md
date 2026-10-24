@@ -25,8 +25,8 @@ into a buffer, and wayhint looks for shapes that read as controls and words.
 A paragraph gets one tag, which opens into a tag per line. On 30 windows
 whose accessibility tree gave the right answers, the pixel tags put 84% of
 the controls one tag away, and about a third of their tags landed on
-nothing clickable. Reading a 2560x1400 window takes about 40 ms, plus 10
-to 25 ms for Hyprland to render the picture.
+nothing clickable. Reading a 2560x1400 window takes about 35 ms on the
+author's laptop, plus 10 to 25 ms for Hyprland to render the picture.
 
 ## Requirements
 
@@ -147,9 +147,10 @@ which must be a Latin one (US, Colemak, AZERTY and so on). Keys are matched
 by position, so switching to a second layout, in any script, does not
 change the tags.
 
-`detector = "fast"` reads a window's pixels in one pass instead of two:
-about 25 ms instead of 40 for a 2560x1400 window on the author's laptop,
-for slower CPUs. It finds nearly as many controls (82% one tag away) but
+`detector = "fast"` reads a window's pixels in one pass instead of two,
+for slower CPUs. `"full"` runs its two passes side by side, so on the
+author's laptop the difference is 26 ms against 33, but `"fast"` does about
+half the work. It finds nearly as many controls (82% one tag away) but
 gives about 15% more tags, and 43% of its tags land on nothing clickable,
 against 33% for `"full"`.
 

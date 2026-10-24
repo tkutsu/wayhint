@@ -54,12 +54,13 @@ pub struct Frame {
 /// cost (`.plans/pixel-tags.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Detector {
-    /// Both passes: 84.4% of targets on the first screen, 1,574 stray tags
-    /// on the 30 captures (px-blocks setting 10061, link tags on).
+    /// Both passes, on two threads: 84.4% of targets on the first screen,
+    /// 1,575 of 4,796 tags stray, on the 30 captures (px-blocks setting
+    /// 10061, link tags on).
     #[default]
     Full,
-    /// The colour pass alone, about a third of the time: as many targets
-    /// found, a fifth more tags, most of them stray (setting 8948).
+    /// The colour pass alone, half the work: 82.4% of targets, 2,409 of
+    /// 5,542 tags stray (setting 8948).
     Fast,
 }
 
@@ -117,9 +118,9 @@ pub fn find(frame: &Frame, detector: Detector) -> Found {
 /// `frame` at about one pixel per logical pixel, which every size rule
 /// assumes: a frame `width` logical px wide but 2x or more as many pixels
 /// (a scaled monitor) is averaged down by the whole part of the ratio, as
-/// Neru reads a scaled frame. Returns the pixels per logical pixel left,
-/// 1 at the usual scales, 1.5 at 3x, and so on; scales under 2 are read
-/// as they are, untested (README, known gaps).
+/// Neru reads a scaled frame. Returns the pixels per logical pixel left:
+/// 1 at a whole scale, 1.25 at 2.5, 1.5 at 1.5 (a scale under 2 is read
+/// as it is, untested; README, known gaps).
 pub fn shrink(frame: Frame, width: i32) -> (Frame, f64) {
     let ratio = |f: &Frame| f.width as f64 / f64::from(width.max(1));
     let factor = ratio(&frame).floor() as usize;
