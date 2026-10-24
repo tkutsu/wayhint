@@ -29,6 +29,7 @@
     clippy::many_single_char_names
 )]
 
+mod buckets;
 mod contour;
 mod group;
 mod segment;

@@ -123,7 +123,7 @@ impl Session {
             // later rounds start with the default action again. `snapshot`
             // is what the pick ends in: the scan, or a block opened in it.
             let mut snapshot = scanned.clone();
-            let picked = pick::pick_opening(
+            let picked = pick::pick(
                 &mut self.overlay,
                 config,
                 &mut snapshot,

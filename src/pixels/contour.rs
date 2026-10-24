@@ -8,7 +8,7 @@
 //! only for these exact boxes, and the tests compare them with the Go
 //! output box for box.
 
-use super::{Corners, Frame};
+use super::{Corners, Frame, buckets::Buckets};
 
 /// Canny's pair, on Sobel magnitudes `|gx| + |gy|` of a 0-255 luma: above
 /// `HIGH` starts an edge, above `LOW` extends one.
@@ -61,6 +61,11 @@ impl Blob {
 
     fn height(&self) -> i32 {
         (self.max_y - self.min_y + 1) as i32
+    }
+
+    fn corners(&self) -> Corners {
+        let (x, y) = (self.min_x as i32, self.min_y as i32);
+        [x, y, x + self.width(), y + self.height()]
     }
 
     /// The children, newest first, as the sibling links run.
@@ -287,22 +292,27 @@ fn blobs(dilated: &[bool], w: usize, h: usize) -> Vec<Blob> {
 /// whose box holds its box give or take 1 px. Strictly bigger keeps the
 /// links acyclic.
 fn nest(blobs: &mut [Blob]) {
-    // Sorted by area, the candidates for a parent are the blobs after the
-    // child, and the first that holds it is the smallest. Ties in area keep
-    // the lower index first, which is the one Neru's scan of all pairs picks.
-    let mut by_area: Vec<usize> = (0..blobs.len()).collect();
-    by_area.sort_by_key(|&i| blobs[i].area());
-    for (rank, &i) in by_area.iter().enumerate() {
+    let boxes: Vec<Corners> = blobs.iter().map(Blob::corners).collect();
+    let buckets = Buckets::new(&boxes);
+    for i in 0..blobs.len() {
         let c = &blobs[i];
         let own = c.area();
-        let parent = by_area[rank + 1..].iter().copied().find(|&j| {
-            let p = &blobs[j];
-            p.area() > own
-                && p.min_x <= c.min_x + 1
-                && p.max_x + 1 >= c.max_x
-                && p.min_y <= c.min_y + 1
-                && p.max_y + 1 >= c.max_y
-        });
+        // A parent covers this box shrunk by 1 px, so it overlaps the box
+        // grown by 1 px: the buckets under that hold every candidate. Of
+        // the smallest, the lowest index, as Neru's scan of all pairs picks.
+        let b = boxes[i];
+        let grown = [b[0] - 1, b[1] - 1, b[2] + 1, b[3] + 1];
+        let parent = buckets
+            .near(grown)
+            .filter(|&j| {
+                let p = &blobs[j];
+                p.area() > own
+                    && p.min_x <= c.min_x + 1
+                    && p.max_x + 1 >= c.max_x
+                    && p.min_y <= c.min_y + 1
+                    && p.max_y + 1 >= c.max_y
+            })
+            .min_by_key(|&j| (blobs[j].area(), j));
         blobs[i].parent = parent;
         if let Some(p) = parent {
             blobs[i].next_sibling = blobs[p].first_child;
@@ -372,9 +382,6 @@ fn keep(blobs: &[Blob]) -> Vec<Corners> {
         .iter()
         .zip(&dropped)
         .filter(|&(_, &d)| !d)
-        .map(|(b, _)| {
-            let (x, y) = (b.min_x as i32, b.min_y as i32);
-            [x, y, x + b.width(), y + b.height()]
-        })
+        .map(|(b, _)| b.corners())
         .collect()
 }

@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{Corners, Frame, Policy, texture};
+use super::{Corners, Frame, Policy, buckets::Buckets, texture};
 
 /// Text is this tall, in px; anything else passes through as it is.
 const TEXT: std::ops::RangeInclusive<i32> = 3..=48;
@@ -147,10 +147,11 @@ fn members(words: &[Corners], p: Corners) -> impl Iterator<Item = Corners> + '_ 
 pub fn fill(base: &[Corners], low: &[Corners]) -> Vec<Corners> {
     let overlaps =
         |a: Corners, b: Corners| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    let near = Buckets::new(base);
     let added: Vec<Corners> = low
         .iter()
         .copied()
-        .filter(|&b| !base.iter().any(|&a| overlaps(b, a)))
+        .filter(|&b| !near.near(b).any(|j| overlaps(b, base[j])))
         .collect();
     let dashed = dashes(&added);
     base.iter()

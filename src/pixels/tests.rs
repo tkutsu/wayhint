@@ -39,6 +39,25 @@ fn frame(width: usize, height: usize, paint: impl Fn(usize, usize) -> [u8; 3]) -
 }
 
 #[test]
+fn a_dense_grid_gets_a_tag_per_square() {
+    // The audit's dense frame (2026-10-24), smaller: 9 px dark squares every
+    // 16 px. Thousands of boxes, each a target; the all-pairs searches it
+    // once took 225 ms on at 2560x1440 now use `Buckets`.
+    let f = frame(640, 320, |x, y| {
+        if (3..12).contains(&(x % 16)) && (3..12).contains(&(y % 16)) {
+            [20; 3]
+        } else {
+            [230; 3]
+        }
+    });
+    for detector in [Detector::Full, Detector::Fast] {
+        let found = find(&f, detector);
+        assert_eq!(found.direct.len(), 40 * 20, "{detector:?}");
+        assert!(found.blocks.is_empty() && found.media.is_empty());
+    }
+}
+
+#[test]
 fn a_blank_frame_has_nothing() {
     for detector in [Detector::Full, Detector::Fast] {
         assert_eq!(

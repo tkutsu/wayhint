@@ -114,7 +114,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
     let cursor = || anyhow::bail!("no pointer when drawing from a file");
     // Opened blocks show all their lines: nothing to check them against.
     let keep = |_: &mut Snapshot| {};
-    match pick::pick_opening(&mut overlay, config, &mut snapshot, None, &cursor, &keep)? {
+    match pick::pick(&mut overlay, config, &mut snapshot, None, &cursor, &keep)? {
         Pick::Target { index, act } => {
             let (x, y) = (act.nudge.x, act.nudge.y);
             eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());

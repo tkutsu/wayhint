@@ -42,7 +42,8 @@ use crate::{
 /// How long the re-check may take: one object, four small requests.
 const RECHECK_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// How long a window's picture may take: the spike's took 6 to 12 ms.
+/// How long a window's picture may take, connecting included: the
+/// spike's took 6 to 12 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A connection to the accessibility bus plus the runtime its calls run on.
@@ -158,14 +159,33 @@ impl Desktop {
 }
 
 /// Keeps the targets worth a tag: on `monitor`, and not under a window
-/// stacked above their own (`stack` is bottom to top).
+/// stacked above their own (`stack` is bottom to top). A block whose
+/// middle is covered stays while one of its lines shows, with its tag on
+/// the first of those: it's the only way to those lines.
 pub fn keep_visible(snapshot: &mut Snapshot, stack: &[Window], monitor: &Monitor) {
     // Two fields of `snapshot`, borrowed apart: the closure reads
-    // `windows` while `retain` changes `targets`.
-    snapshot.targets.retain(|t| {
+    // `windows` while `retain_mut` changes `targets`.
+    snapshot.targets.retain_mut(|t| {
         let address = &snapshot.windows[t.window].window.address;
-        monitor.rect.contains(t.hit) && uncovered(stack, address, t.hit).is_some()
+        let shows = |at| monitor.rect.contains(at) && uncovered(stack, address, at).is_some();
+        if shows(t.hit) {
+            return true;
+        }
+        match t
+            .opens
+            .iter()
+            .map(|line| line.center())
+            .find(|&at| shows(at))
+        {
+            Some(at) => {
+                t.hit = at;
+                true
+            }
+            None => false,
+        }
     });
+    // A tag that moved onto a line may be out of reading order now.
+    snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
 }
 
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
@@ -189,11 +209,12 @@ fn look(
     detector: Detector,
 ) -> Result<(Found, f64, Stats)> {
     let start = Instant::now();
+    let until = start + CAPTURE_TIMEOUT;
     let camera = match camera {
         Some(camera) => camera,
-        empty => empty.insert(Camera::connect()?),
+        empty => empty.insert(Camera::connect(until)?),
     };
-    let picture = camera.shoot(&window.address, CAPTURE_TIMEOUT)?;
+    let picture = camera.shoot(&window.address, until)?;
     let (frame, scale) = pixels::shrink(picture, window.rect.w);
     let found = pixels::find(&frame, detector);
     let stats = Stats {
@@ -201,4 +222,71 @@ fn look(
         ..Stats::default()
     };
     Ok((found, scale, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        geometry::{Point, Rect},
+        pixels::Block,
+    };
+
+    fn window(address: &str, rect: Rect) -> Window {
+        Window {
+            address: address.into(),
+            pid: 1,
+            class: "kitty".into(),
+            title: String::new(),
+            rect,
+            monitor: 0,
+            focused: true,
+        }
+    }
+
+    #[test]
+    fn a_block_with_its_middle_covered_moves_its_tag_to_a_line_that_shows() {
+        let below = window("0x1", Rect::new(0, 0, 800, 600));
+        let found = Found {
+            blocks: vec![Block {
+                rect: [100, 100, 300, 200],
+                phrases: vec![
+                    [100, 100, 300, 120],
+                    [100, 140, 300, 160],
+                    [100, 180, 300, 200],
+                ],
+            }],
+            ..Found::default()
+        };
+        let monitor = Monitor {
+            id: 0,
+            name: "test".into(),
+            rect: below.rect,
+            scale: 1.0,
+            focused: true,
+        };
+        let stats = Stats::default();
+        let read = || Read::Pixels {
+            window: &below,
+            found: &found,
+            scale: 1.0,
+            stats: &stats,
+        };
+        // A small window over the block's middle and its middle line only.
+        let small = window("0x2", Rect::new(180, 135, 40, 30));
+        let mut snapshot = Snapshot::build(1, 0, [read()]);
+        keep_visible(&mut snapshot, &[below.clone(), small], &monitor);
+        assert_eq!(snapshot.targets.len(), 1, "the block stays");
+        assert_eq!(
+            snapshot.targets[0].hit,
+            Point::new(200, 110),
+            "on its first line"
+        );
+
+        // One over the whole block: nothing of it shows.
+        let big = window("0x3", Rect::new(50, 50, 400, 300));
+        let mut snapshot = Snapshot::build(1, 0, [read()]);
+        keep_visible(&mut snapshot, &[below.clone(), big], &monitor);
+        assert_eq!(snapshot.targets, []);
+    }
 }
