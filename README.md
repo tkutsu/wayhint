@@ -14,7 +14,10 @@ author's setup and has not been packaged yet.
 wayhint reads the accessibility tree (AT-SPI), the same one screen readers
 use, so tags sit on real controls, not on boxes guessed from a screenshot.
 Hyprland says which windows the focused monitor shows and how they stack,
-so a control under a floating window gets no tag. Keys come through an
+so a control under a floating window gets no tag. Layer-shell surfaces
+(bars, launchers, a Quickshell shell) and their popups get tags too, and
+each one covers its whole box: a control behind a launcher gets no tag,
+even where the launcher is see-through. Keys come through an
 input-method keyboard grab, so an open menu stays open while you type its
 tag. Clicks go through the compositor's virtual pointer,
 and the cursor goes back where it was.
@@ -85,7 +88,9 @@ reason shows as a Hyprland notification. From a terminal it's printed
 instead.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON, and
-`wayhint dump --explain` adds every control it left out and why. The output
+`wayhint dump --explain` adds every control it left out and why.
+`wayhint dump --surfaces` lists everything on the focused monitor, bottom
+to top, with each one's tag count and what couldn't be read. The output
 can contain private text from your windows.
 
 ## Configuration
@@ -138,6 +143,15 @@ the arrows are never command keys.
 - A menu that opens after a click, such as a right-click menu, is usually a
   separate window to the accessibility tree and is not scanned yet, so its
   items get no tags.
+- A layer surface gets tags only when it sits in the top-left corner of
+  the monitor at 0,0, and its popups only when all of the app's layers
+  do. Elsewhere the accessibility tree doesn't say where they are. A bar
+  across the top or a full-screen launcher qualifies; a dock with a
+  margin, or a bar on a second monitor, doesn't.
+- A popup gets no tags where a full-screen overlay (a launcher, a
+  settings window) or a fullscreen window may be above it. Wayhint can't
+  tell which layer a popup belongs to, so a settings window's own
+  dropdown gets none.
 - A modifier click needs the compositor's virtual keyboard protocol
   (`zwp_virtual_keyboard_v1`); without it, the click happens without the
   modifier and wayhint prints a warning.

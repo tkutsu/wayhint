@@ -64,6 +64,9 @@ pub struct Dump {
     /// Only the focused window and its monitor, no scan
     #[arg(long, conflicts_with_all = ["raw", "explain"])]
     pub window: bool,
+    /// Every surface on the focused monitor, bottom to top, with its tags
+    #[arg(long, conflicts_with_all = ["window", "raw", "explain", "address"])]
+    pub surfaces: bool,
     /// Every node the scan read, before filtering (the filter tests' fixtures)
     #[arg(long, conflicts_with = "explain")]
     pub raw: bool,

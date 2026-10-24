@@ -422,7 +422,7 @@ fn clip(tree: &Tree, c: &Candidate, scrollers: &BTreeSet<usize>) -> Result<Rect,
 mod tests {
     use super::*;
     use crate::desktop::{
-        Window,
+        Kind, Window,
         tree::{Details, ObjectId, States},
     };
 
@@ -485,6 +485,8 @@ mod tests {
                 rect: Rect::new(100, 100, 800, 600),
                 monitor: 0,
                 focused: true,
+                kind: Kind::Client,
+                frames: Vec::new(),
             };
             Tree {
                 window,

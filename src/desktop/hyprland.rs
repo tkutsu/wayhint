@@ -1,6 +1,6 @@
-//! Hyprland over its IPC socket: which windows a monitor shows and how they
-//! stack, where the monitors are, where the cursor is, and a notification
-//! when a run fails.
+//! Hyprland over its IPC socket: which windows and layer surfaces a monitor
+//! shows and how they stack, where the monitors are, where the cursor is,
+//! and a notification when a run fails.
 //!
 //! The protocol is one request per connection: connect to
 //! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, write
@@ -13,6 +13,7 @@
 //! field, only a `Wire` struct changes.
 
 use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -22,7 +23,10 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::geometry::{Point, Rect};
+use crate::{
+    desktop::{surfaces::Stack, tree::ObjectId},
+    geometry::{Point, Rect},
+};
 
 /// External calls are bounded: a hung compositor must not hang wayhint.
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -30,13 +34,26 @@ const TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a notification stays: long enough to read one sentence.
 const NOTIFY_MS: u32 = 6000;
 
-/// A toplevel window, in global logical pixels.
+/// Asks which layers are mapped. `j/layers` lists unmapped ones too (a
+/// hidden drop-down terminal, at full size), and only the Lua API tells them
+/// apart. The reply starts with a word because Hyprland answers an empty
+/// one with "unknown request".
+const MAPPED: &str = "repl local t = {} for _, l in ipairs(hl.get_layers()) do \
+    if l.mapped then t[#t + 1] = l.address end end \
+    return \"mapped \" .. table.concat(t, \" \")";
+
+/// A surface that can get tags, in global logical pixels: a toplevel
+/// window, a layer surface (a bar, a launcher) or a layer's popup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
-    /// Hyprland's handle (`0x55...`), stable while the window lives.
+    /// Hyprland's handle (`0x55...`), stable while the surface lives. A
+    /// popup has none, so it gets one made from its frame (see
+    /// `surfaces::popup`).
     pub address: String,
     pub pid: u32,
+    /// The app's class; a layer's namespace (`quickshell:bar`).
     pub class: String,
+    /// Empty for layers and popups: they have none.
     pub title: String,
     pub rect: Rect,
     /// Id of the monitor it's on, as in [`Monitor::id`].
@@ -44,6 +61,31 @@ pub struct Window {
     /// Whether it has focus. The scan trusts the app's "active" frame only
     /// for the focused window (see `atspi::pick_frame`).
     pub focused: bool,
+    /// `#[serde(default)]`: snapshots saved before layers came in are all
+    /// of clients.
+    #[serde(default)]
+    pub kind: Kind,
+    /// For a layer or popup: the frames in the accessibility tree that may
+    /// be its own (see `surfaces::place`). Empty for a client, whose frame
+    /// is found by title, and for a layer no frame could be matched to: it
+    /// covers its box, but gets no tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<ObjectId>,
+}
+
+/// What a [`Window`] is. Hyprland knows the first two; popups are known only
+/// from the accessibility tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    /// A toplevel window.
+    #[default]
+    Client,
+    /// A layer surface, at one of layer shell's levels: 0 background,
+    /// 1 bottom, 2 top, 3 overlay.
+    Layer { level: u8 },
+    /// A popup of a layer surface: a bar's menu, a settings dropdown.
+    Popup,
 }
 
 /// A monitor's place in the global layout, in logical pixels.
@@ -72,7 +114,7 @@ struct WireWindow {
     floating: bool,
     /// Shown on every workspace, above everything.
     pinned: bool,
-    /// 0 for none, 1 maximized, 2 fullscreen.
+    /// Bits: 1 maximized, 2 fullscreen.
     fullscreen: u8,
     /// A window group's tabs other than the shown one.
     hidden: bool,
@@ -108,8 +150,29 @@ impl From<WireWindow> for Window {
             rect: Rect::new(w.at[0], w.at[1], w.size[0], w.size[1]),
             monitor: w.monitor,
             focused: w.focus_history_id == 0,
+            kind: Kind::Client,
+            frames: Vec::new(),
         }
     }
+}
+
+/// One output's layer surfaces, by level, each level bottom to top.
+/// `j/layers` keys them by output name: `{"DP-1": {"levels": {"0": [...]}}}`.
+#[derive(Deserialize)]
+struct WireOutput {
+    levels: BTreeMap<u8, Vec<WireLayer>>,
+}
+
+#[derive(Deserialize)]
+struct WireLayer {
+    address: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    namespace: String,
+    /// -1 for a layer whose client is gone, while Hyprland still holds it.
+    pid: i64,
 }
 
 #[derive(Deserialize)]
@@ -220,25 +283,151 @@ pub fn focused_window() -> Result<Option<Window>> {
     Ok(Some(wire.into()))
 }
 
-/// The windows `monitor` shows, bottom to top: the order Hyprland's own hit
-/// test reads them in, so the last window holding a point is the one a
-/// click there reaches.
-pub fn stack(monitor: i64) -> Result<Vec<Window>> {
-    let monitors: Vec<WireMonitor> = request("monitors")?;
-    let monitor = monitors
-        .iter()
-        .find(|m| m.id == monitor)
-        .with_context(|| format!("monitor {monitor} is gone"))?;
-    let clients: Vec<WireWindow> = request("clients")?;
-    Ok(stack_of(monitor, clients))
+/// What a monitor shows as far as Hyprland knows: everything but popups.
+pub struct Shown {
+    /// The monitor's clients and mapped layers, stacked (see [`shown_of`]),
+    /// with no frames matched to the layers yet.
+    pub stack: Stack,
+    /// The monitor's box.
+    pub screen: Rect,
+    /// Every mapped layer on every monitor, bottom to top within each, for
+    /// telling a layer's frame from a popup's.
+    pub layers: Vec<Window>,
+    /// The monitor at the global origin, if one is.
+    pub origin: Option<i64>,
+    /// Every process with a client, on any workspace.
+    pub client_pids: BTreeSet<u32>,
 }
 
-/// Where the window at `address` is now, if nothing stacked above it in
-/// `stack` covers `point`; `None` if it's gone, or covered there.
-pub fn uncovered(stack: &[Window], address: &str, point: Point) -> Option<Rect> {
-    let at = stack.iter().position(|w| w.address == address)?;
-    let covered = stack[at + 1..].iter().any(|w| w.rect.contains(point));
-    (!covered).then_some(stack[at].rect)
+/// What `monitor` shows, bottom to top: the order Hyprland's own hit test
+/// reads it in, so the last surface holding a point is the one a click
+/// there reaches. Wayhint's own layer (its tags) is left out.
+pub fn shown(monitor: i64) -> Result<Shown> {
+    let monitors: Vec<WireMonitor> = request("monitors")?;
+    let clients: Vec<WireWindow> = request("clients")?;
+    let outputs: HashMap<String, WireOutput> = request("layers")?;
+    // Without an answer (a Hyprland without the Lua API), every layer it
+    // lists counts as mapped: one that isn't covers some tags for nothing,
+    // and has no frame to get tags of its own.
+    let mapped = mapped_layers().ok();
+    shown_of(
+        monitors,
+        monitor,
+        clients,
+        outputs,
+        mapped.as_ref(),
+        std::process::id(),
+    )
+}
+
+fn mapped_layers() -> Result<BTreeSet<String>> {
+    parse_mapped(&send(MAPPED)?)
+}
+
+/// The reply to [`MAPPED`]: `mapped 0x55... 0x55...`.
+fn parse_mapped(reply: &str) -> Result<BTreeSet<String>> {
+    let addresses = reply
+        .strip_prefix("mapped")
+        .with_context(|| format!("Hyprland mapped layers: unexpected reply {reply:?}"))?;
+    Ok(addresses.split_whitespace().map(str::to_string).collect())
+}
+
+/// [`shown`] without the socket. The order, as Hyprland 0.56.2 hit-tests
+/// (checked in a nested Hyprland, 2026-10-24, `mds/spike-quickshell/`):
+///
+/// 1. background and bottom layers
+/// 2. clients (see [`stack_of`]), then top layers; top layers first when
+///    a window is fullscreen, which covers them as it covers the rest
+/// 3. overlay layers
+///
+/// Inside a level, the order `j/layers` lists them in: a layer mapped
+/// later is above. Popups come later, from the accessibility tree, above
+/// all of these. Their `popup_floor` is just past the top layers: a popup
+/// of a bar is really there, under the overlays and a fullscreen window
+/// (`surfaces::uncovered` says what that changes).
+fn shown_of(
+    monitors: Vec<WireMonitor>,
+    monitor: i64,
+    clients: Vec<WireWindow>,
+    outputs: HashMap<String, WireOutput>,
+    mapped: Option<&BTreeSet<String>>,
+    own_pid: u32,
+) -> Result<Shown> {
+    let ids: HashMap<&str, i64> = monitors.iter().map(|m| (m.name.as_str(), m.id)).collect();
+    let mut layers = Vec::new();
+    for (output, wire) in outputs {
+        let Some(&on) = ids.get(output.as_str()) else {
+            continue;
+        };
+        for (level, list) in wire.levels {
+            for layer in list {
+                let mapped = mapped.is_none_or(|m| m.contains(&layer.address));
+                let Some(pid) = u32::try_from(layer.pid).ok().filter(|&p| p != own_pid) else {
+                    continue;
+                };
+                if mapped {
+                    layers.push(Window {
+                        address: layer.address,
+                        pid,
+                        class: layer.namespace,
+                        title: String::new(),
+                        rect: Rect::new(layer.x, layer.y, layer.w, layer.h),
+                        monitor: on,
+                        focused: false,
+                        kind: Kind::Layer { level },
+                        frames: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+    // `HashMap` order is random: put the monitors back in a fixed order,
+    // so the same desktop gives the same list.
+    layers.sort_by_key(|l| l.monitor);
+
+    let origin = monitors.iter().find(|m| m.x == 0 && m.y == 0).map(|m| m.id);
+    let shown = monitors
+        .into_iter()
+        .find(|m| m.id == monitor)
+        .with_context(|| format!("monitor {monitor} is gone"))?;
+    let client_pids = clients.iter().map(|c| c.pid).collect();
+    let fullscreen = clients.iter().any(|c| {
+        let ws = c.workspace.id;
+        c.monitor == monitor
+            && !c.hidden
+            && c.fullscreen & 2 != 0
+            && (ws == shown.active_workspace.id || ws == shown.special_workspace.id)
+    });
+    let at = |level: u8| {
+        layers
+            .iter()
+            .filter(move |l| l.monitor == monitor && l.kind == Kind::Layer { level })
+            .cloned()
+    };
+    let mut windows: Vec<Window> = at(0).chain(at(1)).collect();
+    let clients = stack_of(&shown, clients);
+    let popup_floor;
+    if fullscreen {
+        windows.extend(at(2));
+        popup_floor = windows.len();
+        windows.extend(clients);
+    } else {
+        windows.extend(clients);
+        windows.extend(at(2));
+        popup_floor = windows.len();
+    }
+    windows.extend(at(3));
+    Ok(Shown {
+        stack: Stack {
+            windows,
+            popup_floor,
+            unplaced: Vec::new(),
+        },
+        screen: Monitor::from(shown).rect,
+        layers,
+        origin,
+        client_pids,
+    })
 }
 
 /// [`stack`] without the socket. The layers, as Hyprland 0.56.2 stacks
@@ -490,29 +679,87 @@ mod tests {
     }
 
     #[test]
-    fn a_window_above_covers_only_its_own_box() {
-        let window = |address: &str, rect| Window {
-            address: address.into(),
-            pid: 7,
-            class: "app".into(),
-            title: String::new(),
-            rect,
-            monitor: 0,
-            focused: false,
+    fn mapped_layers_parse_and_an_empty_list_is_still_an_answer() {
+        let parse = |reply| {
+            parse_mapped(reply)
+                .ok()
+                .map(|m| m.into_iter().collect::<Vec<_>>())
         };
-        let stack = [
-            window("tiled", Rect::new(0, 0, 1000, 1000)),
-            window("float", Rect::new(100, 100, 200, 200)),
-        ];
         assert_eq!(
-            uncovered(&stack, "tiled", Point::new(50, 50)),
-            Some(stack[0].rect)
+            parse("mapped 0x1 0x2"),
+            Some(vec!["0x1".into(), "0x2".into()])
         );
-        assert_eq!(uncovered(&stack, "tiled", Point::new(150, 150)), None);
+        assert_eq!(parse("mapped "), Some(vec![]));
+        assert_eq!(parse("unknown request"), None);
+    }
+
+    /// The user's desktop, as `j/layers` showed it on 2026-10-24, plus a
+    /// hidden drop-down terminal, wayhint's own tag layer, a layer whose
+    /// app is gone, and a top layer.
+    const LAYERS: &str = r#"{"DP-1": {"levels": {
+        "0": [{"address": "0xink", "x": 0, "y": 0, "w": 1, "h": 1, "namespace": "quickshell:ink", "pid": 50},
+              {"address": "0xback", "x": 0, "y": 0, "w": 1920, "h": 1080, "namespace": "quickshell:backdrop", "pid": 50}],
+        "1": [{"address": "0xbar", "x": 0, "y": 0, "w": 1920, "h": 38, "namespace": "quickshell:bar", "pid": 50}],
+        "2": [{"address": "0xtop", "x": 100, "y": 300, "w": 300, "h": 200, "namespace": "osd", "pid": 60},
+              {"address": "0xdead", "x": 100, "y": 100, "w": 300, "h": 200, "namespace": "osd", "pid": -1}],
+        "3": [{"address": "0xkitty", "x": 427, "y": 360, "w": 1712, "h": 726, "namespace": "kitty-quick-access", "pid": 70},
+              {"address": "0xtags", "x": 0, "y": 0, "w": 1920, "h": 1080, "namespace": "wayhint", "pid": 99},
+              {"address": "0xsettings", "x": 0, "y": 0, "w": 1920, "h": 1080, "namespace": "quickshell:settings", "pid": 50}]
+    }}}"#;
+
+    fn shown_with(clients: Vec<WireWindow>) -> Shown {
+        let outputs = serde_json::from_str(LAYERS).unwrap();
+        let mapped = ["0xink", "0xback", "0xbar", "0xtop", "0xtags", "0xsettings"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        shown_of(vec![monitor(0)], 0, clients, outputs, Some(&mapped), 99).unwrap()
+    }
+
+    #[test]
+    fn layers_stack_around_the_clients_by_level() {
+        let shown = shown_with(vec![client("app")]);
         assert_eq!(
-            uncovered(&stack, "float", Point::new(150, 150)),
-            Some(stack[1].rect)
+            addresses(&shown.stack.windows),
+            ["0xink", "0xback", "0xbar", "app", "0xtop", "0xsettings"],
+            "the hidden terminal, wayhint's tags and the dead layer are left out"
         );
-        assert_eq!(uncovered(&stack, "gone", Point::new(50, 50)), None);
+        assert_eq!(
+            shown.stack.popup_floor, 5,
+            "popups are at least over the top layers"
+        );
+        assert_eq!(
+            shown.layers.len(),
+            6 - 1,
+            "every mapped layer but no client"
+        );
+        assert_eq!(shown.stack.windows[2].kind, Kind::Layer { level: 1 });
+        assert_eq!(shown.origin, Some(0));
+        assert!(shown.client_pids.contains(&7));
+    }
+
+    #[test]
+    fn a_fullscreen_window_is_over_the_top_layers_and_popups() {
+        let shown = shown_with(vec![WireWindow {
+            fullscreen: 2,
+            ..client("full")
+        }]);
+        assert_eq!(
+            addresses(&shown.stack.windows),
+            ["0xink", "0xback", "0xbar", "0xtop", "full", "0xsettings"]
+        );
+        assert_eq!(
+            shown.stack.popup_floor, 4,
+            "a popup may be under the window"
+        );
+        let maximized = shown_with(vec![WireWindow {
+            fullscreen: 1,
+            ..client("max")
+        }]);
+        assert_eq!(
+            addresses(&maximized.stack.windows)[3..5],
+            ["max", "0xtop"],
+            "a maximized one isn't"
+        );
     }
 }

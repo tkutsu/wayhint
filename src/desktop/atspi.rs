@@ -6,7 +6,8 @@
 //!    the window's PID.
 //! 2. Find the window's frame among the app's children: by title, else (for
 //!    the focused window only) the one marked active. Two candidates is
-//!    ambiguous: refuse, never guess.
+//!    ambiguous: refuse, never guess. A layer's or popup's frame is known
+//!    before the scan (see `surfaces::place`), so it skips 1 and 2.
 //! 3. Walk the frame breadth first, one level at a time, at most
 //!    [`IN_FLIGHT`] requests at once, reading role, states and interfaces.
 //! 4. For candidates only (see `filter::is_candidate`), read name, box and
@@ -43,6 +44,7 @@ use crate::{
         Window,
         filter::{self, DOCUMENT_ROLES},
         recheck::Fresh,
+        surfaces::Frame,
         tree::{Details, Node, ObjectId, States, Tree},
     },
     geometry::Rect,
@@ -93,8 +95,9 @@ impl Scanner {
         Ok(Self { a11y })
     }
 
-    /// Reads one window's tree within `bounds`. Its errors start with the
-    /// window's class, since a run reads several at once.
+    /// Reads one client's tree within `bounds`, from the frame with its
+    /// title. Its errors start with the window's class, since a run reads
+    /// several at once.
     pub async fn scan(&self, window: &Window, bounds: Bounds) -> Result<(Tree, Stats)> {
         let started = Instant::now();
         let walk = Walk::new(self.a11y.connection(), started + bounds.time);
@@ -102,20 +105,41 @@ impl Scanner {
             .find_frame(&self.a11y, window)
             .await
             .with_context(|| window.class.clone())?;
-        let nodes = walk.read_tree(frame, window.rect, bounds.nodes).await;
-        let mut tree = Tree {
-            window: window.clone(),
-            nodes,
-        };
-        walk.read_candidates(&mut tree).await;
-        walk.read_scroll_areas(&mut tree).await;
-        let stats = Stats {
-            ms: millis(started.elapsed()),
-            nodes: tree.nodes.len(),
-            requests: walk.requests.get(),
-            incomplete: walk.incomplete.take(),
-        };
-        Ok((tree, stats))
+        Ok(walk.scan(window, frame, bounds, started).await)
+    }
+
+    /// Reads the tree under `frame`, a frame already known to be `window`'s
+    /// (a layer's or a popup's, see `surfaces::place`).
+    pub async fn scan_frame(
+        &self,
+        window: &Window,
+        frame: &ObjectId,
+        bounds: Bounds,
+    ) -> (Tree, Stats) {
+        let started = Instant::now();
+        let walk = Walk::new(self.a11y.connection(), started + bounds.time);
+        walk.scan(window, frame.clone(), bounds, started).await
+    }
+
+    /// The top-level frames that are showing, of each app whose process is
+    /// in `pids`, with their boxes in screen coordinates. An app that isn't
+    /// on the accessibility bus has none; one that fails to answer, an
+    /// error.
+    pub async fn frames(
+        &self,
+        pids: &BTreeSet<u32>,
+        timeout: Duration,
+    ) -> Vec<(u32, Result<Vec<Frame>>)> {
+        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let mut all = Vec::new();
+        for &pid in pids {
+            let frames = async {
+                let apps = walk.find_apps(&self.a11y, pid).await?;
+                walk.frames(&apps).await
+            };
+            all.push((pid, frames.await));
+        }
+        all
     }
 
     /// Asks one object again: role, name, states and box, and the boxes of
@@ -197,16 +221,14 @@ impl<'c> Walk<'c> {
             .await?)
     }
 
-    /// Steps 1 and 2: the frame of `window` in the tree.
-    async fn find_frame(
-        &self,
-        a11y: &AccessibilityConnection,
-        window: &Window,
-    ) -> Result<ObjectId> {
+    /// Step 1: the apps of process `pid`; none if it isn't on the bus. Most
+    /// processes have one, but Quickshell registers a second, empty one
+    /// before the one with its frames (2026-10-24).
+    async fn find_apps(&self, a11y: &AccessibilityConnection, pid: u32) -> Result<Vec<ObjectId>> {
         let registry = a11y.root_accessible_on_registry().await?;
         let apps = self.call(registry.get_children()).await?;
         let dbus = zbus::fdo::DBusProxy::new(self.conn).await?;
-        let mut app = None;
+        let mut found = Vec::new();
         for candidate in &apps {
             let Some(bus) = candidate.name() else {
                 continue;
@@ -216,27 +238,74 @@ impl<'c> Walk<'c> {
                 .call(dbus.get_connection_unix_process_id(bus.clone().into()))
                 .await
                 .ok()
-                == Some(window.pid)
+                == Some(pid)
             {
-                app = Some(object_id(candidate));
-                break;
+                found.push(object_id(candidate));
             }
         }
-        let app = app.with_context(|| {
-            format!(
+        // A skipped app may have been this one, if the time ran out.
+        if let Some(why) = self.incomplete.borrow().as_ref() {
+            bail!("looking for pid {pid}: {why}");
+        }
+        Ok(found)
+    }
+
+    /// The showing top-level frames of `apps`, boxed in screen coordinates.
+    async fn frames(&self, apps: &[ObjectId]) -> Result<Vec<Frame>> {
+        let mut frames = Vec::new();
+        for app in apps {
+            frames.extend(self.frames_of(app).await?);
+        }
+        Ok(frames)
+    }
+
+    async fn frames_of(&self, app: &ObjectId) -> Result<Vec<Frame>> {
+        let app: AccessibleProxy = self.proxy(app).await?;
+        let mut frames = Vec::new();
+        for child in self.call(app.get_children()).await? {
+            let object = object_id(&child);
+            let accessible: AccessibleProxy = self.proxy(&object).await?;
+            if !self
+                .call(accessible.get_state())
+                .await?
+                .contains(State::Showing)
+            {
+                continue;
+            }
+            let component: ComponentProxy = self.proxy(&object).await?;
+            let (x, y, w, h) = self.call(component.get_extents(CoordType::Screen)).await?;
+            frames.push(Frame {
+                object,
+                rect: Rect::new(x, y, w, h),
+            });
+        }
+        Ok(frames)
+    }
+
+    /// Steps 1 and 2: the frame of `window` in the tree.
+    async fn find_frame(
+        &self,
+        a11y: &AccessibilityConnection,
+        window: &Window,
+    ) -> Result<ObjectId> {
+        let apps = self.find_apps(a11y, window.pid).await?;
+        if apps.is_empty() {
+            bail!(
                 "pid {} isn't on the accessibility bus, so wayhint can't see its controls",
                 window.pid
-            )
-        })?;
+            );
+        }
 
-        let app: AccessibleProxy = self.proxy(&app).await?;
         let mut frames = Vec::new();
-        for frame in self.call(app.get_children()).await? {
-            let id = object_id(&frame);
-            let proxy: AccessibleProxy = self.proxy(&id).await?;
-            let name = self.call(proxy.name()).await.unwrap_or_default();
-            let states = self.call(proxy.get_state()).await.unwrap_or_default();
-            frames.push((id, name, states.contains(State::Active)));
+        for app in &apps {
+            let app: AccessibleProxy = self.proxy(app).await?;
+            for frame in self.call(app.get_children()).await? {
+                let id = object_id(&frame);
+                let proxy: AccessibleProxy = self.proxy(&id).await?;
+                let name = self.call(proxy.name()).await.unwrap_or_default();
+                let states = self.call(proxy.get_state()).await.unwrap_or_default();
+                frames.push((id, name, states.contains(State::Active)));
+            }
         }
         pick_frame(&frames, &window.title, window.focused)
             .map(|(id, _, _)| id.clone())
@@ -247,6 +316,30 @@ impl<'c> Walk<'c> {
                     window.title
                 )
             })
+    }
+
+    /// Steps 3 and 4, from `frame`.
+    async fn scan(
+        &self,
+        window: &Window,
+        frame: ObjectId,
+        bounds: Bounds,
+        started: Instant,
+    ) -> (Tree, Stats) {
+        let nodes = self.read_tree(frame, window.rect, bounds.nodes).await;
+        let mut tree = Tree {
+            window: window.clone(),
+            nodes,
+        };
+        self.read_candidates(&mut tree).await;
+        self.read_scroll_areas(&mut tree).await;
+        let stats = Stats {
+            ms: millis(started.elapsed()),
+            nodes: tree.nodes.len(),
+            requests: self.requests.get(),
+            incomplete: self.incomplete.take(),
+        };
+        (tree, stats)
     }
 
     /// Step 3: breadth-first walk from the frame.
