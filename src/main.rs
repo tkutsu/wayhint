@@ -29,6 +29,7 @@ mod keyboard;
 mod keys;
 mod overlay;
 mod pick;
+mod pixels;
 mod pointer;
 mod run;
 mod selection;
@@ -93,7 +94,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
-    let snapshot = Snapshot::load(path)?;
+    let mut snapshot = Snapshot::load(path)?;
     let monitor = desktop::monitors()?
         .into_iter()
         .find(|m| m.id == snapshot.monitor)
@@ -111,7 +112,9 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         overlay.keyboard_mode()
     );
     let cursor = || anyhow::bail!("no pointer when drawing from a file");
-    match pick::pick(&mut overlay, config, &snapshot.targets, None, &cursor)? {
+    // Opened blocks show all their lines: nothing to check them against.
+    let keep = |_: &mut Snapshot| {};
+    match pick::pick_opening(&mut overlay, config, &mut snapshot, None, &cursor, &keep)? {
         Pick::Target { index, act } => {
             let (x, y) = (act.nudge.x, act.nudge.y);
             eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());
