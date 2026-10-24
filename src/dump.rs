@@ -3,18 +3,23 @@
 //! Each flag stops the pipeline at a different seam, so every part can be
 //! checked alone: `--window` after Hyprland, `--raw` after the walk, the
 //! default after the filter (a snapshot, which `overlay --from` reads).
+//! `--surfaces` is the whole monitor as a run sees it: what stacks where,
+//! which frame each layer got, and what couldn't be placed.
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
 
 use crate::{
     cli::Dump,
-    desktop::{self, Desktop, Monitor, Window, filter},
+    desktop::{self, Desktop, Kind, Monitor, Window, filter},
     geometry::Rect,
     snapshot::Snapshot,
 };
 
 pub fn run(args: &Dump) -> Result<()> {
+    if args.surfaces {
+        return surfaces();
+    }
     let window = match &args.address {
         Some(address) => {
             desktop::window_by_address(address)?.with_context(|| format!("no window {address}"))?
@@ -90,6 +95,57 @@ struct WithDrops<'a> {
     #[serde(flatten)]
     snapshot: &'a Snapshot,
     dropped: Vec<Explained<'a>>,
+}
+
+#[derive(Serialize)]
+struct Surface<'a> {
+    kind: Kind,
+    class: &'a str,
+    title: &'a str,
+    rect: Rect,
+    /// Frames that may be its own: more than one for two layers with one
+    /// box (the scan read the one with controls).
+    frames: usize,
+    tags: usize,
+}
+
+#[derive(Serialize)]
+struct Surfaces<'a> {
+    surfaces: Vec<Surface<'a>>,
+    /// Surfaces that couldn't be read, and frames that couldn't be placed.
+    unread: Vec<String>,
+}
+
+/// `dump --surfaces`: the focused monitor's stack, scanned as a run scans it.
+fn surfaces() -> Result<()> {
+    let monitor = desktop::monitors()?
+        .into_iter()
+        .find(|m| m.focused)
+        .context("no monitor has focus")?;
+    let mut desktop = Desktop::connect()?;
+    let stack = desktop.stack(monitor.id)?;
+    let (snapshot, unread) = desktop.scan(&stack, &monitor);
+    let tags = |w: &Window| {
+        let targets = snapshot.targets.iter();
+        targets
+            .filter(|t| snapshot.windows[t.window].window.address == w.address)
+            .count()
+    };
+    print(&Surfaces {
+        surfaces: stack
+            .windows
+            .iter()
+            .map(|w| Surface {
+                kind: w.kind,
+                class: &w.class,
+                title: &w.title,
+                rect: w.rect,
+                frames: w.frames.len(),
+                tags: tags(w),
+            })
+            .collect(),
+        unread: unread.iter().map(|e| format!("{e:#}")).collect(),
+    })
 }
 
 fn window_and_monitor(window: &Window) -> Result<WindowDump<'_>> {

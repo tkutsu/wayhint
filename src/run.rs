@@ -112,7 +112,7 @@ impl Session {
             // No tags while scanning: nothing stale can be typed.
             self.overlay.clear()?;
             let monitor = self.overlay.monitor();
-            let stack = desktop::stack(monitor.id)?;
+            let stack = self.desktop.stack(monitor.id)?;
             let (snapshot, unread) = self.desktop.scan(&stack, monitor);
             report(&snapshot, &unread)?;
 
