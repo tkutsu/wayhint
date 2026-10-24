@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
+    pixels::Detector,
     style::Style,
 };
 
@@ -34,6 +35,27 @@ struct File {
     keys: FileKeys,
     style: Style,
     pointer: FilePointer,
+    pixels: FilePixels,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FilePixels {
+    detector: Pixels,
+}
+
+/// Tags for windows with no accessibility tree, found in their pixels:
+/// `[pixels] detector`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Pixels {
+    /// Both passes: the most targets, the fewest stray tags.
+    #[default]
+    Full,
+    /// One pass in about a third of the time, for slower CPUs.
+    Fast,
+    /// No tags in those windows.
+    Off,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,6 +161,9 @@ pub struct Config {
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
+    /// How windows with no accessibility tree are read, `None` for not at
+    /// all: `[pixels] detector`.
+    pub pixels: Option<Detector>,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -521,6 +546,11 @@ impl Config {
             style: file.style,
             after: file.pointer.after,
             nudge: nudge.into(),
+            pixels: match file.pixels.detector {
+                Pixels::Full => Some(Detector::Full),
+                Pixels::Fast => Some(Detector::Fast),
+                Pixels::Off => None,
+            },
         })
     }
 
@@ -593,6 +623,15 @@ impl Config {
             out,
             "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click\n",
             self.nudge
+        );
+        let detector = match self.pixels {
+            Some(Detector::Full) => "full",
+            Some(Detector::Fast) => "fast",
+            None => "off",
+        };
+        let _ = write!(
+            out,
+            "\n[pixels]\ndetector = \"{detector}\"   # windows with no accessibility tree: \"full\", \"fast\" for slower CPUs, or \"off\"\n"
         );
         out
     }
@@ -763,6 +802,28 @@ mod tests {
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[pointer]\nnudge = 0").contains("at least 1 px"));
         assert!(err("[pointer]\nnudge = -3").contains("invalid value"));
+    }
+
+    #[test]
+    fn pixel_tags_are_full_unless_set() {
+        let read = |text: &str| Config::parse(text, &us()).unwrap().pixels;
+        assert_eq!(read(""), Some(Detector::Full));
+        assert_eq!(read("[pixels]\ndetector = \"fast\""), Some(Detector::Fast));
+        assert_eq!(read("[pixels]\ndetector = \"off\""), None);
+        let err = format!(
+            "{:#}",
+            Config::parse("[pixels]\ndetector = \"quick\"", &us()).unwrap_err()
+        );
+        assert!(err.contains("unknown variant"));
+        for text in [
+            "",
+            "[pixels]\ndetector = \"fast\"",
+            "[pixels]\ndetector = \"off\"",
+        ] {
+            let config = Config::parse(text, &us()).unwrap();
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
+        }
     }
 
     #[test]

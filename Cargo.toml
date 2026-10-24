@@ -12,18 +12,20 @@ categories = ["command-line-utilities", "accessibility"]
 
 [dependencies]
 anyhow = "1.0.104"
+bitflags = "2"  # already in the tree through wayland: the window export's generated code names it
 atspi = { version = "0.30", default-features = false, features = ["connection", "proxies", "wrappers", "tokio"] }  # no p2p: it dials every app at startup
 calloop = { version = "0.14", features = ["signals"] }  # only to turn on SCTK's calloop signals: Ctrl+C as an event
 clap = { version = "4.6.7", features = ["derive"] }
 fontdue = "0.9"
 futures = "0.3"
-rustix = { version = "1.1", features = ["fs", "time"] }  # already in the tree through wayland: `time` for the clock input events are stamped with, `fs` for the memfd a keymap travels in
+rustix = { version = "1.1", features = ["event", "fs", "time"] }  # already in the tree through wayland: `time` for the clock input events are stamped with, `fs` for the memfds a keymap and a window picture travel in, `event` to wait for a picture with a deadline
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 smithay-client-toolkit = "0.21"
 tiny-skia = "0.11"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 toml = "1.1.8"
+wayland-scanner = "0.31"  # already in the tree through wayland: writes the client code for Hyprland's window export from its XML
 xkbcommon = { version = "0.8", default-features = false }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
@@ -34,4 +36,5 @@ unsafe_code = "forbid"
 pedantic = { level = "warn", priority = -1 }
 
 [dev-dependencies]
+png = "0.18"  # the pixel tests read saved captures
 proptest = "1"

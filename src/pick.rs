@@ -11,7 +11,7 @@ use crate::{
     keys::{Key, KeyCode},
     overlay::{Dot, Event, Frame, Overlay, Tag},
     selection::{Input, Selector, Step},
-    snapshot::Target,
+    snapshot::{Snapshot, Target},
 };
 
 /// How far above the monitor's bottom edge the status pill sits, in px.
@@ -38,6 +38,31 @@ struct Scene<'a> {
     targets: &'a [Target],
     screen: Rect,
     pointer: Option<Point>,
+}
+
+/// [`pick`], with blocks that open: a block's tag (a pixel target with
+/// lines in `opens`) shows tags on its lines instead of acting, and the
+/// pick goes on there, with the verb typed on the block. `shown` ends as
+/// the snapshot the pick was made in. `keep` drops what an opened block
+/// mustn't show: lines under another window or off the monitor.
+pub fn pick_opening(
+    overlay: &mut Overlay,
+    config: &Config,
+    shown: &mut Snapshot,
+    mut verb: Option<Action>,
+    cursor: &dyn Fn() -> Result<Point>,
+    keep: &dyn Fn(&mut Snapshot),
+) -> Result<Pick> {
+    loop {
+        match pick(overlay, config, &shown.targets, verb, cursor)? {
+            Pick::Target { index, act } if !shown.targets[index].opens.is_empty() => {
+                verb = Some(act.action);
+                *shown = shown.open(index);
+                keep(shown);
+            }
+            picked => return Ok(picked),
+        }
+    }
 }
 
 /// Shows tags for `targets` and reads keys until one is picked. `verb`
@@ -312,10 +337,10 @@ mod tests {
         )
         .unwrap();
         let target = |x| Target {
-            object: crate::desktop::tree::ObjectId {
+            object: Some(crate::desktop::tree::ObjectId {
                 bus: ":1.7".into(),
                 path: format!("/{x}"),
-            },
+            }),
             window: 0,
             rect: Rect::new(x - 20, 90, 40, 20),
             hit: Point::new(x, 100),
@@ -323,6 +348,7 @@ mod tests {
             name: String::new(),
             editable: false,
             clips: Vec::new(),
+            opens: Vec::new(),
         };
         let targets = [target(100), target(200), target(300)];
         let scene = Scene {

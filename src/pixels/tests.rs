@@ -1,0 +1,174 @@
+use std::{fs::File, path::Path, time::Instant};
+
+use serde::Deserialize;
+use serde_json::json;
+
+use super::*;
+
+/// A PNG as a [`Frame`]: RGB as it is, RGBA flattened on black (alpha
+/// dropped, as the captures are premultiplied).
+fn load(path: &Path) -> Frame {
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(File::open(path).unwrap()));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let rgb = match info.color_type {
+        png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgba => buf[..info.buffer_size()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, _]| [r, g, b])
+            .collect(),
+        other => panic!("{}: {other:?} isn't RGB", path.display()),
+    };
+    Frame {
+        width: info.width as usize,
+        height: info.height as usize,
+        rgb,
+    }
+}
+
+fn frame(width: usize, height: usize, paint: impl Fn(usize, usize) -> [u8; 3]) -> Frame {
+    let rgb = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| paint(x, y))
+        .collect();
+    Frame { width, height, rgb }
+}
+
+#[test]
+fn a_blank_frame_has_nothing() {
+    for detector in [Detector::Full, Detector::Fast] {
+        assert_eq!(
+            find(&frame(64, 48, |_, _| [30, 30, 30]), detector),
+            Found::default()
+        );
+        assert_eq!(
+            find(&frame(0, 0, |_, _| [0; 3]), detector),
+            Found::default()
+        );
+    }
+}
+
+#[test]
+fn a_button_is_one_tag() {
+    // A light 80x24 button with a dark border on a mid-grey window.
+    let f = frame(200, 100, |x, y| {
+        let inside = (60..140).contains(&x) && (40..64).contains(&y);
+        let border = inside && (x == 60 || x == 139 || y == 40 || y == 63);
+        match (inside, border) {
+            (_, true) => [20, 20, 20],
+            (true, false) => [230, 230, 230],
+            _ => [128, 128, 128],
+        }
+    });
+    for detector in [Detector::Full, Detector::Fast] {
+        let found = find(&f, detector);
+        assert_eq!(found.direct.len(), 1, "{detector:?}: {found:?}");
+        let (x, y) = group::centre(found.direct[0]);
+        assert!(
+            (95..105).contains(&x) && (47..57).contains(&y),
+            "{detector:?}: {found:?}"
+        );
+    }
+}
+
+/// One capture of the prototype's corpus, with the word boxes the
+/// prototype grouped, in its order.
+#[derive(Deserialize)]
+struct Case {
+    name: String,
+    png: String,
+    full: Vec<Corners>,
+    fast: Vec<Corners>,
+}
+
+fn found_json(found: &Found) -> serde_json::Value {
+    json!({
+        "direct": found.direct,
+        "blocks": found.blocks.iter().map(|b| json!({"rect": b.rect, "phrases": b.phrases})).collect::<Vec<_>>(),
+        "media": found.media,
+    })
+}
+
+fn median_ms(mut v: Vec<f64>) -> f64 {
+    v.sort_unstable_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+/// The port against the prototype: `WAYHINT_PIXEL_CORPUS` names a JSON
+/// list of [`Case`]s, the results go to `WAYHINT_PIXEL_OUT`, and a script
+/// compares them (`mds/spike-pixels/port/compare.py`). Run in release for
+/// the timings:
+/// `cargo test --release pixels::tests::corpus -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs the local pixel corpus"]
+fn corpus() {
+    let manifest = std::env::var("WAYHINT_PIXEL_CORPUS").expect("WAYHINT_PIXEL_CORPUS");
+    let out = std::env::var("WAYHINT_PIXEL_OUT").expect("WAYHINT_PIXEL_OUT");
+    let runs: usize = std::env::var("WAYHINT_PIXEL_RUNS").map_or(5, |v| v.parse().unwrap());
+    let cases: Vec<Case> = serde_json::from_reader(File::open(manifest).unwrap()).unwrap();
+    let mut rows = Vec::new();
+    for case in &cases {
+        let frame = load(Path::new(&case.png));
+        let time = |f: &dyn Fn()| {
+            median_ms(
+                (0..runs)
+                    .map(|_| {
+                        let start = Instant::now();
+                        f();
+                        start.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect(),
+            )
+        };
+        let full_policy = Detector::Full.policy();
+        let fast_policy = Detector::Fast.policy();
+        let row = json!({
+            "name": case.name,
+            "contour": contour::boxes(&frame),
+            "segment": segment::boxes(&frame),
+            "grouped_full": found_json(&group::group(&frame, &case.full, &full_policy)),
+            "grouped_fast": found_json(&group::group(&frame, &case.fast, &fast_policy)),
+            "find_full": found_json(&find(&frame, Detector::Full)),
+            "find_fast": found_json(&find(&frame, Detector::Fast)),
+            "ms": {
+                "contour": time(&|| drop(contour::boxes(&frame))),
+                "segment": time(&|| drop(segment::boxes(&frame))),
+                "full": time(&|| drop(find(&frame, Detector::Full))),
+                "fast": time(&|| drop(find(&frame, Detector::Fast))),
+            },
+        });
+        eprintln!("{}: {}", case.name, row["ms"]);
+        rows.push(row);
+    }
+    serde_json::to_writer(File::create(out).unwrap(), &rows).unwrap();
+}
+
+#[test]
+fn a_scaled_frame_is_read_at_logical_size() {
+    let checks = frame(5, 4, |x, _| {
+        if x % 2 == 0 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        }
+    });
+    let (small, left) = shrink(checks, 2);
+    assert_eq!((small.width, small.height), (3, 2));
+    assert_eq!(
+        &small.rgb[..3],
+        &[128, 128, 128],
+        "a 2x2 block of black and white"
+    );
+    assert_eq!(
+        &small.rgb[6..9],
+        &[0, 0, 0],
+        "the last column holds black only"
+    );
+    assert!((left - 1.5).abs() < 1e-9, "3 px for 2 logical px");
+    let (same, one) = shrink(frame(10, 4, |_, _| [9; 3]), 10);
+    assert_eq!((same.width, one), (10, 1.0));
+}

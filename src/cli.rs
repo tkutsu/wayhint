@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::{action::Action, geometry::Point};
+use crate::{action::Action, geometry::Point, pixels::Detector};
 
 /// Keyboard hints for everything clickable on a Wayland desktop.
 ///
@@ -70,6 +70,15 @@ pub struct Dump {
     /// Also list what was dropped, and why
     #[arg(long)]
     pub explain: bool,
+    /// Tag the window from its pixels, as if it had no accessibility tree
+    #[arg(
+        long,
+        value_name = "DETECTOR",
+        num_args = 0..=1,
+        default_missing_value = "full",
+        conflicts_with_all = ["window", "raw", "explain"]
+    )]
+    pub pixels: Option<Detector>,
     /// Scan this window (a Hyprland address, `0x...`) instead of the focused one
     #[arg(long, hide = true)]
     pub address: Option<String>,
