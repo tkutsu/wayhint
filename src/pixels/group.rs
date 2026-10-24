@@ -265,14 +265,26 @@ fn blocks(phrases: &[Corners]) -> Vec<Vec<Corners>> {
         }
         i
     };
-    let mut order: Vec<usize> = (0..text.len()).collect();
-    order.sort_by_key(|&i| text[i][1]);
-    for (n, &i) in order.iter().enumerate() {
-        for &j in &order[n + 1..] {
-            if text[j][1] - text[i][3] > 140 {
-                break;
+    // A step is at most 2.8 text heights between centres, and a text
+    // height sideways when the two don't overlap: the buckets under that
+    // much around a phrase hold every phrase it steps to. Which pairs join
+    // decides the blocks, not the order they join in.
+    let reach = *TEXT.end();
+    let near = Buckets::new(&text);
+    let mut seen = vec![usize::MAX; text.len()];
+    for (i, &a) in text.iter().enumerate() {
+        for j in near.near([
+            a[0] - reach,
+            a[1] - 3 * reach,
+            a[2] + reach,
+            a[3] + 3 * reach,
+        ]) {
+            // Once per pair: a phrase in several cells comes once per cell.
+            if j <= i || seen[j] == i {
+                continue;
             }
-            if stacked(text[i], text[j]) {
+            seen[j] = i;
+            if stacked(a, text[j]) {
                 let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
                 parent[ri] = rj;
             }
@@ -528,19 +540,17 @@ impl<'a> Inks<'a> {
                 return None;
             }
             let bg = patch.ring_median();
-            let far: Vec<[u8; 3]> = patch.inner().filter(|&p| far(p, bg)).collect();
-            if far.len() < 4 {
+            let (mut ink, mut chroma) = (Counts::new(), 0);
+            for p in patch.inner().filter(|&p| far(p, bg)) {
+                ink.add(p);
+                chroma += u32::from(p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]));
+            }
+            if ink.n < 4 {
                 return None;
             }
-            let channel = |c: usize| median(far.iter().map(|p| f64::from(p[c])).collect());
-            let chroma = far
-                .iter()
-                .map(|p| f64::from(p.iter().max().unwrap_or(&0) - p.iter().min().unwrap_or(&0)))
-                .sum::<f64>()
-                / far.len() as f64;
             Some(Ink {
-                colour: [channel(0), channel(1), channel(2)],
-                chroma,
+                colour: ink.median(),
+                chroma: f64::from(chroma) / f64::from(ink.n),
             })
         })
     }
@@ -601,14 +611,16 @@ impl<'a> Patch<'a> {
     /// bottom row, left column, right column, so each corner counts twice.
     fn ring_median(&self) -> [f64; 3] {
         let (w, h) = (self.w, self.h);
-        let ring: Vec<[u8; 3]> = (0..w)
-            .map(|x| self.at(x, 0))
-            .chain((0..w).map(|x| self.at(x, h - 1)))
-            .chain((0..h).map(|y| self.at(0, y)))
-            .chain((0..h).map(|y| self.at(w - 1, y)))
-            .collect();
-        let channel = |c: usize| median(ring.iter().map(|p| f64::from(p[c])).collect());
-        [channel(0), channel(1), channel(2)]
+        let mut ring = Counts::new();
+        for x in 0..w {
+            ring.add(self.at(x, 0));
+            ring.add(self.at(x, h - 1));
+        }
+        for y in 0..h {
+            ring.add(self.at(0, y));
+            ring.add(self.at(w - 1, y));
+        }
+        ring.median()
     }
 
     /// The pixels inside the ring, row by row.
@@ -622,6 +634,51 @@ fn far(p: [u8; 3], bg: [f64; 3]) -> bool {
     (0..3).any(|c| (f64::from(p[c]) - bg[c]).abs() > INK)
 }
 
+/// How many pixels have each value, per channel: the medians of a box's
+/// colours without sorting them.
+struct Counts {
+    bins: [[u32; 256]; 3],
+    n: u32,
+}
+
+impl Counts {
+    const fn new() -> Self {
+        Self {
+            bins: [[0; 256]; 3],
+            n: 0,
+        }
+    }
+
+    fn add(&mut self, p: [u8; 3]) {
+        for (bins, v) in self.bins.iter_mut().zip(p) {
+            bins[usize::from(v)] += 1;
+        }
+        self.n += 1;
+    }
+
+    /// [`median`] of each channel's values, from the counts.
+    fn median(&self) -> [f64; 3] {
+        let n = self.n;
+        self.bins.each_ref().map(|bins| {
+            // The `k`th smallest value, from 0.
+            let kth = |k: u32| {
+                let mut seen = 0;
+                bins.iter()
+                    .position(|&c| {
+                        seen += c;
+                        seen > k
+                    })
+                    .map_or(255.0, |v| v as f64)
+            };
+            if n % 2 == 1 {
+                kth(n / 2)
+            } else {
+                f64::midpoint(kth(n / 2 - 1), kth(n / 2))
+            }
+        })
+    }
+}
+
 /// NumPy's median: the middle value, or the mean of the middle two.
 fn median(mut v: Vec<f64>) -> f64 {
     let n = v.len();
@@ -630,5 +687,29 @@ fn median(mut v: Vec<f64>) -> f64 {
         v[n / 2]
     } else {
         f64::midpoint(v[n / 2 - 1], v[n / 2])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counted_medians_are_sorted_medians() {
+        // Odd and even counts, repeats, and a pair across a gap (0 and 255).
+        let sets: [&[[u8; 3]]; 4] = [
+            &[[7, 0, 255]],
+            &[[0, 9, 3], [255, 9, 4]],
+            &[[5, 1, 1], [5, 2, 200], [6, 2, 9], [1, 250, 9]],
+            &[[3, 3, 3], [1, 2, 3], [9, 9, 9], [4, 5, 6], [4, 0, 6]],
+        ];
+        for set in sets {
+            let mut counts = Counts::new();
+            for &p in set {
+                counts.add(p);
+            }
+            let sorted = [0, 1, 2].map(|c| median(set.iter().map(|p| f64::from(p[c])).collect()));
+            assert_eq!(counts.median(), sorted, "{set:?}");
+        }
     }
 }

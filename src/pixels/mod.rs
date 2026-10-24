@@ -32,6 +32,7 @@
 mod buckets;
 mod contour;
 mod group;
+mod runs;
 mod segment;
 mod texture;
 

@@ -56,14 +56,40 @@ pub fn flat_share(frame: &Frame, b: Corners) -> u32 {
 /// textured tiles, read from every second pixel of every second row.
 pub fn media(frame: &Frame) -> Vec<Corners> {
     let (tw, th) = (frame.width / TILE, frame.height / TILE);
+    if tw == 0 || th == 0 {
+        return Vec::new();
+    }
     let mut flat = vec![0usize; tw * th];
     let mut soft = vec![0usize; tw * th];
+    // Each sampled row's steps per byte first, every pixel's but the first
+    // (a loop the compiler vectorizes), then every second pixel's largest
+    // channel.
+    let (stride, span) = (frame.width * 3, tw * TILE * 3);
+    let mut bytes = vec![0u8; span];
     for y in (1..th * TILE).step_by(2) {
+        let row = &frame.rgb[y * stride..][..span];
+        let up = &frame.rgb[(y - 1) * stride..][..span];
+        for (s, (a, b)) in bytes[3..].iter_mut().zip(row[3..].iter().zip(row)) {
+            *s = a.abs_diff(*b);
+        }
+        for (s, (a, b)) in bytes.iter_mut().zip(row.iter().zip(up)) {
+            *s = (*s).max(a.abs_diff(*b));
+        }
         let base = (y / TILE) * tw;
-        for x in (1..tw * TILE).step_by(2) {
-            let s = step(frame, x, y);
-            flat[base + x / TILE] += usize::from(s <= FLAT);
-            soft[base + x / TILE] += usize::from(s > FLAT && s < HARD);
+        // A pair of pixels is 6 bytes; the second, at odd x, is the sample.
+        for (t, pairs) in bytes
+            .as_chunks::<6>()
+            .0
+            .as_chunks::<{ TILE / 2 }>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            for p in pairs {
+                let s = p[3].max(p[4]).max(p[5]);
+                flat[base + t] += usize::from(s <= FLAT);
+                soft[base + t] += usize::from(s > FLAT && s < HARD);
+            }
         }
     }
     let samples = TILE * TILE / 4;

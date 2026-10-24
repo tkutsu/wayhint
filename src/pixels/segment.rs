@@ -5,14 +5,17 @@
 //! together, are a word.
 //!
 //! It sees what the edge pass misses: faint text, and edges between two
-//! colours of the same brightness, which luma erases. Literal port, like
-//! [`super::contour`], tested against the Go output; one change: Go
-//! returned the words in map order, which varies per run, and this returns
-//! them by label.
+//! colours of the same brightness, which luma erases. Ported like
+//! [`super::contour`]: the Go's boxes exactly, some steps faster another
+//! way, tested against its output. One change: Go returned the words in
+//! map order, which varies per run, and this returns them by label.
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::{Corners, Frame};
+use super::{
+    Corners, Frame,
+    runs::{self, Runs},
+};
 
 /// The smallest per-channel step between neighbours that is ink: low
 /// enough for a 1 px border a few shades off its background.
@@ -125,21 +128,6 @@ impl Blob {
     }
 }
 
-/// One horizontal stretch of ink. `label` is provisional while labelling,
-/// the blob's index after.
-#[derive(Clone, Copy)]
-struct Run {
-    x0: i32,
-    x1: i32,
-    label: usize,
-}
-
-/// Every run, row by row: row `y` is `runs[starts[y]..starts[y + 1]]`.
-struct Runs {
-    runs: Vec<Run>,
-    starts: Vec<usize>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Glyph,
@@ -162,8 +150,9 @@ pub fn boxes(frame: &Frame) -> Vec<Corners> {
     // what is drawn on it.
     let photos: Vec<bool> = blobs.iter().map(is_photo).collect();
     let any_photo = photos.contains(&true);
-    let (mut quiet, raised) = noise_mask(&steps, w, h);
-    if raised {
+    let quiet = noise_mask(&steps, w, h);
+    let raised = quiet.is_some();
+    if let Some(mut quiet) = quiet {
         for b in blobs.iter().filter(|b| is_picture(b)) {
             for y in b.min_y..=b.max_y {
                 let row = y as usize * w;
@@ -175,7 +164,7 @@ pub fn boxes(frame: &Frame) -> Vec<Corners> {
     }
     if any_photo {
         for y in 0..h {
-            for r in &ink.runs[ink.starts[y]..ink.starts[y + 1]] {
+            for r in ink.row(y) {
                 if photos[r.label] {
                     for x in r.x0 as usize..=r.x1 as usize {
                         mask[y * w + x] = steps[y * w + x] >= OVERLAY_STEP;
@@ -192,24 +181,32 @@ pub fn boxes(frame: &Frame) -> Vec<Corners> {
 
 /// For each pixel, the largest channel difference to its right or lower
 /// neighbour: channels, not luma, keep an edge between two colours of
-/// one brightness.
+/// one brightness. A row at a time, per byte, then the largest of each
+/// pixel's three: loops without branches, which the compiler vectorizes.
 fn steps(frame: &Frame) -> Vec<u8> {
     let (w, h) = (frame.width, frame.height);
-    let px = &frame.rgb;
+    let stride = 3 * w;
     let mut out = vec![0; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * 3;
-            let mut step = 0;
-            for c in 0..3 {
-                if x + 1 < w {
-                    step = step.max(px[i + c].abs_diff(px[i + 3 + c]));
-                }
-                if y + 1 < h {
-                    step = step.max(px[i + c].abs_diff(px[i + w * 3 + c]));
-                }
+    let mut bytes = vec![0; stride];
+    for (y, (row, out)) in frame
+        .rgb
+        .chunks_exact(stride)
+        .zip(out.chunks_exact_mut(w))
+        .enumerate()
+    {
+        for (s, (a, b)) in bytes.iter_mut().zip(row.iter().zip(&row[3..])) {
+            *s = a.abs_diff(*b);
+        }
+        // The last pixel has no right neighbour.
+        bytes[stride - 3..].fill(0);
+        if y + 1 < h {
+            let below = &frame.rgb[(y + 1) * stride..(y + 2) * stride];
+            for (s, (a, b)) in bytes.iter_mut().zip(row.iter().zip(below)) {
+                *s = (*s).max(a.abs_diff(*b));
             }
-            out[y * w + x] = step;
+        }
+        for (o, &[r, g, b]) in out.iter_mut().zip(bytes.as_chunks::<3>().0) {
+            *o = r.max(g).max(b);
         }
     }
     out
@@ -217,41 +214,61 @@ fn steps(frame: &Frame) -> Vec<u8> {
 
 /// Marks a pixel when it steps by its tile's threshold: the tile's floor
 /// times [`NOISE_FACTOR`], between [`INK_STEP`] and [`OVERLAY_STEP`].
-/// Says whether any tile's threshold rose.
-fn noise_mask(steps: &[u8], w: usize, h: usize) -> (Vec<bool>, bool) {
+/// `None` when no tile's threshold rose, so the plain mask stands.
+fn noise_mask(steps: &[u8], w: usize, h: usize) -> Option<Vec<bool>> {
+    let cols = w.div_ceil(NOISE_TILE);
+    let mut thresholds = vec![INK_STEP; cols * h.div_ceil(NOISE_TILE)];
+    // A floor this low leaves the threshold at INK_STEP. Most tiles have
+    // one, and a count of their quiet pixels says so without a histogram.
+    let quiet = (usize::from(INK_STEP) / NOISE_FACTOR) as u8;
+    for (t, threshold) in thresholds.iter_mut().enumerate() {
+        let (x0, y0) = (t % cols * NOISE_TILE, t / cols * NOISE_TILE);
+        let (x1, y1) = ((x0 + NOISE_TILE).min(w), (y0 + NOISE_TILE).min(h));
+        let rows = || (y0..y1).map(|y| &steps[y * w + x0..y * w + x1]);
+        let quarter = (y1 - y0) * (x1 - x0) / NOISE_QUANTILE;
+        if rows()
+            .map(|r| r.iter().filter(|&&v| v <= quiet).count())
+            .sum::<usize>()
+            > quarter
+        {
+            continue;
+        }
+        let mut histogram = [0usize; NOISE_BINS];
+        for &v in rows().flatten() {
+            histogram[usize::from(v).min(NOISE_BINS - 1)] += 1;
+        }
+        let mut seen = 0;
+        let mut floor = 0;
+        for (v, n) in histogram.iter().enumerate() {
+            seen += n;
+            if seen > quarter {
+                floor = v;
+                break;
+            }
+        }
+        *threshold = (NOISE_FACTOR * floor).clamp(INK_STEP.into(), OVERLAY_STEP.into()) as u8;
+    }
+    if thresholds.iter().all(|&t| t == INK_STEP) {
+        return None;
+    }
     let mut mask = vec![false; w * h];
-    let mut raised = false;
-    for y0 in (0..h).step_by(NOISE_TILE) {
-        let y1 = (y0 + NOISE_TILE).min(h);
-        for x0 in (0..w).step_by(NOISE_TILE) {
-            let x1 = (x0 + NOISE_TILE).min(w);
-            let mut histogram = [0usize; NOISE_BINS];
-            for y in y0..y1 {
-                for &v in &steps[y * w + x0..y * w + x1] {
-                    histogram[usize::from(v).min(NOISE_BINS - 1)] += 1;
-                }
-            }
-            let quarter = (y1 - y0) * (x1 - x0) / NOISE_QUANTILE;
-            let mut seen = 0;
-            let mut floor = 0;
-            for (v, n) in histogram.iter().enumerate() {
-                seen += n;
-                if seen > quarter {
-                    floor = v;
-                    break;
-                }
-            }
-            let threshold =
-                (NOISE_FACTOR * floor).clamp(INK_STEP.into(), OVERLAY_STEP.into()) as u8;
-            raised |= threshold > INK_STEP;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    mask[y * w + x] = steps[y * w + x] >= threshold;
-                }
+    for (y, (mask, steps)) in mask
+        .chunks_exact_mut(w)
+        .zip(steps.chunks_exact(w))
+        .enumerate()
+    {
+        let tiles = &thresholds[y / NOISE_TILE * cols..];
+        for ((mask, steps), &t) in mask
+            .chunks_mut(NOISE_TILE)
+            .zip(steps.chunks(NOISE_TILE))
+            .zip(tiles)
+        {
+            for (m, &s) in mask.iter_mut().zip(steps) {
+                *m = s >= t;
             }
         }
     }
-    (mask, raised)
+    Some(mask)
 }
 
 /// Dense, and small enough to be one target: an avatar, a thumbnail.
@@ -271,71 +288,13 @@ fn is_photo(b: &Blob) -> bool {
         && f64::from(b.count) >= PHOTO_FILL * f64::from(w * h)
 }
 
-/// Labels 8-connected ink over row runs with union-find, then measures
-/// every blob: box, ink and background, then the ink along each side of
-/// the box. Blobs come in raster order of their first run.
-#[allow(clippy::too_many_lines)] // one function, as Neru wrote it
+/// Labels 8-connected ink, then measures every blob: box, ink and
+/// background, then the ink along each side of the box. Blobs come in
+/// raster order of their first run.
 fn components(frame: &Frame, mask: &[bool]) -> (Vec<Blob>, Runs) {
     let (w, h) = (frame.width, frame.height);
-    let mut runs: Vec<Run> = Vec::with_capacity(w * h / 16);
-    let mut starts = vec![0; h + 1];
-    let mut parent: Vec<usize> = Vec::with_capacity(1024);
-    let find = |parent: &mut Vec<usize>, mut a: usize| {
-        while parent[a] != a {
-            parent[a] = parent[parent[a]];
-            a = parent[a];
-        }
-        a
-    };
-
-    let (mut prev0, mut prev1) = (0, 0);
-    for y in 0..h {
-        starts[y] = runs.len();
-        let row = &mask[y * w..(y + 1) * w];
-        let mut x = 0;
-        while x < w {
-            if !row[x] {
-                x += 1;
-                continue;
-            }
-            let x0 = x;
-            while x < w && row[x] {
-                x += 1;
-            }
-            let (x0, x1) = (x0 as i32, x as i32 - 1);
-            let mut label: Option<usize> = None;
-            // Runs in a row are in order and apart, so the previous row's
-            // runs ending too far left for this one are done with for good.
-            while prev0 < prev1 && runs[prev0].x1 + 1 < x0 {
-                prev0 += 1;
-            }
-            for above in &runs[prev0..prev1] {
-                if above.x0 > x1 + 1 {
-                    break;
-                }
-                let root = find(&mut parent, above.label);
-                label = Some(match label {
-                    None => root,
-                    Some(own) if own != root => {
-                        let (lo, hi) = (root.min(own), root.max(own));
-                        parent[hi] = lo;
-                        lo
-                    }
-                    Some(own) => own,
-                });
-            }
-            let label = label.unwrap_or_else(|| {
-                parent.push(parent.len());
-                parent.len() - 1
-            });
-            runs.push(Run { x0, x1, label });
-        }
-        (prev0, prev1) = (starts[y], runs.len());
-    }
-    starts[h] = runs.len();
-
-    let mut index: Vec<Option<usize>> = vec![None; parent.len()];
-    let mut blobs: Vec<Blob> = Vec::with_capacity(parent.len());
+    let ink = runs::label(mask, w, h);
+    let mut blobs: Vec<Blob> = Vec::with_capacity(ink.count);
     for y in 0..h {
         let row = &frame.rgb[y * w * 3..(y + 1) * w * 3];
         let pixel = |x: usize| {
@@ -345,11 +304,9 @@ fn components(frame: &Frame, mask: &[bool]) -> (Vec<Blob>, Runs) {
                 i32::from(row[x * 3 + 2]),
             ]
         };
-        for run in &mut runs[starts[y]..starts[y + 1]] {
-            let root = find(&mut parent, run.label);
-            run.label = root;
-            let run = *run;
-            let at = *index[root].get_or_insert_with(|| {
+        for run in ink.row(y) {
+            // A blob's first run comes before any other blob's after it.
+            if run.label == blobs.len() {
                 blobs.push(Blob {
                     min_x: run.x0,
                     max_x: run.x1,
@@ -366,9 +323,8 @@ fn components(frame: &Frame, mask: &[bool]) -> (Vec<Blob>, Runs) {
                     last_left: -1,
                     last_right: -1,
                 });
-                blobs.len() - 1
-            });
-            let b = &mut blobs[at];
+            }
+            let b = &mut blobs[run.label];
             b.min_x = b.min_x.min(run.x0);
             b.max_x = b.max_x.max(run.x1);
             b.max_y = y as i32;
@@ -385,10 +341,7 @@ fn components(frame: &Frame, mask: &[bool]) -> (Vec<Blob>, Runs) {
 
     for y in 0..h {
         let yi = y as i32;
-        for run in &mut runs[starts[y]..starts[y + 1]] {
-            // Every root got a blob in the pass above.
-            run.label = index[run.label].unwrap_or_default();
-            let run = *run;
+        for run in ink.row(y) {
             let b = &mut blobs[run.label];
             let n = run.x1 - run.x0 + 1;
             if let Some(k) = usize::try_from(yi - b.min_y).ok().filter(|&k| k < RIM) {
@@ -408,7 +361,7 @@ fn components(frame: &Frame, mask: &[bool]) -> (Vec<Blob>, Runs) {
             }
         }
     }
-    (blobs, Runs { runs, starts })
+    (blobs, ink)
 }
 
 /// The sum of absolute channel differences.
