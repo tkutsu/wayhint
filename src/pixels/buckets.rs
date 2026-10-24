@@ -1,9 +1,10 @@
 //! Boxes bucketed by the grid cells they cover, so "which boxes could
-//! touch this one" reads a few cells instead of every box. The two
-//! searches that were all pairs in the ports, a blob's parent and the
-//! fill-in's overlap test, ask it; their answers don't change, only how
-//! many boxes they look at (a dense window of 14,400 boxes took 150 ms in
-//! the parent search alone, audit 2026-10-24).
+//! touch this one" reads a few cells instead of every box. The searches
+//! that read every box in the ports, or every box in a band of rows, ask
+//! it: a blob's parent, the fill-in's overlap test and a phrase's stacked
+//! neighbours. Their answers don't change, only how many boxes they look
+//! at (a dense window of 14,400 boxes took 150 ms in the parent search
+//! alone, audit 2026-10-24).
 
 use super::Corners;
 

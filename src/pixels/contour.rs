@@ -4,11 +4,14 @@
 //! words, then one box per blob of edge pixels, filtered by where it sits
 //! among the others.
 //!
-//! Every step is a literal port: the scores in `.plans/pixel-tags.md` hold
-//! only for these exact boxes, and the tests compare them with the Go
-//! output box for box.
+//! Every step gives exactly what the Go gives: the scores in
+//! `.plans/pixel-tags.md` hold only for these exact boxes, and the tests
+//! compare them with the Go output box for box. Some steps get there
+//! another way, faster: row loops the compiler vectorizes, the gradient's
+//! direction only where thinning reads it, and row runs
+//! ([`super::runs`]) instead of a flood fill.
 
-use super::{Corners, Frame, buckets::Buckets};
+use super::{Corners, Frame, buckets::Buckets, runs};
 
 /// Canny's pair, on Sobel magnitudes `|gx| + |gy|` of a 0-255 luma: above
 /// `HIGH` starts an edge, above `LOW` extends one.
@@ -97,193 +100,201 @@ fn luma(frame: &Frame) -> Vec<u8> {
         .collect()
 }
 
-/// The separable `[1 4 6 4 1] / 16` blur, edges clamped.
+/// The separable `[1 4 6 4 1] / 16` blur, edges clamped. Each row is
+/// padded with its end pixels once, so the taps are five shifted slices
+/// and the loops have no branches.
 fn blur(gray: &[u8], w: usize, h: usize) -> Vec<u8> {
+    // 16 x 255 + 8 fits u16, half the width of u32 in a vector register.
     let tap = |a: u8, b: u8, c: u8, d: u8, e: u8| {
-        let sum = u32::from(a) + 4 * u32::from(b) + 6 * u32::from(c) + 4 * u32::from(d);
-        ((sum + u32::from(e) + 8) >> 4) as u8
+        let sum = u16::from(a) + 4 * u16::from(b) + 6 * u16::from(c) + 4 * u16::from(d);
+        ((sum + u16::from(e) + 8) >> 4) as u8
     };
     let mut tmp = vec![0; w * h];
-    for y in 0..h {
-        let row = &gray[y * w..(y + 1) * w];
-        for x in 0..w {
-            let at = |dx: isize| row[x.saturating_add_signed(dx).min(w - 1)];
-            tmp[y * w + x] = tap(at(-2), at(-1), row[x], at(1), at(2));
+    let mut padded = vec![0; w + 4];
+    for (row, out) in gray.chunks_exact(w).zip(tmp.chunks_exact_mut(w)) {
+        padded[..2].fill(row[0]);
+        padded[2..w + 2].copy_from_slice(row);
+        padded[w + 2..].fill(row[w - 1]);
+        let at = |dx: usize| &padded[dx..dx + w];
+        let (a, b, c, d, e) = (at(0), at(1), at(2), at(3), at(4));
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = tap(a[x], b[x], c[x], d[x], e[x]);
         }
     }
     let mut out = vec![0; w * h];
-    for y in 0..h {
-        let at = |dy: isize| y.saturating_add_signed(dy).min(h - 1) * w;
-        let (a, b, d, e) = (at(-2), at(-1), at(1), at(2));
-        for x in 0..w {
-            out[y * w + x] = tap(
-                tmp[a + x],
-                tmp[b + x],
-                tmp[y * w + x],
-                tmp[d + x],
-                tmp[e + x],
-            );
+    for (y, out) in out.chunks_exact_mut(w).enumerate() {
+        let at = |dy: isize| {
+            let y = y.saturating_add_signed(dy).min(h - 1);
+            &tmp[y * w..(y + 1) * w]
+        };
+        let (a, b, c, d, e) = (at(-2), at(-1), at(0), at(1), at(2));
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = tap(a[x], b[x], c[x], d[x], e[x]);
         }
     }
     out
 }
 
+/// Sobel's gradient `(gx, gy)` at `x` of the middle row of three.
+fn gradient([up, row, down]: [&[u8]; 3], x: usize) -> (i16, i16) {
+    let p = |r: &[u8], x: usize| i16::from(r[x]);
+    let gx = (p(up, x + 1) + 2 * p(row, x + 1) + p(down, x + 1))
+        - (p(up, x - 1) + 2 * p(row, x - 1) + p(down, x - 1));
+    let gy = (p(down, x - 1) + 2 * p(down, x) + p(down, x + 1))
+        - (p(up, x - 1) + 2 * p(up, x) + p(up, x + 1));
+    (gx, gy)
+}
+
 /// Sobel, thinning along the gradient, and hysteresis: 255 on edges.
+/// Thinning needs the gradient's direction only where the magnitude
+/// reaches `LOW`, so it works the direction out there, and skips whole
+/// 32 px stretches where nothing does.
 fn canny(blurred: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let total = w * h;
-    let mut mag = vec![0i16; total];
-    let mut dir = vec![0u8; total];
-    for y in 1..h.saturating_sub(1) {
-        for x in 1..w - 1 {
-            let p = |dx: usize, dy: usize| i32::from(blurred[(y + dy - 1) * w + x + dx - 1]);
-            let gx = (p(2, 0) + 2 * p(2, 1) + p(2, 2)) - (p(0, 0) + 2 * p(0, 1) + p(0, 2));
-            let gy = (p(0, 2) + 2 * p(1, 2) + p(2, 2)) - (p(0, 0) + 2 * p(1, 0) + p(2, 0));
-            let (ax, ay) = (gx.abs(), gy.abs());
-            let i = y * w + x;
-            mag[i] = (ax + ay) as i16;
-            // The normal's direction, in four: horizontal, 45 degrees,
-            // vertical, 135 degrees (tan 22.5 = 424/1024, tan 67.5 = 2472/1024).
-            dir[i] = if ay * 1024 <= ax * 424 {
-                0
-            } else if ay * 1024 >= ax * 2472 {
-                2
-            } else if (gx > 0 && gy > 0) || (gx < 0 && gy < 0) {
-                1
-            } else {
-                3
-            };
+    const WEAK: u8 = 1;
+    const STRONG: u8 = 255;
+    // Edges lie inside the 1 px border: a frame under 3 px either way has
+    // none.
+    if w < 3 || h < 3 {
+        return vec![0; w * h];
+    }
+    let rows = |y: usize| [y - 1, y, y + 1].map(|y| &blurred[y * w..(y + 1) * w]);
+    // Magnitudes a row at a time from each column's two sums: gx is the
+    // next column's weighted sum less the last one's, gy the weighted sum
+    // of three columns' down-minus-up. Loops without branches vectorize.
+    let mut mag = vec![0i16; w * h];
+    let (mut sums, mut rises) = (vec![0i16; w], vec![0i16; w]);
+    for y in 1..h - 1 {
+        let [up, row, down] = rows(y);
+        for ((s, r), ((&u, &c), &d)) in sums
+            .iter_mut()
+            .zip(&mut rises)
+            .zip(up.iter().zip(row).zip(down))
+        {
+            let (u, c, d) = (i16::from(u), i16::from(c), i16::from(d));
+            (*s, *r) = (u + 2 * c + d, d - u);
+        }
+        for (m, (s, r)) in mag[y * w + 1..(y + 1) * w - 1]
+            .iter_mut()
+            .zip(sums.windows(3).zip(rises.windows(3)))
+        {
+            *m = (s[2] - s[0]).abs() + (r[0] + 2 * r[1] + r[2]).abs();
         }
     }
-    let mut thin = vec![0i16; total];
-    for y in 1..h.saturating_sub(1) {
-        for x in 1..w - 1 {
-            let i = y * w + x;
-            let m = mag[i];
-            if m < LOW {
+    // Thin edges: WEAK from `LOW`, STRONG from `HIGH`.
+    let mut marks = vec![0u8; w * h];
+    let mut queue: Vec<usize> = Vec::with_capacity(w * h / 64);
+    for y in 1..h - 1 {
+        let rows = rows(y);
+        for x0 in (1..w - 1).step_by(32) {
+            let x1 = (x0 + 32).min(w - 1);
+            // The largest, not `all`: a loop without early exits vectorizes.
+            if mag[y * w + x0..y * w + x1].iter().fold(0, |a, &m| a.max(m)) < LOW {
                 continue;
             }
-            let (n1, n2) = match dir[i] {
-                0 => (mag[i - 1], mag[i + 1]),
-                1 => (mag[i - w + 1], mag[i + w - 1]),
-                2 => (mag[i - w], mag[i + w]),
-                _ => (mag[i - w - 1], mag[i + w + 1]),
-            };
-            if m >= n1 && m >= n2 {
-                thin[i] = m;
+            for x in x0..x1 {
+                let i = y * w + x;
+                let m = mag[i];
+                if m < LOW {
+                    continue;
+                }
+                let (gx, gy) = gradient(rows, x);
+                let (ax, ay) = (i32::from(gx).abs(), i32::from(gy).abs());
+                // The normal's direction, in four: horizontal, vertical, 45
+                // degrees, 135 degrees (tan 22.5 = 424/1024, tan 67.5 =
+                // 2472/1024).
+                let (n1, n2) = if ay * 1024 <= ax * 424 {
+                    (mag[i - 1], mag[i + 1])
+                } else if ay * 1024 >= ax * 2472 {
+                    (mag[i - w], mag[i + w])
+                } else if (gx > 0 && gy > 0) || (gx < 0 && gy < 0) {
+                    (mag[i - w + 1], mag[i + w - 1])
+                } else {
+                    (mag[i - w - 1], mag[i + w + 1])
+                };
+                if m >= n1 && m >= n2 {
+                    marks[i] = WEAK;
+                    if m >= HIGH {
+                        marks[i] = STRONG;
+                        queue.push(i);
+                    }
+                }
             }
         }
     }
-    let mut edges = vec![0u8; total];
-    let mut queue: Vec<usize> = Vec::with_capacity(total / 8);
-    for (i, &v) in thin.iter().enumerate() {
-        if v >= HIGH {
-            edges[i] = 255;
-            queue.push(i);
-        }
-    }
-    let mut head = 0;
-    while head < queue.len() {
-        let i = queue[head];
-        head += 1;
-        for n in neighbours(i % w, i / w, w, h) {
-            if edges[n] == 0 && thin[n] >= LOW {
-                edges[n] = 255;
+    // Strong edges spread through the weak ones they touch. Marks are never
+    // on the border, so every neighbour of one is in the frame.
+    while let Some(i) = queue.pop() {
+        for n in [
+            i - w - 1,
+            i - w,
+            i - w + 1,
+            i - 1,
+            i + 1,
+            i + w - 1,
+            i + w,
+            i + w + 1,
+        ] {
+            if marks[n] == WEAK {
+                marks[n] = STRONG;
                 queue.push(n);
             }
         }
     }
-    edges
+    for m in &mut marks {
+        if *m == WEAK {
+            *m = 0;
+        }
+    }
+    marks
 }
 
-/// The 8 neighbours of `(x, y)` inside a `w` x `h` frame, as indices, in
-/// Neru's order: the row above, the two sides, the row below.
-fn neighbours(x: usize, y: usize, w: usize, h: usize) -> impl Iterator<Item = usize> {
-    const D: [(isize, isize); 8] = [
-        (-1, -1),
-        (0, -1),
-        (1, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ];
-    D.into_iter().filter_map(move |(dx, dy)| {
-        let nx = x.checked_add_signed(dx).filter(|&v| v < w)?;
-        let ny = y.checked_add_signed(dy).filter(|&v| v < h)?;
-        Some(ny * w + nx)
-    })
-}
-
-/// Grows edges by the rectangle, rows then columns. The kernel's centre
-/// sits at `size / 2` from its start, as OpenCV puts an even kernel's.
+/// Grows edges by the rectangle: a pixel and its left neighbour, then that
+/// row with the ones above and below, as OpenCV centres an even kernel at
+/// `size / 2` from its start. Whole-row ORs, which the compiler vectorizes.
 fn dilate(edges: &[u8], w: usize, h: usize) -> Vec<bool> {
-    let mut wide = vec![false; w * h];
-    let rx = DILATE_COLUMNS / 2;
-    for y in 0..h {
-        let row = &edges[y * w..(y + 1) * w];
-        for x in 0..w {
-            let (start, end) = (
-                x.saturating_sub(rx),
-                (x + DILATE_COLUMNS - 1 - rx).min(w - 1),
-            );
-            wide[y * w + x] = row[start..=end].iter().any(|&e| e != 0);
+    const { assert!(DILATE_ROWS == 3 && DILATE_COLUMNS == 2) };
+    let mut wide = vec![0u8; w * h];
+    for (row, out) in edges.chunks_exact(w).zip(wide.chunks_exact_mut(w)) {
+        out[0] = row[0];
+        for (o, (a, b)) in out[1..].iter_mut().zip(row.iter().zip(&row[1..])) {
+            *o = a | b;
         }
     }
     let mut out = vec![false; w * h];
-    let ry = DILATE_ROWS / 2;
-    for y in 0..h {
-        let (start, end) = (y.saturating_sub(ry), (y + DILATE_ROWS - 1 - ry).min(h - 1));
-        let row = &mut out[y * w..(y + 1) * w];
-        for k in start..=end {
-            for (o, &v) in row.iter_mut().zip(&wide[k * w..(k + 1) * w]) {
-                *o |= v;
-            }
+    for (y, out) in out.chunks_exact_mut(w).enumerate() {
+        let at = |y: usize| &wide[y * w..(y + 1) * w];
+        let (up, row, down) = (at(y.saturating_sub(1)), at(y), at((y + 1).min(h - 1)));
+        for (o, ((a, b), c)) in out.iter_mut().zip(up.iter().zip(row).zip(down)) {
+            *o = (a | b | c) != 0;
         }
     }
     out
 }
 
-/// 8-connected blobs by breadth-first search, in raster order of their
-/// first pixel, each with its box.
+/// 8-connected blobs, in raster order of their first pixel, each with its
+/// box.
 fn blobs(dilated: &[bool], w: usize, h: usize) -> Vec<Blob> {
-    let mut seen = vec![false; w * h];
-    let mut queue = Vec::with_capacity(1024);
-    let mut out = Vec::with_capacity(256);
-    for start in 0..w * h {
-        if !dilated[start] || seen[start] {
-            continue;
-        }
-        let (x, y) = (start % w, start / w);
-        let mut b = Blob {
-            min_x: x,
-            min_y: y,
-            max_x: x,
-            max_y: y,
-            parent: None,
-            first_child: None,
-            next_sibling: None,
-        };
-        seen[start] = true;
-        queue.clear();
-        queue.push(start);
-        let mut head = 0;
-        while head < queue.len() {
-            let i = queue[head];
-            head += 1;
-            let (cx, cy) = (i % w, i / w);
-            b.min_x = b.min_x.min(cx);
-            b.max_x = b.max_x.max(cx);
-            b.min_y = b.min_y.min(cy);
-            b.max_y = b.max_y.max(cy);
-            for n in neighbours(cx, cy, w, h) {
-                if dilated[n] && !seen[n] {
-                    seen[n] = true;
-                    queue.push(n);
-                }
+    let runs = runs::label(dilated, w, h);
+    let mut out: Vec<Blob> = Vec::with_capacity(runs.count);
+    for y in 0..h {
+        for run in runs.row(y) {
+            let (x0, x1) = (run.x0 as usize, run.x1 as usize);
+            if run.label == out.len() {
+                out.push(Blob {
+                    min_x: x0,
+                    min_y: y,
+                    max_x: x1,
+                    max_y: y,
+                    parent: None,
+                    first_child: None,
+                    next_sibling: None,
+                });
             }
+            let b = &mut out[run.label];
+            b.min_x = b.min_x.min(x0);
+            b.max_x = b.max_x.max(x1);
+            b.max_y = y;
         }
-        out.push(b);
     }
     out
 }
