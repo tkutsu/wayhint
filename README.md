@@ -144,10 +144,14 @@ the arrows are never command keys.
   separate window to the accessibility tree and is not scanned yet, so its
   items get no tags.
 - A layer surface gets tags only when it sits in the top-left corner of
-  the monitor at 0,0, and its popups only when all of the app's layers
-  do. Elsewhere the accessibility tree doesn't say where they are. A bar
-  across the top or a full-screen launcher qualifies; a dock with a
-  margin, or a bar on a second monitor, doesn't.
+  its monitor, because elsewhere the accessibility tree doesn't say where
+  it is. A bar across the top or a full-screen launcher qualifies; a dock
+  with a margin doesn't, and neither does a layer the size of a dock
+  with a margin from the same app.
+- Popups get tags only when all of the app's layers are in the corner of
+  the monitor at 0,0. Otherwise, such as with a bar on a second monitor,
+  an open popup could be anywhere, so it hides every tag on its monitor
+  until it closes. The same happens if the app doesn't answer in time.
 - A popup gets no tags where a full-screen overlay (a launcher, a
   settings window) or a fullscreen window may be above it. Wayhint can't
   tell which layer a popup belongs to, so a settings window's own
