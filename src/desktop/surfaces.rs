@@ -166,8 +166,8 @@ pub fn popup(frame: &Frame, pid: u32, monitor: i64) -> Window {
 }
 
 /// Stands for `pid`'s popups that couldn't be placed, or read at all: they
-/// may be anywhere on the monitor, so they cover all of `screen`. It has no
-/// frame, so it gets no tags.
+/// may be anywhere, on any monitor, so on the one hinted they cover all of
+/// `screen`. It has no frame, so it gets no tags.
 pub fn unknown(pid: u32, monitor: i64, screen: Rect) -> Window {
     Window {
         address: format!("unplaced {pid}"),

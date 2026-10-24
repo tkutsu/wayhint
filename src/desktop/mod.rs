@@ -78,8 +78,9 @@ impl Desktop {
     /// (see `hyprland::shown`), each layer with the frames that may be its
     /// own, then the popups. Frames are read only for the apps that have a
     /// layer and no client: an app's own menus are left out, as before.
-    /// An app with a layer here whose popups can't be placed, or whose
-    /// frames didn't answer, covers the whole monitor (`surfaces::unknown`).
+    /// An app whose popups can't be placed, or whose frames didn't answer,
+    /// covers the whole monitor (`surfaces::unknown`), whichever monitor its
+    /// layers are on: a popup can reach past its layer's output.
     pub fn stack(&self, monitor: i64) -> Result<Stack> {
         let shown = hyprland::shown(monitor)?;
         let pids: BTreeSet<u32> = shown
@@ -93,19 +94,13 @@ impl Desktop {
             .block_on(self.scanner.frames(&pids, FRAMES_TIMEOUT));
         let mut stack = shown.stack;
         for (pid, frames) in frames {
-            let here = shown
-                .layers
-                .iter()
-                .any(|l| l.pid == pid && l.monitor == monitor);
             let frames = match frames {
                 Ok(frames) => frames,
                 Err(e) => {
                     stack.unplaced.push(format!(
                         "pid {pid}: its frames didn't answer, so its popups may be anywhere: {e:#}"
                     ));
-                    if here {
-                        stack.windows.push(unknown(pid, monitor, shown.screen));
-                    }
+                    stack.windows.push(unknown(pid, monitor, shown.screen));
                     continue;
                 }
             };
@@ -134,9 +129,7 @@ impl Desktop {
                      placed only while all its layers sit in the corner of the monitor at 0,0)",
                     placed.unplaced
                 ));
-                if here {
-                    stack.windows.push(unknown(pid, monitor, shown.screen));
-                }
+                stack.windows.push(unknown(pid, monitor, shown.screen));
             }
         }
         Ok(stack)
