@@ -39,7 +39,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use smithay_client_toolkit::reexports::client::Connection;
 
 use crate::{
@@ -95,8 +95,17 @@ enum Done {
     Refused,
 }
 
-/// The run: `verb` (from `--verb`) arms the first pick.
-pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
+/// The run: `verb` arms the first pick; static mode never scans again.
+pub fn run(
+    mut config: Config,
+    once: bool,
+    static_mode: bool,
+    verb: Option<Action>,
+    toggle: std::os::unix::net::UnixDatagram,
+) -> Result<()> {
+    if static_mode {
+        config.refresh = None;
+    }
     let monitors = desktop::monitors()?;
     let monitor = monitors
         .iter()
@@ -108,6 +117,7 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
     // The overlay comes first: it blocks SIGINT and SIGTERM for this thread
     // (they become events), and the threads started after it inherit that.
     let mut overlay = Overlay::new(&conn, &config.style, monitor)?;
+    overlay.listen_for_toggle(toggle)?;
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(
             "wayhint: the tags won't follow workspace changes: {e:#}"
@@ -124,14 +134,20 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
         conn,
     };
 
-    let result = session.rounds(config, once, verb);
+    let result = session.rounds(&config, once || static_mode, static_mode, verb);
     session.clean_up();
     result
 }
 
 impl Session {
     /// One round per action, until something ends the run.
-    fn rounds(&mut self, config: &Config, once: bool, mut verb: Option<Action>) -> Result<()> {
+    fn rounds(
+        &mut self,
+        config: &Config,
+        once: bool,
+        static_mode: bool,
+        mut verb: Option<Action>,
+    ) -> Result<()> {
         loop {
             // No tags while scanning: nothing stale can be typed.
             self.overlay.clear()?;
@@ -156,6 +172,8 @@ impl Session {
             let scanned = scans.latest;
             let done = match picked {
                 Pick::Leave => return Ok(()),
+                // Frozen hints belong only to the workspace first scanned.
+                Pick::Rescan if static_mode => return Ok(()),
                 // Nothing was done, so `--once` goes on too, and the letters
                 // typed so far go with the old tags.
                 Pick::Rescan => continue,
@@ -255,7 +273,9 @@ impl Session {
                 Ok(Done::Acted { ends })
             }
             Verdict::Refuse(why) => {
-                desktop::warn(&format!("wayhint: not clicking {:?}: {why}", target.name));
+                // A changing screen is routine: the next round refreshes
+                // the tags, without a desktop notification for the race.
+                eprintln!("wayhint: refreshing {:?}: {why}", target.name);
                 Ok(Done::Refused)
             }
         }
@@ -387,8 +407,9 @@ fn scan(
 ) -> Result<(Stack, Snapshot)> {
     let started = Instant::now();
     let stack = desktop.stack(monitor.id)?;
-    let (scanned, unread) = desktop.scan(&stack, monitor, config.pixels);
-    report(&scanned, &unread, warned)?;
+    let (scanned, unread) =
+        desktop.scan(&stack, monitor, config.pixels, &config.terminal_processes);
+    report(&scanned, &unread, warned);
     let took = started.elapsed();
     if let Some(every) = config.refresh
         && took > every
@@ -404,20 +425,11 @@ fn scan(
 }
 
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans
-/// cut short, each once a run (`warned` holds what was said). With nothing
-/// to click it's an error, not a quiet exit, and `main` puts it on screen.
+/// cut short, each once a run (`warned` holds what was said). An empty
+/// scan is valid: keep listening for fresh targets or the toggle shortcut.
 /// Pixel tags are news only on stderr, and once a run too: they're how a
 /// window with no tree is meant to work.
-fn report(
-    snapshot: &Snapshot,
-    unread: &[anyhow::Error],
-    warned: &mut HashSet<String>,
-) -> Result<()> {
-    if snapshot.targets.is_empty() {
-        let mut why = vec!["nothing to click on this workspace".to_string()];
-        why.extend(unread.iter().map(|e| format!("{e:#}")));
-        bail!("{}", why.join("; "));
-    }
+fn report(snapshot: &Snapshot, unread: &[anyhow::Error], warned: &mut HashSet<String>) {
     let incomplete = snapshot.windows.iter().filter_map(|scanned| {
         let why = scanned.stats.incomplete.as_ref()?;
         let class = &scanned.window.class;
@@ -440,7 +452,6 @@ fn report(
             );
         }
     }
-    Ok(())
 }
 
 /// `wayhint click --at X,Y`: the pointer alone, one action.
@@ -456,4 +467,23 @@ pub fn click_at(at: Point, action: Action) -> Result<()> {
     });
     pointer.release_all();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_workspace_is_a_valid_refresh() {
+        let snapshot = Snapshot {
+            scan: 1,
+            monitor: 0,
+            windows: Vec::new(),
+            targets: Vec::new(),
+            obstacles: Vec::new(),
+        };
+        let mut warned = HashSet::new();
+        report(&snapshot, &[], &mut warned);
+        assert!(warned.is_empty());
+    }
 }

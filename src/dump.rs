@@ -21,9 +21,9 @@ use crate::{
     snapshot::{Read, Snapshot},
 };
 
-pub fn run(args: &Dump) -> Result<()> {
+pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
     if args.surfaces {
-        return surfaces(args.pixels);
+        return surfaces(args.pixels, config);
     }
     let window = match &args.address {
         Some(address) => {
@@ -35,10 +35,14 @@ pub fn run(args: &Dump) -> Result<()> {
         return print(&window_and_monitor(&window)?);
     }
     if let Some(detector) = args.pixels {
-        return print(&desktop::read_pixels(&window, detector)?);
+        return print(&desktop::read_pixels(
+            &window,
+            detector,
+            &crate::config::terminal_processes(config)?,
+        )?);
     }
 
-    let desktop = Desktop::connect()?;
+    let mut desktop = Desktop::connect()?;
     let (tree, stats) = desktop.read_tree(&window)?;
     if args.raw {
         return print(&Raw {
@@ -47,7 +51,13 @@ pub fn run(args: &Dump) -> Result<()> {
         });
     }
     let filtered = filter::filter(&tree);
-    let snapshot = Snapshot::build(1, window.monitor, [Read::Tree(&tree, &filtered, &stats)]);
+    let mut snapshot = Snapshot::build(1, window.monitor, [Read::Tree(&tree, &filtered, &stats)]);
+    if let Some(monitor) = desktop::monitors()?
+        .into_iter()
+        .find(|m| m.id == window.monitor)
+    {
+        desktop.layout(&mut snapshot, &monitor);
+    }
     if !args.explain {
         return print(&snapshot);
     }
@@ -126,14 +136,19 @@ struct Surfaces<'a> {
 
 /// `dump --surfaces`: the focused monitor's stack, scanned as a run scans
 /// it, with `pixels` for the windows without a tree.
-fn surfaces(pixels: Option<Detector>) -> Result<()> {
+fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Result<()> {
     let monitor = desktop::monitors()?
         .into_iter()
         .find(|m| m.focused)
         .context("no monitor has focus")?;
     let mut desktop = Desktop::connect()?;
     let stack = desktop.stack(monitor.id)?;
-    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels);
+    let terminals = if pixels.is_some() {
+        crate::config::terminal_processes(config)?
+    } else {
+        Vec::new()
+    };
+    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels, &terminals);
     let tags = |w: &Window| {
         let targets = snapshot.targets.iter();
         targets
