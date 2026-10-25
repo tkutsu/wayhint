@@ -127,7 +127,20 @@ Text mode reads the text the apps give the accessibility tree once, as it
 starts, and asks an app where a match is only the first time that match
 comes up. Before the click it reads the text at that spot again and skips
 the click if it changed. Windows tagged from their pixels have no text to
-search yet; see Known gaps.
+search yet, except kitty; see Known gaps.
+
+kitty has no accessibility tree, so text mode asks kitty itself what its
+panes show, through its remote control. wayhint finds the socket kitty
+tells its shells about, so kitty needs one. In kitty.conf:
+
+```conf
+allow_remote_control socket-only
+listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
+```
+
+Then restart kitty. wayhint writes a small kitten to
+`$XDG_RUNTIME_DIR/wayhint/kitty.py` and has kitty run it. A kitty without
+the socket gets a notification once per run, and no text.
 
 A key held across a change to the targets is ignored. Press it again
 after the new tags appear. The same rule applies when a paragraph opens
@@ -363,10 +376,11 @@ the arrows are never command keys.
 - A window's rounded corners show up as small pixel tags at its corners.
 - A document's hint clicks a cell or a line of text, which moves the
   active cell or the text cursor there.
-- Text mode finds only text an app gives the accessibility tree. Terminals,
-  windows tagged from their pixels, pictures and canvases have none for it
-  yet, and Chromium and Electron apps need their accessibility flag as for
-  tags. Qt gives most labels and list items only a name, so text mode
+- Text mode finds only text an app gives the accessibility tree, and
+  kitty's. Other terminals, windows tagged from their pixels, pictures and
+  canvases have none for it yet, and Chromium and Electron apps need their
+  accessibility flag as for tags. kitty's quick-access panel is a layer,
+  not a window, so text mode doesn't search it. Qt gives most labels and list items only a name, so text mode
   searches the names of labels, list items, cells, tabs, menu items,
   links and headings, and boxes the whole item, not the matched letters.
   A button's name is searched only when its picture shows letters (about

@@ -248,15 +248,22 @@ impl Session {
     }
 
     /// Does a match chosen in text mode, if its text still reads the same
-    /// and its object passes a target's re-check. Not kept for the repeat
+    /// (in kitty, in the same cells) and its object passes a target's
+    /// re-check (in kitty, its window). Not kept for the repeat
     /// key: that finds targets by their object, and a text's object is
     /// rarely one.
     fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
         let Chosen { target, act, check } = chosen;
-        if let (Some(object), Some((start, end, text))) = (&target.object, &check) {
-            let now = self.desktop.read_range(object, *start, *end).ok();
-            if now.as_ref() != Some(text) {
-                eprintln!("wayhint: refreshing {text:?}: the text changed");
+        if let Some(check) = &check {
+            let now = self.desktop.read_range(
+                snapshot,
+                target.window,
+                &check.place,
+                check.start,
+                check.end,
+            );
+            if now.as_ref().ok() != Some(&check.text) {
+                eprintln!("wayhint: refreshing {:?}: the text changed", check.text);
                 return Ok(Done::Refused);
             }
         }
@@ -423,11 +430,17 @@ impl pick::Source for Scans<'_> {
     }
 
     fn read_text(&mut self, shown: &Snapshot) -> Vec<Text> {
-        let (texts, incomplete) = self.desktop.read_text(shown);
-        if let Some(why) = incomplete {
+        let reading = self.desktop.read_text(shown);
+        if let Some(why) = reading.incomplete {
             eprintln!("wayhint: reading the text stopped early ({why}); some may be missing");
         }
-        texts
+        for e in reading.unread {
+            let message = format!("wayhint: no text from {e:#}");
+            if self.warned.insert(message.clone()) {
+                desktop::warn(&message);
+            }
+        }
+        reading.texts
     }
 
     fn locate(&mut self, shown: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {

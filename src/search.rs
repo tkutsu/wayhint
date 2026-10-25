@@ -26,7 +26,7 @@ use crate::{
     selection::Selector,
     snapshot::{Snapshot, Target},
     style::Input,
-    text::Search,
+    text::{Place, Search},
 };
 
 /// A match chosen with Enter: what to do, the target it makes, and what its
@@ -35,11 +35,22 @@ use crate::{
 pub struct Chosen {
     /// The text's object, its box and where the match shows: clicked at the
     /// middle of its first visible line, and re-checked as a tag's target.
+    /// A terminal's text has no object: its window is re-checked, as for a
+    /// tag found in pixels.
     pub target: Target,
     pub act: Act,
-    /// Characters `start..end` of the object, and the text they held. `None`
-    /// for a text that is a name: the re-check reads the name anyway.
-    pub check: Option<(u32, u32, String)>,
+    /// What the match must still read. `None` for a text that is a name:
+    /// the re-check reads the name anyway.
+    pub check: Option<Check>,
+}
+
+/// Characters `start..end` of the text at `place`, and what they held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub place: Place,
+    pub start: u32,
+    pub end: u32,
+    pub text: String,
 }
 
 /// Text mode, from the text key until a match is chosen (`Some` pick), or
@@ -164,24 +175,44 @@ fn find(search: &mut Search, shown: &Snapshot, source: &mut dyn Source) {
 fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
     let found = search.current()?;
     let text = &search.texts()[found.span.text];
-    let source = &shown.texts[text.source];
     let part = found.parts[0];
     let (start, end) = (found.span.start, found.span.end);
+    let check = Check {
+        place: text.place.clone(),
+        start,
+        end,
+        text: text.chars(start, end),
+    };
+    let (object, role, editable, clips, check) = match text.place {
+        Place::Object(index) => {
+            let source = &shown.texts[index];
+            let check = (!source.named).then_some(check);
+            let object = Some(source.object.clone());
+            (
+                object,
+                source.role.clone(),
+                source.editable,
+                source.clips.clone(),
+                check,
+            )
+        }
+        Place::Cells(_) => (None, "terminal".into(), false, Vec::new(), Some(check)),
+    };
     Some(Chosen {
         target: Target {
-            object: Some(source.object.clone()),
+            object,
             window: text.window,
             rect: text.rect,
             visible: part,
             hit: part.center(),
-            role: source.role.clone(),
+            role,
             name: text.name.clone(),
-            editable: source.editable,
-            clips: source.clips.clone(),
+            editable,
+            clips,
             opens: Vec::new(),
         },
         act,
-        check: (!source.named).then(|| (start, end, text.chars(start, end))),
+        check,
     })
 }
 
@@ -255,7 +286,7 @@ mod tests {
             .iter()
             .zip(0..)
             .map(|(content, row)| Text {
-                source: 0,
+                place: crate::text::Place::Object(0),
                 window: 0,
                 name: String::new(),
                 rect: Rect::new(0, row * 20, 300, 20),
@@ -384,5 +415,44 @@ mod tests {
             cleared.highlights.is_empty(),
             "nothing typed, nothing marked"
         );
+    }
+
+    #[test]
+    fn a_terminal_match_is_clicked_in_its_cells_and_read_again() {
+        let cells = crate::text::Cells {
+            pane: 3,
+            window: Point::new(100, 0),
+            first: Point::new(0, 0),
+            cell: (10, 20),
+            scale: (1, 1),
+            at: (0..7).map(|col| (0, col, col + 1)).collect(),
+        };
+        let mut found = Search::new(vec![Text {
+            rect: cells.whole(),
+            place: Place::Cells(cells.clone()),
+            window: 0,
+            name: "fish".into(),
+            area: Rect::new(0, 0, 1000, 1000),
+            start: 0,
+            content: "find me".into(),
+        }]);
+        "me".chars().for_each(|c| found.push(c));
+        let wanted = found.wanted();
+        let boxes = wanted.iter().map(|s| cells.boxes(s.start, s.end)).collect();
+        found.located(&wanted, boxes);
+        found.update(&|_, _| true);
+        let shown = Snapshot::build(1, 0, std::iter::empty());
+        let act = Act {
+            action: Action::Left,
+            mods: crate::action::Mods::NONE,
+            nudge: Point::default(),
+        };
+        let chosen = choose(&found, &shown, act).expect("a match");
+        assert_eq!(chosen.target.object, None, "nothing to ask: a pixel target");
+        assert_eq!(chosen.target.role, "terminal");
+        assert_eq!(chosen.target.hit, Point::new(160, 10));
+        let check = chosen.check.expect("read again before acting");
+        assert_eq!((check.start, check.end, check.text.as_str()), (5, 7, "me"));
+        assert_eq!(check.place, Place::Cells(cells));
     }
 }
