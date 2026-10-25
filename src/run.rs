@@ -1,6 +1,8 @@
 //! The first release: one straight loop, in one thread.
 //!
 //! ```text
+//!                  +-- refresh --+
+//!                  v             |
 //! windows shown -> scan -> tags -> keys -> re-check -> act -> settle --+
 //!      ^                         |                                     |
 //!      +---- another workspace --+                                     |
@@ -9,11 +11,14 @@
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
-//! one, except where another window covers them. When the monitor switches
-//! to another workspace (a Super bind still reaches Hyprland while wayhint
-//! holds the keys), the tags follow it. A window with no accessibility
-//! tree gets tags from its pixels; a block of text there gets one tag,
-//! which opens into tags on its lines.
+//! one, except where another window covers them. While the tags are up,
+//! the windows are scanned again every `[scan] refresh`, so a page that
+//! loaded or a window that opened gets tags without a key, and a target
+//! found again keeps its tag. When the monitor switches to another
+//! workspace (a Super bind still reaches Hyprland while wayhint holds the
+//! keys), the tags follow it at once. A window with no accessibility tree
+//! gets tags from its pixels; a block of text there gets one tag, which
+//! opens into tags on its lines.
 //!
 //! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
 //! before the tag's last letter), or a verb and the spot under the
@@ -28,7 +33,11 @@
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
 
-use std::{collections::HashSet, thread::sleep, time::Duration};
+use std::{
+    collections::HashSet,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result, bail};
 use smithay_client_toolkit::reexports::client::Connection;
@@ -36,7 +45,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     action::{Act, Action, Mods},
     config::{After, Config},
-    desktop::{self, Desktop, Verdict, tree::ObjectId},
+    desktop::{self, Desktop, Monitor, Stack, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
@@ -46,7 +55,7 @@ use crate::{
 };
 
 /// How long the app gets to react to a click before the rescan. A fixed
-/// pause for now; event-driven settling arrives with live refresh.
+/// pause: what the app changes after it, the next refresh picks up.
 const SETTLE: Duration = Duration::from_millis(150);
 
 /// Everything one run holds on to. Owning it all in one struct makes the
@@ -128,22 +137,23 @@ impl Session {
             self.overlay.clear()?;
             // A copy: the overlay is lent to the pick while blocks open.
             let monitor = &self.overlay.monitor().clone();
-            let stack = self.desktop.stack(monitor.id)?;
-            let (scanned, unread) = self.desktop.scan(&stack, monitor, config.pixels);
-            report(&scanned, &unread, &mut self.warned)?;
+            let mut scans = Scans::new(&mut self.desktop, &mut self.warned, monitor, config)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
             // later rounds start with the default action again. `snapshot`
-            // is what the pick ends in: the scan, or a block opened in it.
-            let mut snapshot = scanned.clone();
+            // is what the pick ends in: the last scan, or a block opened in
+            // it.
+            let mut snapshot = scans.latest.clone();
             let picked = pick::pick(
                 &mut self.overlay,
                 config,
                 &mut snapshot,
                 verb.take(),
                 &desktop::cursor,
-                &|opened| desktop::keep_visible(opened, &stack, monitor),
+                &mut scans,
             )?;
+            // Moved out, so `scans` lets go of the desktop for the click.
+            let scanned = scans.latest;
             let done = match picked {
                 Pick::Leave => return Ok(()),
                 // Nothing was done, so `--once` goes on too, and the letters
@@ -323,11 +333,81 @@ impl Session {
     }
 }
 
+/// A round's scans of the monitor, the first and each refresh: what a pick
+/// asks for fresh targets. It keeps the latest whole scan, for the repeat
+/// key, and the windows it was made from, for an opened block's lines.
+struct Scans<'a> {
+    desktop: &'a mut Desktop,
+    warned: &'a mut HashSet<String>,
+    monitor: &'a Monitor,
+    config: &'a Config,
+    stack: Stack,
+    latest: Snapshot,
+}
+
+impl<'a> Scans<'a> {
+    /// Scans the windows `monitor` shows.
+    fn new(
+        desktop: &'a mut Desktop,
+        warned: &'a mut HashSet<String>,
+        monitor: &'a Monitor,
+        config: &'a Config,
+    ) -> Result<Self> {
+        let (stack, latest) = scan(desktop, warned, monitor, config)?;
+        Ok(Self {
+            desktop,
+            warned,
+            monitor,
+            config,
+            stack,
+            latest,
+        })
+    }
+}
+
+impl pick::Source for Scans<'_> {
+    fn rescan(&mut self) -> Result<Option<Snapshot>> {
+        (self.stack, self.latest) = scan(self.desktop, self.warned, self.monitor, self.config)?;
+        Ok(Some(self.latest.clone()))
+    }
+
+    fn keep(&self, opened: &mut Snapshot) {
+        desktop::keep_visible(opened, &self.stack, self.monitor);
+    }
+}
+
+/// One scan of the windows `monitor` shows, and what they are, bottom to
+/// top. A scan slower than `[scan] refresh` is said once a run, on stderr:
+/// the tags then lag behind the screen by more than the setting says.
+fn scan(
+    desktop: &mut Desktop,
+    warned: &mut HashSet<String>,
+    monitor: &Monitor,
+    config: &Config,
+) -> Result<(Stack, Snapshot)> {
+    let started = Instant::now();
+    let stack = desktop.stack(monitor.id)?;
+    let (scanned, unread) = desktop.scan(&stack, monitor, config.pixels);
+    report(&scanned, &unread, warned)?;
+    let took = started.elapsed();
+    if let Some(every) = config.refresh
+        && took > every
+        && warned.insert("slow scan".into())
+    {
+        eprintln!(
+            "wayhint: a scan took {} ms, more than [scan] refresh ({} ms)",
+            took.as_millis(),
+            every.as_millis()
+        );
+    }
+    Ok((stack, scanned))
+}
+
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans
 /// cut short, each once a run (`warned` holds what was said). With nothing
 /// to click it's an error, not a quiet exit, and `main` puts it on screen.
-/// Pixel tags are news only on stderr: they're how a window with no tree
-/// is meant to work.
+/// Pixel tags are news only on stderr, and once a run too: they're how a
+/// window with no tree is meant to work.
 fn report(
     snapshot: &Snapshot,
     unread: &[anyhow::Error],
@@ -352,10 +432,13 @@ fn report(
         }
     }
     for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
-        eprintln!(
-            "wayhint: tags in {} come from its pixels ({:.0} ms): it has no accessibility tree",
-            scanned.window.class, scanned.stats.ms
-        );
+        let class = &scanned.window.class;
+        if warned.insert(format!("pixels {class}")) {
+            eprintln!(
+                "wayhint: tags in {class} come from its pixels ({:.0} ms): it has no accessibility tree",
+                scanned.stats.ms
+            );
+        }
     }
     Ok(())
 }
