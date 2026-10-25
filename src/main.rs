@@ -12,8 +12,10 @@
 //! | `desktop`   | Hyprland and the accessibility tree, behind a few calls  |
 //! | `snapshot`  | the scan's output: the seam every other part reads       |
 //! | `selection` | labels and what typed keys mean (pure)                   |
+//! | `text`      | text mode's matching: query in, ordered matches out (pure) |
 //! | `overlay`   | the Wayland surface: draws tags, reads keys              |
 //! | `pick`      | overlay plus selection: choose one target                |
+//! | `search`    | text mode: overlay plus text, until Enter or back to tags |
 //! | `pointer`   | the virtual pointer: click, and never leave a button held |
 //! | `keyboard`  | your keymap, and modifiers held around a click           |
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
@@ -33,10 +35,12 @@ mod pixels;
 mod placement;
 mod pointer;
 mod run;
+mod search;
 mod selection;
 mod snapshot;
 mod space;
 mod style;
+mod text;
 mod toggle;
 
 use std::{path::Path, process::ExitCode};
@@ -48,6 +52,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     cli::{Cli, Command},
     config::Config,
+    geometry::{Point, Rect},
     keys::Layout,
     overlay::Overlay,
     pick::Pick,
@@ -101,6 +106,18 @@ impl pick::Source for Saved {
     }
 
     fn keep(&self, _: &mut Snapshot) {}
+
+    fn read_text(&mut self, _: &Snapshot) -> Vec<text::Text> {
+        Vec::new()
+    }
+
+    fn locate(&mut self, _: &Snapshot, _: &[text::Text], spans: &[text::Span]) -> Vec<Vec<Rect>> {
+        vec![Vec::new(); spans.len()]
+    }
+
+    fn shows(&self, _: &Snapshot, _: usize, _: Point) -> bool {
+        true
+    }
 }
 
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
@@ -118,7 +135,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
             )
         })?;
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
-    let mut overlay = Overlay::new(&conn, &config.style, &monitor)?;
+    let mut overlay = Overlay::new(&conn, &config.style, &config.marks, &monitor)?;
     eprintln!(
         "wayhint: {} tags, keys through the {}; Esc leaves",
         snapshot.targets.len(),
@@ -145,6 +162,10 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
             eprintln!("wayhint: {} where the pointer is", act.action.name());
         }
         Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),
+        Pick::Text(chosen) => {
+            eprintln!("wayhint: {} on a text match", chosen.act.action.name());
+            println!("{}", serde_json::to_string_pretty(&chosen.target)?);
+        }
         // Only a run follows workspaces: tags from a file stay put.
         Pick::Leave | Pick::Rescan => {}
     }

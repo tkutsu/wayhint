@@ -25,7 +25,7 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::Style,
+    style::{Color, Mark, Marks, Style},
 };
 
 /// The file as written. `#[serde(default)]` lets every table and field be
@@ -38,6 +38,66 @@ struct File {
     pointer: FilePointer,
     pixels: FilePixels,
     scan: FileScan,
+    text: FileText,
+}
+
+/// `[text]`: how text mode looks.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileText {
+    style: FileMarks,
+}
+
+/// `[text.style]`, every match's mark, with `[text.style.current]` inside
+/// it for the selected match's. Unset fields come from the tags' style
+/// (see [`Mark::from_tags`]); unset current ones from every match's mark,
+/// made stronger ([`Mark::emphasized`]).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileMarks {
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+    current: FileMark,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileMark {
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+}
+
+impl FileMarks {
+    /// The marks, with whatever the file leaves out filled in from the
+    /// tags' `style`.
+    fn resolve(&self, style: &Style) -> Result<Marks> {
+        let tags = Mark::from_tags(style);
+        let all = Mark {
+            background: self.background.unwrap_or(tags.background),
+            border: self.border.unwrap_or(tags.border),
+            border_width: self.border_width.unwrap_or(tags.border_width),
+            radius: self.radius.unwrap_or(tags.radius),
+            padding: self.padding.unwrap_or(tags.padding),
+        };
+        let stronger = all.emphasized();
+        let c = &self.current;
+        let current = Mark {
+            background: c.background.unwrap_or(stronger.background),
+            border: c.border.unwrap_or(stronger.border),
+            border_width: c.border_width.unwrap_or(stronger.border_width),
+            radius: c.radius.unwrap_or(stronger.radius),
+            padding: c.padding.unwrap_or(stronger.padding),
+        };
+        all.validate("text.style")?;
+        current.validate("text.style.current")?;
+        Ok(Marks { all, current })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,6 +206,9 @@ struct FileKeys {
     /// Does the last action again, on the same target. No default key;
     /// `""` is the same as leaving it out.
     repeat: Option<String>,
+    /// Text mode: the tags go and typing finds text on screen. `""` for
+    /// none.
+    text: Option<String>,
 }
 
 impl FileKeys {
@@ -203,6 +266,9 @@ const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
     (Action::Forward, Some(KeyCode::from_evdev(49))),
 ];
 
+/// The text key's default, as a position, as the verbs' are: `q` on US.
+const TEXT_KEY: KeyCode = KeyCode::from_evdev(16);
+
 /// Keys every mode reads itself, so no verb may take them, and how the
 /// message that says so lists them.
 const BUILT_IN: [KeyCode; 9] = [
@@ -227,6 +293,8 @@ pub struct Config {
     /// for `wayhint config`.
     pub layout: String,
     pub style: Style,
+    /// How text mode marks its matches: `[text.style]`.
+    pub marks: Marks,
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
@@ -407,6 +475,10 @@ pub struct Verbs {
     /// lives with the verbs because it's checked against them: one key,
     /// one command.
     repeat: Option<(Key, String)>,
+    /// The text key and how it's printed, if it has one, and if it has
+    /// none because its default is a tag key or a command's, that default.
+    text: Option<(Key, String)>,
+    text_unbound: Option<String>,
 }
 
 impl Verbs {
@@ -423,6 +495,11 @@ impl Verbs {
     /// Whether `key` is the repeat key.
     pub fn is_repeat(&self, key: Key) -> bool {
         self.repeat.as_ref().is_some_and(|(k, _)| *k == key)
+    }
+
+    /// Whether `key` is the text key.
+    pub fn is_text(&self, key: Key) -> bool {
+        self.text.as_ref().is_some_and(|(k, _)| *k == key)
     }
 
     /// The key that arms `action`, as `wayhint config` prints it (`k`,
@@ -509,12 +586,81 @@ impl Verbs {
                 Some((key, label))
             }
         };
-        Ok(Self {
+        let mut verbs = Self {
             default,
             keys,
             unbound,
             repeat,
-        })
+            text: None,
+            text_unbound: None,
+        };
+        verbs.resolve_text(file.text.as_deref(), layout, tag_keys)?;
+        Ok(verbs)
+    }
+
+    /// The text key: as written, else its default position, unless that's
+    /// a tag key or any command's. A default that came after the other
+    /// commands mustn't break a file that bound its key to one of them.
+    fn resolve_text(
+        &mut self,
+        written: Option<&str>,
+        layout: &Layout,
+        tag_keys: &[KeyCode],
+    ) -> Result<()> {
+        let key = match written {
+            Some("") => return Ok(()),
+            Some(text) => {
+                let key = decode_key(text, layout).context("[keys] text")?;
+                let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
+                (key, label)
+            }
+            None => {
+                let label = layout.char_at(TEXT_KEY).with_context(|| {
+                    format!(
+                        "[keys] text: its default key types nothing on layout {}; give it a key",
+                        layout.name()
+                    )
+                })?;
+                let commands = self.taken();
+                if tag_keys.contains(&TEXT_KEY) || commands.iter().any(|t| t.0 == TEXT_KEY) {
+                    self.text_unbound = Some(label.into());
+                    return Ok(());
+                }
+                (
+                    Key {
+                        code: TEXT_KEY,
+                        shift: false,
+                    },
+                    label.into(),
+                )
+            }
+        };
+        let label = &key.1;
+        if BUILT_IN.contains(&key.0.code) {
+            bail!("[keys] text = {label:?}: {BUILT_IN_NAMES} are built in");
+        }
+        if let Some(other) = self.keys.iter().find(|v| v.1 == key.0) {
+            bail!("[keys] {} and text are both {label:?}", other.0.name());
+        }
+        if self.is_repeat(key.0) {
+            bail!("[keys] repeat and text are both {label:?}");
+        }
+        self.text = Some(key);
+        Ok(())
+    }
+
+    /// The text key's line in `[keys]`, for `wayhint config`.
+    fn render_text(&self) -> String {
+        match (&self.text, &self.text_unbound) {
+            (Some((_, label)), _) => format!(
+                "text = {}   # text mode: type text on screen, Enter acts on it\n",
+                quote(label)
+            ),
+            (None, Some(label)) => format!(
+                "# text has no key: its default, {label:?}, is one of your tag letters or commands\n"
+            ),
+            (None, None) => "text = \"\"   # no text mode\n".into(),
+        }
     }
 
     /// The bound keys' positions and their commands' names: these leave
@@ -525,6 +671,7 @@ impl Verbs {
             .iter()
             .map(|v| (v.1.code, v.0.name()))
             .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
+            .chain(self.text.iter().map(|(key, _)| (key.code, "text")))
             .collect()
     }
 }
@@ -611,6 +758,7 @@ impl Config {
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
+        let marks = file.text.style.resolve(&file.style)?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
@@ -621,6 +769,7 @@ impl Config {
             verbs,
             layout: layout.name().to_string(),
             style: file.style,
+            marks,
             after: file.pointer.after,
             nudge: nudge.into(),
             pixels: match file.pixels.detector {
@@ -680,6 +829,7 @@ impl Config {
             }
             None => out.push_str("# repeat has no key: give it one to do the last action again\n"),
         }
+        out.push_str(&self.verbs.render_text());
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
@@ -694,6 +844,7 @@ impl Config {
         }
         out.push('\n');
         out.push_str(&self.style.render());
+        out.push_str(&self.marks.render());
         let after = match self.after {
             After::Restore => {
                 "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
@@ -1002,6 +1153,84 @@ mod tests {
         );
         let off = Config::parse("[keys]\nrepeat = \"\"", &us()).unwrap();
         assert!(!off.verbs.is_repeat(f));
+    }
+
+    #[test]
+    fn the_text_key_is_q_unless_a_tag_or_a_command_has_it() {
+        let q = key(16, false);
+        assert!(Config::parse("", &us()).unwrap().verbs.is_text(q));
+        // Your file: q is a tag letter, so text has no key until it's given one.
+        let tagged = Config::parse("[keys]\nalphabet = \"ehatincsulodypmgfxwbvq\"", &us()).unwrap();
+        assert!(!tagged.verbs.is_text(q));
+        assert!(labels(&tagged).ends_with('q'), "the letter stays");
+        let rendered = tagged.render();
+        assert!(
+            rendered.contains("# text has no key: its default, \"q\""),
+            "{rendered}"
+        );
+        assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, tagged.verbs);
+        let repeat = Config::parse("[keys]\nrepeat = \"q\"", &us()).unwrap();
+        assert!(repeat.verbs.is_repeat(q) && !repeat.verbs.is_text(q));
+        let slash = Config::parse("[keys]\nalphabet = \"asdf/\"\ntext = \"/\"", &us()).unwrap();
+        assert!(slash.verbs.is_text(key(53, false)));
+        assert_eq!(
+            labels(&slash),
+            "asdf",
+            "a written text key leaves the alphabet"
+        );
+        let off = Config::parse("[keys]\ntext = \"\"", &us()).unwrap();
+        assert!(!off.verbs.is_text(q));
+        assert_eq!(
+            Config::parse(&off.render(), &us()).unwrap().verbs,
+            off.verbs
+        );
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[keys]\nright = \"x\"\ntext = \"x\"").contains("right and text"));
+        assert!(err("[keys]\nrepeat = \"x\"\ntext = \"x\"").contains("repeat and text"));
+        assert!(err("[keys]\ntext = \"Enter\"").contains("built in"));
+    }
+
+    #[test]
+    fn text_marks_come_from_the_tags_unless_set() {
+        let config = Config::parse("[style]\nborder_width = 0\nradius = 3", &us()).unwrap();
+        let tags = Mark::from_tags(&config.style);
+        assert_eq!(config.marks.all, tags);
+        assert_eq!(config.marks.current, tags.emphasized());
+        let widths = (
+            config.marks.all.border_width,
+            config.marks.current.border_width,
+        );
+        assert_eq!(
+            widths,
+            (1.0, 2.0),
+            "tags with no border: marks get one anyway"
+        );
+        let set = Config::parse(
+            "[text.style]\nbackground = \"#e8dcc440\"\npadding = [1, 2]\n\
+             [text.style.current]\nborder_width = 3",
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(
+            set.marks.all.background,
+            Color::rgba(0xe8, 0xdc, 0xc4, 0x40)
+        );
+        assert_eq!(
+            set.marks.current.background.a, 0x70,
+            "stronger than the set one"
+        );
+        assert_eq!(
+            set.marks.current.padding,
+            [1.0, 2.0],
+            "every match's padding"
+        );
+        assert!((set.marks.current.border_width - 3.0).abs() < f32::EPSILON);
+        let again = Config::parse(&set.render(), &us()).unwrap();
+        assert_eq!(again.marks, set.marks);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[text.style.current]\nradius = -1").contains("[text.style.current] radius"));
+        assert!(err("[text.style]\nopacity = 0.5").contains("unknown field"));
+        assert!(err("[text.style]\nborder = \"red\"").contains("isn't a colour"));
     }
 
     #[test]

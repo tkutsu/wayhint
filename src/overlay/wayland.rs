@@ -56,6 +56,7 @@ use crate::{
         Event, draw,
         gate::{KeyGate, Seen},
         hold::Holds,
+        typing::Typist,
     },
 };
 
@@ -100,8 +101,13 @@ pub struct State {
     /// doesn't use (see `keyboard.rs`). Made before the first grab, so a
     /// key let go the moment the grab starts still reaches the app.
     pub passthrough: Option<Keyboard>,
-    /// The modifiers held right now, as the compositor last reported them.
+    /// The modifiers held right now, as the compositor last reported them,
+    /// and the same as its xkb mask (depressed and latched), for the
+    /// characters keys type.
     pub held: Mods,
+    pub pressed: u32,
+    /// Reads keys as text while text mode is on; `None` otherwise.
+    pub typist: Option<Typist>,
     /// The real keyboard's keymap as xkb text, and its locks and layout,
     /// for the virtual keyboard of a modifier click to copy.
     pub keymap: Option<String>,
@@ -213,7 +219,8 @@ impl State {
     ///
     /// An arrow acts as it goes down, and again while held (`hold.rs`):
     /// it never ends the pick, so acting early leaves no release behind
-    /// for the app. Every other key acts as it's let go.
+    /// for the app. Every other key acts as it's let go, except while
+    /// typing (see [`Event::Typed`]).
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
         if pressed {
@@ -222,7 +229,17 @@ impl State {
                 code,
                 shift: self.held.shift,
             };
-            if self.gate.press(key, self.held) && code.is_arrow() {
+            if !self.gate.press(key, self.held) {
+                return;
+            }
+            if let Some(typist) = &mut self.typist
+                && code != KeyCode::ENTER
+            {
+                let typed = typist.press(code, self.pressed, self.locks);
+                // Taken now: its release finds nothing in the gate.
+                self.gate.release(code);
+                self.events.push_back(Event::Typed(key, self.held, typed));
+            } else if code.is_arrow() {
                 self.events.push_back(Event::Key(key, self.held));
                 self.holds.press(key, self.held, Instant::now());
             }
@@ -238,8 +255,16 @@ impl State {
             && !held
         {
             // Acting on release: press and release were both swallowed, so
-            // nothing reaches the app once the grab ends.
-            self.events.push_back(Event::Key(key, mods));
+            // nothing reaches the app once the grab ends. While typing, a
+            // key found here went down before typing started (a typed key
+            // leaves the gate at its press), and is read as text now.
+            let event = match &mut self.typist {
+                Some(typist) if code != KeyCode::ENTER => {
+                    Event::Typed(key, mods, typist.press_late(code, mods, self.locks))
+                }
+                _ => Event::Key(key, mods),
+            };
+            self.events.push_back(event);
         }
     }
 }
@@ -343,7 +368,8 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
                 group,
                 ..
             } => {
-                state.held = held(mods_depressed | mods_latched);
+                state.pressed = mods_depressed | mods_latched;
+                state.held = held(state.pressed);
                 state.locks = Locks {
                     locked: mods_locked,
                     group,
@@ -492,7 +518,8 @@ impl KeyboardHandler for State {
         raw: RawModifiers,
         layout: u32,
     ) {
-        self.held = held(raw.depressed | raw.latched);
+        self.pressed = raw.depressed | raw.latched;
+        self.held = held(self.pressed);
         self.locks = Locks {
             locked: raw.locked,
             group: layout,

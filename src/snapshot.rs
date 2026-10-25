@@ -37,6 +37,30 @@ pub struct Snapshot {
     /// Captured ink and controls that displaced labels must not cover.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub obstacles: Vec<Rect>,
+    /// The objects with text the windows show, in walk order: what text
+    /// mode reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<TextSource>,
+}
+
+/// An object with text, as the scan found it. Global coordinates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextSource {
+    pub object: ObjectId,
+    /// Its window, as an index into [`Snapshot::windows`].
+    pub window: usize,
+    pub role: String,
+    pub editable: bool,
+    /// It has no Text interface: its name is the text it shows (see
+    /// `filter::has_text`), and where a match is in it can't be asked.
+    #[serde(default)]
+    pub named: bool,
+    /// The part of the screen it can show in: its window, cut by the
+    /// scroll areas above it.
+    pub area: Rect,
+    /// The scroll areas above it, nearest first, as a target's `clips`.
+    #[serde(default)]
+    pub clips: Vec<ObjectId>,
 }
 
 /// One window, and what scanning it cost.
@@ -131,6 +155,7 @@ impl Snapshot {
     pub fn build<'a>(scan: u32, monitor: i64, reads: impl IntoIterator<Item = Read<'a>>) -> Self {
         let mut windows = Vec::new();
         let mut targets = Vec::new();
+        let mut texts = Vec::new();
         for (window, read) in reads.into_iter().enumerate() {
             let (tree, filtered, stats) = match read {
                 Read::Tree(tree, filtered, stats) => (tree, filtered, stats),
@@ -177,6 +202,22 @@ impl Snapshot {
                     opens: Vec::new(),
                 }
             }));
+            texts.extend(filter::text_sources(tree).into_iter().map(|(node, area)| {
+                let read = &tree.nodes[node];
+                TextSource {
+                    object: read.object.clone(),
+                    window,
+                    role: read.role.clone(),
+                    editable: read.states.editable,
+                    named: !read.text,
+                    area: area.offset(origin),
+                    clips: tree
+                        .ancestors(node)
+                        .filter(|a| scrollers.contains(a))
+                        .map(|a| tree.nodes[a].object.clone())
+                        .collect(),
+                }
+            }));
             windows.push(Scanned {
                 window: tree.window.clone(),
                 stats: stats.clone(),
@@ -192,6 +233,7 @@ impl Snapshot {
             windows,
             targets,
             obstacles: Vec::new(),
+            texts,
         }
     }
 
@@ -396,6 +438,7 @@ mod tests {
             monitor: 0,
             windows: Vec::new(),
             obstacles: Vec::new(),
+            texts: Vec::new(),
             targets: points
                 .iter()
                 .map(|&(x, y)| pixel_target(0, Rect::new(x - 1, y - 1, 2, 2), PIXELS))

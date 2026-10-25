@@ -235,9 +235,136 @@ impl Style {
     }
 }
 
+/// How text mode marks a match: a translucent box over its text, which
+/// shows through. `[text.style]` for every match, `[text.style.current]`
+/// for the selected one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mark {
+    pub background: Color,
+    pub border: Color,
+    pub border_width: f32,
+    pub radius: f32,
+    /// Vertical, then horizontal, in px, around the text's box.
+    pub padding: [f32; 2],
+}
+
+/// Every match's mark, and the current one's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marks {
+    pub all: Mark,
+    pub current: Mark,
+}
+
+impl Marks {
+    /// The marks a file with no `[text.style]` gets.
+    #[cfg(test)]
+    pub fn from_tags(style: &Style) -> Self {
+        let all = Mark::from_tags(style);
+        Self {
+            all,
+            current: all.emphasized(),
+        }
+    }
+
+    /// Both tables as TOML, each after a blank line, for `wayhint config`.
+    pub fn render(&self) -> String {
+        format!(
+            "\n{}\n{}",
+            self.all.render("text.style"),
+            self.current.render("text.style.current")
+        )
+    }
+}
+
+impl Mark {
+    /// The default for every match: the tags' background colour, faint,
+    /// and the tags' border, radius and padding, with a border of at least
+    /// a pixel. A tag needs no border to show, being opaque; a faint mark
+    /// does: on a dark window its dark fill all but vanishes, and only the
+    /// light border shows (rendered on a terminal and on Calc, 2026-10-25).
+    pub const fn from_tags(style: &Style) -> Self {
+        Self {
+            background: Color {
+                a: 0x40,
+                ..style.background
+            },
+            border: style.border,
+            border_width: style.border_width.max(1.0),
+            radius: style.radius,
+            padding: style.padding,
+        }
+    }
+
+    /// The default for the current match, from every match's: a fill
+    /// 1.75 times as strong, and a border, solid and a pixel wider.
+    pub fn emphasized(self) -> Self {
+        let stronger = (u16::from(self.background.a) * 7 / 4).min(255);
+        Self {
+            background: Color {
+                a: u8::try_from(stronger).unwrap_or(u8::MAX),
+                ..self.background
+            },
+            border: Color {
+                a: 0xff,
+                ..self.border
+            },
+            border_width: self.border_width + 1.0,
+            ..self
+        }
+    }
+
+    /// The lengths serde can't check by type alone; `table` names where
+    /// they came from.
+    pub fn validate(&self, table: &str) -> Result<()> {
+        let lengths = [
+            ("border_width", self.border_width),
+            ("radius", self.radius),
+            ("padding", self.padding[0]),
+            ("padding", self.padding[1]),
+        ];
+        for (name, value) in lengths {
+            if !(0.0..=100.0).contains(&value) {
+                bail!("[{table}] {name}: {value} px is outside 0-100");
+            }
+        }
+        Ok(())
+    }
+
+    /// The table as TOML, under `[table]`, for `wayhint config`.
+    pub fn render(&self, table: &str) -> String {
+        let mut out = format!("[{table}]\n");
+        let _ = writeln!(out, "background = \"{}\"", self.background);
+        let _ = writeln!(out, "border = \"{}\"", self.border);
+        let _ = writeln!(out, "border_width = {}", self.border_width);
+        let _ = writeln!(out, "radius = {}", self.radius);
+        let _ = writeln!(
+            out,
+            "padding = [{}, {}]   # vertical, horizontal",
+            self.padding[0], self.padding[1]
+        );
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_current_mark_is_stronger_than_the_others_by_default() {
+        let all = Mark::from_tags(&Style::default());
+        assert_eq!(all.background, Color::rgba(0x1e, 0x1e, 0x2e, 0x40));
+        let current = all.emphasized();
+        assert_eq!(current.background.a, 0x70);
+        assert_eq!(current.border.a, 0xff);
+        assert!((current.border_width - 2.0).abs() < f32::EPSILON);
+        assert_eq!(current.padding, all.padding);
+        let opaque = Mark {
+            background: Color::rgba(0, 0, 0, 0xff),
+            ..all
+        };
+        assert_eq!(opaque.emphasized().background.a, 0xff, "capped at opaque");
+    }
 
     #[test]
     fn colours_parse_with_and_without_alpha() {

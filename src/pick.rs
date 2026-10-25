@@ -12,9 +12,11 @@ use crate::{
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
     overlay::{Dot, Event, Frame, Overlay, Tag},
+    search::{self, Chosen},
     selection::{Input, Selector, Step, relabel},
     snapshot::{Snapshot, Target},
     style::Position,
+    text::{Span, Text},
 };
 
 /// How far above the monitor's bottom edge the status pill sits, in px.
@@ -28,7 +30,7 @@ const SPEED_UP: u16 = 8;
 const TOP_SPEED: u16 = 4;
 
 /// How a pick ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
     /// Do `act` at the target at `index`.
     Target { index: usize, act: Act },
@@ -38,6 +40,8 @@ pub enum Pick {
     Here { act: Act, from: Point },
     /// Do the last command again, on its target.
     Repeat,
+    /// A match chosen in text mode (boxed: it carries its target).
+    Text(Box<Chosen>),
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
     /// The monitor shows another workspace: nothing chosen, and the tags
@@ -71,6 +75,15 @@ pub trait Source {
     /// Drops the lines of an opened block that another window covers or
     /// the monitor cuts off.
     fn keep(&self, opened: &mut Snapshot);
+    /// The text the windows of `shown` show, for text mode. None from a
+    /// saved snapshot: there's no app to ask.
+    fn read_text(&mut self, shown: &Snapshot) -> Vec<Text>;
+    /// Where each of `spans` of `texts` is on screen: a global box per
+    /// line, none if the app can't say.
+    fn locate(&mut self, shown: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>>;
+    /// Whether the point `at` of window `window` of `shown` is in view: on
+    /// the monitor, with nothing over it.
+    fn shows(&self, shown: &Snapshot, window: usize, at: Point) -> bool;
 }
 
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
@@ -90,6 +103,10 @@ pub trait Source {
 /// verb, its Shift, arrows). The lines stay as they were opened: a rescan
 /// has no blocks to open. `shown` ends as the snapshot the pick was made
 /// in.
+///
+/// The text key hands the keys to text mode (`search::search`), with the
+/// verb and arrows typed before it; leaving text mode brings the same tags
+/// back.
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
@@ -111,11 +128,14 @@ pub fn pick(
     let (screen, mut pointer) = (overlay.monitor().rect, cursor().ok());
     // A scene per drawing: `shown` changes when a block opens, so nothing
     // may keep borrowing it in between.
-    overlay.show(&frame(
-        &selector,
-        config,
-        &Scene::new(&shown.targets, screen, pointer),
-    ))?;
+    let tags = |selector: &Selector, shown: &Snapshot, pointer| {
+        frame(
+            selector,
+            config,
+            &Scene::new(&shown.targets, screen, pointer),
+        )
+    };
+    overlay.show(&tags(&selector, shown, pointer))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
     let next = || config.refresh.map(|every| Instant::now() + every);
@@ -128,30 +148,17 @@ pub fn pick(
                 due = next();
                 continue;
             }
+            // A source that can't change is asked once.
             due = None;
-            let Some(mut fresh) = source.rescan()? else {
+            let Some(changed) = rescan(config, shown, &mut selector, source)? else {
                 continue;
             };
-            fresh.merge_nearby(config.merge_distance);
-            let changed = targets_changed(shown, &fresh);
-            let kept: Vec<Option<&[usize]>> = fresh
-                .survivors(shown)
-                .into_iter()
-                .map(|was| was.map(|i| selector.labels()[i].as_slice()))
-                .collect();
-            let labels = relabel(&kept, config.alphabet.len());
-            selector.relabel(labels);
-            *shown = fresh;
             if changed {
                 overlay.set_layout(shown);
                 pointer = cursor().ok();
                 // A label may name a different target now. Keys aimed at
                 // the previous scan must not pick from the new one.
-                overlay.show(&frame(
-                    &selector,
-                    config,
-                    &Scene::new(&shown.targets, screen, pointer),
-                ))?;
+                overlay.show(&tags(&selector, shown, pointer))?;
             }
             due = next();
             continue;
@@ -159,6 +166,8 @@ pub fn pick(
         let (key, mods, ticks) = match event {
             Event::Key(key, mods) => (key, mods, 0),
             Event::Held(key, mods, ticks) => (key, mods, ticks),
+            // Only text mode types, and it reads its own keys.
+            Event::Typed(..) => continue,
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
             Event::Workspace => return Ok(Pick::Rescan),
@@ -171,11 +180,7 @@ pub fn pick(
         match selector.press(input) {
             Step::Typing => {
                 pointer = cursor().ok();
-                overlay.update(&frame(
-                    &selector,
-                    config,
-                    &Scene::new(&shown.targets, screen, pointer),
-                ))?;
+                overlay.update(&tags(&selector, shown, pointer))?;
             }
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
                 let mut opened = shown.open(index);
@@ -192,11 +197,7 @@ pub fn pick(
                 due = None;
                 // The lines have new labels: discard taps queued for the
                 // block before accepting keys for those lines.
-                overlay.show(&frame(
-                    &selector,
-                    config,
-                    &Scene::new(&shown.targets, screen, pointer),
-                ))?;
+                overlay.show(&tags(&selector, shown, pointer))?;
             }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
             Step::Here(act) => {
@@ -207,10 +208,45 @@ pub fn pick(
                 return Ok(Pick::Here { act, from });
             }
             Step::Repeat => return Ok(Pick::Repeat),
+            Step::Text => {
+                if let Some(pick) = search::search(overlay, shown, &selector, source)? {
+                    return Ok(pick);
+                }
+                // Back to the tags of the same scan, as they were left.
+                pointer = cursor().ok();
+                overlay.show(&tags(&selector, shown, pointer))?;
+                due = next();
+            }
             Step::Ignored => {}
             Step::Exit => return Ok(Pick::Leave),
         }
     }
+}
+
+/// Brings `shown` up to date with a fresh scan from `source`: a target
+/// found again keeps its tag, and what was typed for it stays typed (see
+/// `selection::relabel`). Whether the targets changed, and so must be
+/// drawn again; `None` if they never can (a saved snapshot).
+fn rescan(
+    config: &Config,
+    shown: &mut Snapshot,
+    selector: &mut Selector,
+    source: &mut dyn Source,
+) -> Result<Option<bool>> {
+    let Some(mut fresh) = source.rescan()? else {
+        return Ok(None);
+    };
+    fresh.merge_nearby(config.merge_distance);
+    let changed = targets_changed(shown, &fresh);
+    let kept: Vec<Option<&[usize]>> = fresh
+        .survivors(shown)
+        .into_iter()
+        .map(|was| was.map(|i| selector.labels()[i].as_slice()))
+        .collect();
+    let labels = relabel(&kept, config.alphabet.len());
+    selector.relabel(labels);
+    *shown = fresh;
+    Ok(Some(changed))
 }
 
 /// Pixel targets can have identical fields in a replacement window, so
@@ -241,6 +277,7 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
         KeyCode::LEFT => nudge(-1, 0),
         KeyCode::RIGHT => nudge(1, 0),
         _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
+        _ if config.verbs.is_text(key) => Some(Input::Text),
         code => config
             .verbs
             .action_of(key)
@@ -303,13 +340,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
         })
         .collect();
     if let Some(action) = selector.armed() {
-        tags.push(Tag {
-            at: Point::new(scene.screen.center().x, scene.screen.bottom() - PILL_LIFT),
-            position: Position::Center,
-            text: action.name().into(),
-            target: None,
-            typed: 0,
-        });
+        tags.push(pill(scene.screen, action.name().into(), 0));
     }
     let nudge = selector.nudge();
     let dots = if nudge == Point::default() {
@@ -332,7 +363,24 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             })
             .collect()
     };
-    Frame { tags, dots }
+    Frame {
+        tags,
+        dots,
+        highlights: Vec::new(),
+    }
+}
+
+/// The status pill: `text` centred near the bottom of `screen`, its first
+/// `typed` characters dimmed. Drawn as one more tag: same look, no new
+/// drawing code.
+pub fn pill(screen: Rect, text: String, typed: usize) -> Tag {
+    Tag {
+        at: Point::new(screen.center().x, screen.bottom() - PILL_LIFT),
+        position: Position::Center,
+        text,
+        target: None,
+        typed,
+    }
 }
 
 /// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick

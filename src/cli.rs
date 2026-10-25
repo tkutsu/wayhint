@@ -86,6 +86,15 @@ pub struct Dump {
         conflicts_with_all = ["window", "raw", "explain"]
     )]
     pub pixels: Option<Detector>,
+    /// Also read the window's text as text mode does, and where QUERY is in it
+    #[arg(
+        long,
+        value_name = "QUERY",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["window", "surfaces", "raw", "explain", "pixels"]
+    )]
+    pub text: Option<String>,
     /// Scan this window (a Hyprland address, `0x...`) instead of the focused one
     #[arg(long, hide = true)]
     pub address: Option<String>,

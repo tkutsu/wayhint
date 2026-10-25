@@ -102,6 +102,8 @@ pub enum Input {
     Nudge(Point),
     /// The repeat key: the last command again, on the same target.
     Repeat,
+    /// The text key: text mode, where typing finds text on screen.
+    Text,
     Backspace,
     Escape,
 }
@@ -117,6 +119,9 @@ pub enum Step {
     Here(Act),
     /// The repeat key. The run knows what the last command was.
     Repeat,
+    /// The text key: text mode takes over, with the verb and the nudge
+    /// typed so far ([`Selector::act`]).
+    Text,
     /// A letter no label continues with. Nothing changes, nothing runs.
     Ignored,
     /// `Esc` with nothing typed or armed: leave.
@@ -187,7 +192,7 @@ impl Selector {
     /// left over from a shifted verb: typing `_` then a tag fast, Shift is
     /// often still down on the tag, and that's no Shift-click. The cost: a
     /// shifted verb can't Shift-click.
-    fn act(&self, held: Mods) -> Act {
+    pub fn act(&self, held: Mods) -> Act {
         Act {
             action: self.armed.unwrap_or(self.default),
             mods: Mods {
@@ -287,6 +292,13 @@ impl Selector {
             Input::Repeat => {
                 self.reset();
                 Step::Repeat
+            }
+            // The query says where now, so half a tag goes; the verb and
+            // the arrows say what and how far off, and stay.
+            Input::Text => {
+                self.typed.clear();
+                self.armed_at = 0;
+                Step::Text
             }
             // Backspace takes back the last letter or verb, whichever came
             // last. The opposite arrow takes back a nudge.
@@ -586,6 +598,27 @@ mod tests {
         assert_eq!(s.press(Input::Repeat), Step::Repeat);
         assert_eq!((s.armed(), s.typed()), (None, &[][..]));
         assert_eq!(s.nudge(), Point::default(), "the repeat brings its own");
+    }
+
+    #[test]
+    fn the_text_key_drops_half_a_tag_and_keeps_the_verb_and_nudge() {
+        let mut s = five();
+        s.press(verb(Action::Double));
+        s.press(letter(3));
+        s.press(RIGHT);
+        assert_eq!(s.press(Input::Text), Step::Text);
+        assert_eq!(s.typed(), [0usize; 0]);
+        let act = s.act(CTRL);
+        assert_eq!(
+            (act.action, act.mods, act.nudge),
+            (Action::Double, CTRL, Point::new(14, 0))
+        );
+        s.press(Input::Backspace);
+        assert_eq!(
+            s.armed(),
+            None,
+            "back in the tags, Backspace takes the verb"
+        );
     }
 
     #[test]

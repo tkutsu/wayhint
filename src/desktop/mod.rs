@@ -34,6 +34,7 @@ use self::{
     atspi::Bounds,
     capture::Camera,
     surfaces::{place, popup, uncovered, unknown},
+    tree::ObjectId,
 };
 pub use self::{
     atspi::Stats,
@@ -49,6 +50,7 @@ use crate::{
     pixels::{self, Detector, Found},
     snapshot::{Read, Snapshot, Target},
     space::Space,
+    text::{Span, Text},
 };
 
 /// How long the re-check may take: one object, four small requests.
@@ -61,6 +63,12 @@ const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 /// How long a window's picture may take, connecting included: the
 /// spike's took 6 to 12 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long reading text for text mode may take, every window together.
+const TEXT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long finding where a query's new matches are may take.
+const LOCATE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The patch a document body's tag sits on, as a terminal's, in logical px.
 const BODY_TAG: (i32, i32) = (36, 24);
@@ -396,6 +404,74 @@ impl Desktop {
         let fresh = self.runtime.block_on(read).ok();
         Ok(recheck::verdict(target, fresh.as_ref(), window))
     }
+
+    /// The text of every object in `snapshot.texts` that shows some, for
+    /// text mode, and why the reading stopped early, if it did.
+    pub fn read_text(&self, snapshot: &Snapshot) -> (Vec<Text>, Option<String>) {
+        let origin = |window: usize| snapshot.windows[window].window.rect.origin();
+        let objects: Vec<(&ObjectId, Rect, bool)> = snapshot
+            .texts
+            .iter()
+            .map(|source| {
+                let at = origin(source.window);
+                let area = source.area.offset(Point::new(-at.x, -at.y));
+                (&source.object, area, source.named)
+            })
+            .collect();
+        let read = self.scanner.read_texts(&objects, TEXT_TIMEOUT);
+        let (reads, incomplete) = self.runtime.block_on(read);
+        let texts = reads
+            .into_iter()
+            .zip(snapshot.texts.iter().enumerate())
+            .filter_map(|(read, (index, source))| {
+                let read = read?;
+                Some(Text {
+                    source: index,
+                    window: source.window,
+                    name: read.name,
+                    rect: read.bounds.offset(origin(source.window)),
+                    area: source.area,
+                    start: read.start,
+                    content: read.content,
+                })
+            })
+            .collect();
+        (texts, incomplete)
+    }
+
+    /// Where each of `spans` of `texts` (read from `snapshot`) is on
+    /// screen: a global box per line, none if the app can't say. A text
+    /// that is a name has no characters to ask about.
+    pub fn locate(&self, snapshot: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
+        let asks: Vec<Option<(&ObjectId, u32, u32)>> = spans
+            .iter()
+            .map(|s| {
+                let source = &snapshot.texts[texts[s.text].source];
+                (!source.named).then_some((&source.object, s.start, s.end))
+            })
+            .collect();
+        let boxes = self
+            .runtime
+            .block_on(self.scanner.locate(&asks, LOCATE_TIMEOUT));
+        boxes
+            .into_iter()
+            .zip(spans)
+            .map(|(parts, span)| {
+                let origin = snapshot.windows[texts[span.text].window]
+                    .window
+                    .rect
+                    .origin();
+                parts.into_iter().map(|r| r.offset(origin)).collect()
+            })
+            .collect()
+    }
+
+    /// Characters `start..end` of `object`'s text as they are now: the
+    /// last look before acting on a match.
+    pub fn read_range(&self, object: &ObjectId, start: u32, end: u32) -> Result<String> {
+        let read = self.scanner.read_range(object, start, end, RECHECK_TIMEOUT);
+        self.runtime.block_on(read)
+    }
 }
 
 /// Keeps the targets worth a tag: on `monitor`, and not under a surface
@@ -407,7 +483,7 @@ pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
     // `windows` while `retain_mut` changes `targets`.
     snapshot.targets.retain_mut(|t| {
         let address = &snapshot.windows[t.window].window.address;
-        let shows = |at| monitor.rect.contains(at) && uncovered(stack, address, at).is_some();
+        let shows = |at| shows(stack, monitor, address, at);
         if shows(t.hit) {
             return true;
         }
@@ -426,6 +502,12 @@ pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
     });
     // A tag that moved onto a line may be out of reading order now.
     snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
+}
+
+/// Whether the point `at` of the surface at `address` is in view: on
+/// `monitor`, and under no surface that may be above it.
+pub fn shows(stack: &Stack, monitor: &Monitor, address: &str, at: Point) -> bool {
+    monitor.rect.contains(at) && uncovered(stack, address, at).is_some()
 }
 
 /// Shrinks a document body's tag to the clearest tag-sized patch nearest

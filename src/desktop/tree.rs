@@ -49,6 +49,10 @@ pub struct Node {
     pub action: bool,
     /// Implements the Component interface (has a box on screen).
     pub component: bool,
+    /// Implements the Text interface (has text text mode can read). Absent
+    /// in trees saved before it was kept.
+    #[serde(default)]
+    pub text: bool,
     /// Box relative to the window: read for candidates, scroll areas, and
     /// inside web documents (where it decides whether to walk in).
     pub bounds: Option<Rect>,

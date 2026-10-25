@@ -20,6 +20,7 @@ mod draw;
 mod font;
 mod gate;
 mod hold;
+mod typing;
 mod wayland;
 
 use std::{
@@ -40,7 +41,7 @@ use smithay_client_toolkit::{
             signals::{Signal, Signals},
         },
         calloop_wayland_source::WaylandSource,
-        client::{Connection, QueueHandle, globals::registry_queue_init},
+        client::{Connection, EventQueue, QueueHandle, globals::registry_queue_init},
         protocols::xdg::shell::client::xdg_positioner,
     },
     registry::RegistryState,
@@ -54,9 +55,10 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 
-pub use self::draw::{Dot, Frame, Tag};
+pub use self::draw::{Dot, Frame, Highlight, Tag};
 use self::{
     draw::Painter,
+    typing::Typist,
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 use crate::{
@@ -64,8 +66,8 @@ use crate::{
     desktop::{self, Monitor},
     geometry::Point,
     keyboard::{self, Keyboard, Locks},
-    keys::Key,
-    style::Style,
+    keys::{Key, KeyCode},
+    style::{Marks, Style},
 };
 
 /// Something the run loop has to react to.
@@ -81,6 +83,13 @@ pub enum Event {
     /// `hold.rs`). Its press came as a `Key`, and its release brings
     /// nothing.
     Held(Key, Mods, u16),
+    /// While typing is on ([`Overlay::start_typing`]): a key as it's
+    /// pressed, with the character it types, if any. Every key but Enter
+    /// comes this way, and its release brings nothing: acting on presses
+    /// keeps fast typing in order, where two keys overlap. Enter still
+    /// comes as a `Key`, on its release, so the release can't reach the app
+    /// after the click it makes.
+    Typed(Key, Mods, Option<char>),
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
     /// The compositor closed the overlay (its monitor went away) or
@@ -113,9 +122,9 @@ impl Overlay {
     /// before anything starts other threads: it blocks SIGINT and SIGTERM
     /// so they arrive as [`Event::Interrupted`], and threads started later
     /// inherit that.
-    pub fn new(conn: &Connection, style: &Style, monitor: &Monitor) -> Result<Self> {
+    pub fn new(conn: &Connection, style: &Style, marks: &Marks, monitor: &Monitor) -> Result<Self> {
         // The font first: a bad `[style] font` fails before any grab.
-        let painter = Painter::new(style)?;
+        let painter = Painter::new(style, marks)?;
 
         let (globals, mut queue) =
             registry_queue_init::<State>(conn).context("connecting to Wayland")?;
@@ -142,6 +151,8 @@ impl Overlay {
             holds: hold::Holds::default(),
             passthrough: None,
             held: Mods::NONE,
+            pressed: 0,
+            typist: None,
             keymap: None,
             locks: Locks::default(),
             events: VecDeque::new(),
@@ -203,22 +214,10 @@ impl Overlay {
             queue.blocking_dispatch(&mut state)?;
         }
 
-        let event_loop = EventLoop::try_new()?;
-        WaylandSource::new(conn.clone(), queue)
-            .insert(event_loop.handle())
-            .map_err(|e| anyhow::anyhow!("adding Wayland to the event loop: {}", e.error))?;
-        let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?;
-        event_loop
-            .handle()
-            .insert_source(signals, |_, (), state: &mut State| {
-                state.events.push_back(Event::Interrupted);
-            })
-            .map_err(|e| anyhow::anyhow!("adding signals to the event loop: {}", e.error))?;
-
         let mut overlay = Self {
             conn: conn.clone(),
             qh,
-            event_loop,
+            event_loop: event_loop(conn, queue)?,
             state,
             painter,
             pixmap,
@@ -291,6 +290,40 @@ impl Overlay {
     /// Whether an arrow is held down, ticking.
     pub fn holding(&self) -> bool {
         !self.state.holds.is_empty()
+    }
+
+    /// Starts reading keys as text, for text mode: they come as
+    /// [`Event::Typed`], in the layout they're typed in.
+    pub fn start_typing(&mut self) -> Result<()> {
+        let keymap = self.keymap().context("the keyboard sent no keymap yet")?;
+        let mut typist = Typist::new(keymap).context("the keyboard's keymap doesn't compile")?;
+        // Keys let go since the text key came by position: read them as
+        // text too.
+        for event in &mut self.state.events {
+            if let Event::Key(key, mods) = *event
+                && key.code != KeyCode::ENTER
+            {
+                let typed = typist.press_late(key.code, mods, self.state.locks);
+                *event = Event::Typed(key, mods, typed);
+            }
+        }
+        self.state.holds.clear();
+        self.state.typist = Some(typist);
+        Ok(())
+    }
+
+    /// Back to keys by position, as tags read them.
+    pub fn stop_typing(&mut self) {
+        self.state.typist = None;
+    }
+
+    /// Whether events are waiting to be taken, read without waiting: text
+    /// mode takes every key typed before it asks the apps where the
+    /// query's matches are, so fast typing asks once.
+    pub fn has_events(&mut self) -> Result<bool> {
+        self.event_loop
+            .dispatch(Some(Duration::ZERO), &mut self.state)?;
+        Ok(!self.state.events.is_empty())
     }
 
     /// Which way keys come in, for messages.
@@ -367,6 +400,14 @@ impl Overlay {
                     tag: d.tag,
                 })
                 .collect(),
+            highlights: frame
+                .highlights
+                .iter()
+                .map(|h| Highlight {
+                    rect: h.rect.offset(Point::new(-origin.x, -origin.y)),
+                    current: h.current,
+                })
+                .collect(),
         };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;
@@ -397,7 +438,7 @@ impl Overlay {
     fn new_tags(&mut self) -> u32 {
         self.state
             .events
-            .retain(|e| !matches!(e, Event::Key(..) | Event::Held(..)));
+            .retain(|e| !matches!(e, Event::Key(..) | Event::Held(..) | Event::Typed(..)));
         self.state.holds.clear();
         self.state.gate.redrawn()
     }
@@ -468,6 +509,23 @@ impl Overlay {
         }
         Ok(())
     }
+}
+
+/// The loop the overlay waits in: Wayland's events from `queue`, and
+/// SIGINT and SIGTERM as [`Event::Interrupted`].
+fn event_loop(conn: &Connection, queue: EventQueue<State>) -> Result<EventLoop<'static, State>> {
+    let event_loop = EventLoop::try_new()?;
+    WaylandSource::new(conn.clone(), queue)
+        .insert(event_loop.handle())
+        .map_err(|e| anyhow::anyhow!("adding Wayland to the event loop: {}", e.error))?;
+    let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?;
+    event_loop
+        .handle()
+        .insert_source(signals, |_, (), state: &mut State| {
+            state.events.push_back(Event::Interrupted);
+        })
+        .map_err(|e| anyhow::anyhow!("adding signals to the event loop: {}", e.error))?;
+    Ok(event_loop)
 }
 
 impl Drop for Overlay {

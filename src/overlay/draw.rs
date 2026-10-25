@@ -20,7 +20,7 @@ use crate::{
     overlay::font,
     placement::{self, Label},
     space::Space,
-    style::{Color, Position, Style},
+    style::{Color, Mark, Marks, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -39,6 +39,16 @@ pub struct Frame {
     /// Where nudged commands land: the tag says which, the dot says where,
     /// and the line between says which dot is whose.
     pub dots: Vec<Dot>,
+    /// Text mode's matches, under everything else.
+    pub highlights: Vec<Highlight>,
+}
+
+/// A translucent box over one line of a match in text mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Highlight {
+    pub rect: BoxRect,
+    /// Part of the current match, drawn in `[text.style.current]`.
+    pub current: bool,
 }
 
 /// Where a nudged command lands, `at`, and its source: a tag's outline,
@@ -77,6 +87,7 @@ struct Glyph {
 /// so each letter is rasterized once per colour per run.
 pub struct Painter {
     style: Style,
+    marks: Marks,
     font: fontdue::Font,
     /// Distance from a line's top to its baseline, and its full height.
     ascent: f32,
@@ -89,7 +100,7 @@ pub struct Painter {
 }
 
 impl Painter {
-    pub fn new(style: &Style) -> Result<Self> {
+    pub fn new(style: &Style, marks: &Marks) -> Result<Self> {
         let font = font::load(&style.font, style.size)?;
         let (ascent, line_height) = font
             .horizontal_line_metrics(style.size)
@@ -98,6 +109,7 @@ impl Painter {
             });
         Ok(Self {
             style: style.clone(),
+            marks: *marks,
             font,
             ascent,
             line_height,
@@ -177,10 +189,13 @@ impl Painter {
 
     /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
     ///
-    /// Lines start at their tags' nearest edges and go under the tags.
-    /// Dots go last, over everything.
+    /// Highlights go first, under everything. Lines start at their tags'
+    /// nearest edges and go under the tags. Dots go last, over everything.
     pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
+        for highlight in &frame.highlights {
+            self.paint_highlight(pixmap, *highlight);
+        }
         #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
         let area = (pixmap.width() as f32, pixmap.height() as f32);
         let arranged = self.arrange(frame, area);
@@ -259,46 +274,45 @@ impl Painter {
         )
     }
 
+    /// One line of a match: its box grown by the mark's padding, filled
+    /// and bordered as a tag is, with no letters.
+    #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
+    fn paint_highlight(&self, pixmap: &mut Pixmap, highlight: Highlight) {
+        let mark = if highlight.current {
+            self.marks.current
+        } else {
+            self.marks.all
+        };
+        let [pad_y, pad_x] = mark.padding;
+        let r = highlight.rect;
+        let Some(rect) = Rect::from_xywh(
+            r.x as f32 - pad_x,
+            r.y as f32 - pad_y,
+            r.w as f32 + 2.0 * pad_x,
+            r.h as f32 + 2.0 * pad_y,
+        ) else {
+            return;
+        };
+        paint_box(pixmap, rect, &mark);
+    }
+
     fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
         let size = self.size(&tag.text);
         let Some(rect) = place(tag.at, tag.position, size, area) else {
             return;
         };
         let style = &self.style;
-
-        // The box: fill, then the border stroked half a width inside, so the
-        // whole line stays within the box.
-        let inset = style.border_width / 2.0;
-        if let Some(path) = rounded_rect(rect, style.radius) {
-            pixmap.fill_path(
-                &path,
-                &paint(style.background),
-                FillRule::Winding,
-                Transform::identity(),
-                None,
-            );
-        }
-        if style.border_width > 0.0
-            && let Some(inner) = Rect::from_ltrb(
-                rect.left() + inset,
-                rect.top() + inset,
-                rect.right() - inset,
-                rect.bottom() - inset,
-            )
-            && let Some(path) = rounded_rect(inner, (style.radius - inset).max(0.0))
-        {
-            let stroke = Stroke {
-                width: style.border_width,
-                ..Stroke::default()
-            };
-            pixmap.stroke_path(
-                &path,
-                &paint(style.border),
-                &stroke,
-                Transform::identity(),
-                None,
-            );
-        }
+        paint_box(
+            pixmap,
+            rect,
+            &Mark {
+                background: style.background,
+                border: style.border,
+                border_width: style.border_width,
+                radius: style.radius,
+                padding: style.padding,
+            },
+        );
 
         // The letters, on a baseline `ascent` below the padding.
         let [pad_y, pad_x] = style.padding;
@@ -366,6 +380,43 @@ fn place(
         .round()
         .clamp(EDGE, (area_h - h - EDGE).max(EDGE));
     Rect::from_xywh(x, y, w, h)
+}
+
+/// A box filled and bordered in `look`'s colours: the fill, then the border
+/// stroked half a width inside, so the whole line stays within the box.
+/// Its padding is the caller's business.
+fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark) {
+    let inset = look.border_width / 2.0;
+    if let Some(path) = rounded_rect(rect, look.radius) {
+        pixmap.fill_path(
+            &path,
+            &paint(look.background),
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    if look.border_width > 0.0
+        && let Some(inner) = Rect::from_ltrb(
+            rect.left() + inset,
+            rect.top() + inset,
+            rect.right() - inset,
+            rect.bottom() - inset,
+        )
+        && let Some(path) = rounded_rect(inner, (look.radius - inset).max(0.0))
+    {
+        let stroke = Stroke {
+            width: look.border_width,
+            ..Stroke::default()
+        };
+        pixmap.stroke_path(
+            &path,
+            &paint(look.border),
+            &stroke,
+            Transform::identity(),
+            None,
+        );
+    }
 }
 
 /// A point as tiny-skia coordinates: the centre of its pixel, not the
@@ -528,7 +579,7 @@ mod tests {
             radius: 6.0,
             ..Style::default()
         };
-        let mut painter = Painter::new(&style).unwrap();
+        let mut painter = Painter::new(&style, &Marks::from_tags(&style)).unwrap();
         let mut pixmap = Pixmap::new(240, 200).unwrap();
         let mut frame = Frame {
             tags: vec![Tag {
@@ -543,6 +594,7 @@ mod tests {
                 at: Point::default(),
                 tag: Some(0),
             }],
+            highlights: vec![],
         };
         for (dot, (x, y)) in [
             (Point::new(60, 90), (90, 90)),
@@ -614,7 +666,7 @@ mod collision_tests {
             offset: [3, 3],
             ..Style::default()
         };
-        let mut painter = Painter::new(&style).unwrap();
+        let mut painter = Painter::new(&style, &Marks::from_tags(&style)).unwrap();
         let mut pixmap = Pixmap::new(300, 600).unwrap();
         painter.set_space(
             BoxRect::new(0, 0, 300, 600),
@@ -639,6 +691,7 @@ mod collision_tests {
             })
             .collect(),
             dots: vec![],
+            highlights: vec![],
         };
         painter.paint(&mut pixmap, &frame);
         let arranged = painter.arrange(&frame, (300.0, 600.0));
@@ -662,7 +715,7 @@ mod collision_tests {
         assert_eq!(painter.space.as_ref().unwrap().ink(moved), 0);
         let one = Frame {
             tags: vec![frame.tags[1].clone()],
-            dots: vec![],
+            ..Frame::default()
         };
         let filtered = painter.arrange(&one, (300.0, 600.0));
         assert_eq!(
@@ -687,6 +740,50 @@ mod collision_tests {
 mod capture_replay {
     use super::*;
     use std::{path::Path, time::Instant};
+
+    /// Text mode's marks over a saved picture, for looking at: the boxes
+    /// in `WAYHINT_MARKS_RECTS` (`x,y,w,h;...`, the first one current) over
+    /// the PNG `WAYHINT_MARKS_IMAGE`, in the marks of `WAYHINT_STYLE_FILE`
+    /// if given, saved to `WAYHINT_MARKS_OUTPUT`.
+    #[test]
+    #[ignore = "requires a picture, boxes and an output path"]
+    fn render_text_marks() {
+        let var = |name| std::env::var(name).unwrap();
+        let mut picture = Pixmap::load_png(var("WAYHINT_MARKS_IMAGE")).unwrap();
+        let config = std::env::var("WAYHINT_STYLE_FILE")
+            .ok()
+            .map_or_else(String::new, |p| std::fs::read_to_string(p).unwrap());
+        let config =
+            crate::config::Config::parse(&config, &crate::keys::Layout::named("us", "")).unwrap();
+        let number = |n: &str| n.trim().parse::<i32>().unwrap();
+        let highlights = var("WAYHINT_MARKS_RECTS")
+            .split(';')
+            .enumerate()
+            .map(|(i, rect)| {
+                let v: Vec<i32> = rect.split(',').map(number).collect();
+                Highlight {
+                    rect: BoxRect::new(v[0], v[1], v[2], v[3]),
+                    current: i == 0,
+                }
+            })
+            .collect();
+        let frame = Frame {
+            highlights,
+            ..Frame::default()
+        };
+        let mut painter = Painter::new(&config.style, &config.marks).unwrap();
+        let mut marks = Pixmap::new(picture.width(), picture.height()).unwrap();
+        painter.paint(&mut marks, &frame);
+        picture.draw_pixmap(
+            0,
+            0,
+            marks.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+        picture.save_png(var("WAYHINT_MARKS_OUTPUT")).unwrap();
+    }
 
     /// Render a captured snapshot with the real font, style and placement.
     #[test]
@@ -736,8 +833,11 @@ mod capture_replay {
                     .collect(),
             })
             .collect();
-        let frame = Frame { tags, dots: vec![] };
-        let mut painter = Painter::new(&config.style).unwrap();
+        let frame = Frame {
+            tags,
+            ..Frame::default()
+        };
+        let mut painter = Painter::new(&config.style, &config.marks).unwrap();
         let obstacles: Vec<_> = snapshot.obstacles.iter().map(|r| r.offset(shift)).collect();
         painter.set_space(area, &obstacles, vec![area]);
         let size = (area.w as f32, area.h as f32);

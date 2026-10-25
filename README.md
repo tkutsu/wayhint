@@ -76,6 +76,7 @@ bind = SUPER, slash, exec, wayhint
 | `Space` | Does the default action, or the verb typed before it, where the pointer is |
 | arrows, before the tag's last letter or `Space` | Move where that one click lands, 10 px per press; held, they keep going, faster |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
+| `q` | Text mode: the tags go, and what you type finds text on screen |
 | `Backspace` | Removes the last letter or verb typed |
 | `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
 
@@ -102,6 +103,30 @@ letters you typed for it stay typed; only new controls take new tags.
 Moved controls get their tags at the new position; hidden controls lose
 theirs. If a control changes just as you pick it, wayhint skips that click
 and refreshes the tags.
+
+In text mode every key you type goes into the query, spaces and verb keys
+included, in whatever layout is active, so Greek text is searched with the
+Greek layout. Each visible match gets a translucent box, and the first one
+in reading order is the current one, with a stronger box. The arrows, `Tab`
+and `Shift+Tab` move to the next or previous match and wrap around; `Home`
+and `End` go to the first and last. `Enter` clicks the middle of the
+current match's first line, with the verb typed before `q` if there was
+one (`t q save Enter` double-clicks "save"), and `Shift`, `Ctrl` or `Alt`
+held on `Enter` hold that key through the click. Nothing is clicked until
+`Enter`. `Backspace` takes back the last character and `Esc` clears the
+query; with nothing typed, either one goes back to the tags. The bottom of
+the screen shows the query and where you are, as in `con  2/5`.
+
+A query in lower case ignores case, and one capital letter makes it exact.
+Accents are ignored both ways, so `cafe` finds "café" and `α` finds
+"άλλο". A space finds any run of spaces or a line break. Matches are found
+anywhere inside words, so `con` finds "contact", "Control" and "falcon".
+
+Text mode reads the text the apps give the accessibility tree once, as it
+starts, and asks an app where a match is only the first time that match
+comes up. Before the click it reads the text at that spot again and skips
+the click if it changed. Windows tagged from their pixels have no text to
+search yet; see Known gaps.
 
 A key held across a change to the targets is ignored. Press it again
 after the new tags appear. The same rule applies when a paragraph opens
@@ -140,7 +165,8 @@ to top, with each one's tag count and what couldn't be read; add
 `--pixels fast` to tag windows without a tree from their pixels, as a run
 does. The output can contain private text from your windows.
 `wayhint dump --pixels` prints the tags the window's pixels give, whether
-or not it has a tree.
+or not it has a tree. `wayhint dump --text con` prints the text text mode
+would search in the focused window, and where `con` is in it.
 
 ## Configuration
 
@@ -161,7 +187,8 @@ right = ""              # "" makes this what a bare tag does (default: left)
 left = "."              # every other verb gets a key: one character or a name
 hover = "_"             # Shift works: _ is Shift and -
 back = "Home"           # names: PgUp PgDn Home End Delete
-repeat = "q"            # the last command again; no key unless you set one
+repeat = "r"            # the last command again; no key unless you set one
+text = "/"              # text mode (default q); "" for none
 
 [keys.aliases]
 ";" = "c"               # another key that types the same letter
@@ -187,7 +214,25 @@ background = "#1e1e2ef0"
 border = "#d0d0d0ff"
 position = "bottom-right"  # on the target: center, top, bottom, left, right, or a corner
 offset = [0, 0]         # px from there, right and down
+
+[text.style]            # text mode's boxes over matches
+background = "#1e1e2e40"
+border = "#d0d0d0ff"
+border_width = 1
+radius = 4
+padding = [2, 5]        # vertical, horizontal
+
+[text.style.current]    # the current match; unset fields come from [text.style]
+background = "#1e1e2e70"
+border_width = 2
 ```
+
+Text mode's boxes take their colours, radius and padding from the tags
+unless you set them: the tags' background at a quarter of full opacity,
+and a border at least 1 px wide even when the tags have none, since a faint
+dark box disappears on a dark window and only its border shows. The
+current match's box is 1.75 times as opaque, with a solid border 1 px
+wider. Set `border_width = 0` in `[text.style]` for no borders.
 
 Keys are read with your keyboard's own keymap, the one the compositor
 gives every app, so a custom layout or a keymap file (Hyprland's
@@ -234,10 +279,11 @@ type a tag. Placement searches up to 256 pixels within the target's window;
 if no clear slot fits, the label keeps its original position. Failed
 captures protect the whole window rather than treating it as empty.
 
-A key is a tag letter or a command (a verb, or repeat), never both. A
-command key you write is taken out of the alphabet. A default verb key that
-is in the alphabet you wrote stays off instead, and `wayhint config` lists
-which verbs have no key. `Esc`, `Backspace`, `Space`, `Enter`, `Tab` and
+A key is a tag letter or a command (a verb, repeat, or text), never both.
+A command key you write is taken out of the alphabet. A default verb or
+text key that is in the alphabet you wrote stays off instead, and `wayhint
+config` lists which commands have no key. The text key's default also
+gives way to any other command on its key. `Esc`, `Backspace`, `Space`, `Enter`, `Tab` and
 the arrows are never command keys.
 
 ## Known gaps
@@ -285,6 +331,15 @@ the arrows are never command keys.
 - A window's rounded corners show up as small pixel tags at its corners.
 - A document's hint clicks a cell or a line of text, which moves the
   active cell or the text cursor there.
+- Text mode finds only text an app gives the accessibility tree. Terminals,
+  windows tagged from their pixels, pictures and canvases have none for it
+  yet, and Chromium and Electron apps need their accessibility flag as for
+  tags. Qt gives most labels and list items only a name, so text mode
+  searches the names of labels, list items, cells, tabs, menu items,
+  links and headings, and boxes the whole item, not the matched letters.
+  Buttons' names are left out, since an icon button's name isn't on screen.
+- Text mode reads the text once, when it starts; text that changes while
+  you type isn't found until you leave text mode and come back.
 - A sheet is found from its pixels only when its grid lines show, are 1 px
   thin, and rows are 12 to 40 px apart. A sheet with gridlines turned off,
   or one zoomed far in, keeps a tag per cell. Links inside cells get no tag.

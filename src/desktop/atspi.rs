@@ -32,8 +32,11 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use atspi::{
-    AccessibilityConnection, CoordType, Interface, ObjectRefOwned, State, StateSet,
-    proxy::{accessible::AccessibleProxy, action::ActionProxy, component::ComponentProxy},
+    AccessibilityConnection, CoordType, Granularity, Interface, ObjectRefOwned, State, StateSet,
+    proxy::{
+        accessible::AccessibleProxy, action::ActionProxy, component::ComponentProxy,
+        text::TextProxy,
+    },
 };
 use futures::{StreamExt as _, future, stream};
 use serde::Serialize;
@@ -153,6 +156,86 @@ impl Scanner {
         let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
         walk.read_fresh(object, clips).await
     }
+
+    /// Reads the text of `objects`, each with the part of its window it
+    /// can show in and whether its name is its text, eight at a time, all
+    /// within `timeout`. `None` for one that didn't answer, has no text,
+    /// or shows none of it. Also says why the reading stopped early, if it
+    /// did.
+    pub async fn read_texts(
+        &self,
+        objects: &[(&ObjectId, Rect, bool)],
+        timeout: Duration,
+    ) -> (Vec<Option<TextRead>>, Option<String>) {
+        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let reads = stream::iter(objects)
+            .map(|&(object, area, named)| {
+                let walk = &walk;
+                async move { walk.read_text(object, area, named).await.ok().flatten() }
+            })
+            .buffered(IN_FLIGHT)
+            .collect()
+            .await;
+        (reads, walk.incomplete.take())
+    }
+
+    /// Where each of `spans` (characters `start..end` of an object) is in
+    /// its window: a box per line, none if the app can't say, the time ran
+    /// out, or there was nothing to ask.
+    pub async fn locate(
+        &self,
+        spans: &[Option<(&ObjectId, u32, u32)>],
+        timeout: Duration,
+    ) -> Vec<Vec<Rect>> {
+        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        stream::iter(spans)
+            .map(|&span| {
+                let walk = &walk;
+                async move {
+                    match span {
+                        Some((object, start, end)) => walk.locate(object, start, end).await,
+                        None => Vec::new(),
+                    }
+                }
+            })
+            .buffered(IN_FLIGHT)
+            .collect()
+            .await
+    }
+
+    /// Characters `start..end` of an object's text, read again.
+    pub async fn read_range(
+        &self,
+        object: &ObjectId,
+        start: u32,
+        end: u32,
+        timeout: Duration,
+    ) -> Result<String> {
+        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let text: TextProxy = walk.proxy(object).await?;
+        walk.call(text.get_text(offset(start), offset(end))).await
+    }
+}
+
+/// A text this long is read only from where its visible part starts, and
+/// at most this much of it: an editor's whole file isn't on screen.
+const LONG_TEXT: i32 = 8_192;
+
+/// The most lines one match is split into, wrapped.
+const MAX_LINES: usize = 8;
+
+/// One object's text as text mode reads it. Window-relative.
+pub struct TextRead {
+    pub name: String,
+    pub bounds: Rect,
+    /// The character offset `content` starts at.
+    pub start: u32,
+    pub content: String,
+}
+
+/// A character offset as AT-SPI takes it.
+fn offset(at: u32) -> i32 {
+    i32::try_from(at).unwrap_or(i32::MAX)
 }
 
 /// One scan's working state. `Cell` and `RefCell` let the many concurrent
@@ -304,7 +387,10 @@ impl<'c> Walk<'c> {
             // Qt apps don't rejoin a restarted bus (Qt 6.12), and Chromium and
             // Electron apps don't join without the flag.
             let bus = self.bus_started().await;
-            if started(window.pid).zip(bus).is_some_and(|(app, bus)| app < bus) {
+            if started(window.pid)
+                .zip(bus)
+                .is_some_and(|(app, bus)| app < bus)
+            {
                 bail!(
                     "pid {} isn't on the accessibility bus, which restarted after it started: \
                      reopen it so wayhint can see its controls",
@@ -453,6 +539,7 @@ impl<'c> Walk<'c> {
             states,
             action: interfaces.contains(Interface::Action),
             component,
+            text: interfaces.contains(Interface::Text),
             bounds,
             details: None,
         };
@@ -507,11 +594,12 @@ impl<'c> Walk<'c> {
         }
     }
 
-    /// Step 4b: boxes of the scroll areas above candidates, for clipping.
+    /// Step 4b: boxes of the scroll areas above candidates, for clipping,
+    /// and above text text mode may read.
     async fn read_scroll_areas(&self, tree: &mut Tree) {
         let scrollers = filter::scroll_areas(tree);
         let wanted: BTreeSet<usize> = (0..tree.nodes.len())
-            .filter(|&i| tree.nodes[i].details.is_some())
+            .filter(|&i| tree.nodes[i].details.is_some() || filter::has_text(&tree.nodes[i]))
             .flat_map(|i| tree.ancestors(i))
             .filter(|a| scrollers.contains(a) && tree.nodes[*a].bounds.is_none())
             .collect();
@@ -526,6 +614,112 @@ impl<'c> Walk<'c> {
         for (i, result) in wanted.into_iter().zip(results) {
             tree.nodes[i].bounds = result.ok();
         }
+    }
+
+    /// One object's text, if any of it shows in `area`: its name when
+    /// that's `named` its text. Name, box and length come at once; a long
+    /// text is read from the offset at the area's top-left corner to the
+    /// one at its bottom-right.
+    async fn read_text(
+        &self,
+        object: &ObjectId,
+        area: Rect,
+        named: bool,
+    ) -> Result<Option<TextRead>> {
+        let accessible: AccessibleProxy = self.proxy(object).await?;
+        if named {
+            let (name, bounds) = tokio::join!(self.call(accessible.name()), self.extents(object));
+            let (name, bounds) = (name?, bounds?);
+            let shows = !name.trim().is_empty() && bounds.intersect(area).is_some();
+            return Ok(shows.then(|| TextRead {
+                content: name.clone(),
+                name,
+                bounds,
+                start: 0,
+            }));
+        }
+        let text: TextProxy = self.proxy(object).await?;
+        let (name, bounds, count) = tokio::join!(
+            self.call(accessible.name()),
+            self.extents(object),
+            self.call(text.character_count())
+        );
+        let (bounds, count) = (bounds?, count?);
+        // An empty box says nothing, as in the walk rule.
+        let shown = if bounds.is_empty() {
+            Some(area)
+        } else {
+            bounds.intersect(area)
+        };
+        let Some(shown) = shown.filter(|_| count > 0) else {
+            return Ok(None);
+        };
+        let (start, end) = if count <= LONG_TEXT {
+            (0, count)
+        } else {
+            let (first, last) = tokio::join!(
+                self.call(text.get_offset_at_point(shown.x, shown.y, CoordType::Window)),
+                self.call(text.get_offset_at_point(
+                    shown.right() - 1,
+                    shown.bottom() - 1,
+                    CoordType::Window
+                ))
+            );
+            // -1 is the app's "no character there".
+            let start = first.ok().filter(|&f| f >= 0).unwrap_or(0);
+            let end = last.ok().filter(|&l| l >= start).map_or(count, |l| l + 1);
+            (start, end.min(count).min(start + LONG_TEXT))
+        };
+        let content = self.call(text.get_text(start, end)).await?;
+        Ok(Some(TextRead {
+            name: name.unwrap_or_default(),
+            bounds,
+            start: u32::try_from(start).unwrap_or(0),
+            content,
+        }))
+    }
+
+    /// Where characters `start..end` of an object are, a box per line.
+    /// A box taller than a line and a half, by the height of the match's
+    /// first character, is wrapped: it's split where the line it starts
+    /// on ends, and so on. Nothing if the app can't say.
+    async fn locate(&self, object: &ObjectId, start: u32, end: u32) -> Vec<Rect> {
+        let Ok(text) = self.proxy::<TextProxy>(object).await else {
+            return Vec::new();
+        };
+        let text = &text;
+        let range = move |from: i32, to: i32| async move {
+            let request = text.get_range_extents(from, to, CoordType::Window);
+            let (x, y, w, h) = self.call(request).await.ok()?;
+            Some(Rect::new(x, y, w, h)).filter(|r| !r.is_empty())
+        };
+        let (mut from, end) = (offset(start), offset(end));
+        let mut parts = Vec::new();
+        for _ in 0..MAX_LINES {
+            let (whole, first) = tokio::join!(
+                range(from, end),
+                self.call(text.get_character_extents(from, CoordType::Window))
+            );
+            let Some(whole) = whole else { break };
+            let line = first.map_or(0, |(_, _, _, h)| h);
+            let wrapped = line > 0 && whole.h * 2 > line * 3;
+            let line_end = if wrapped {
+                self.call(text.get_string_at_offset(from, Granularity::Line))
+                    .await
+                    .map_or(end, |(_, _, line_end)| line_end)
+            } else {
+                end
+            };
+            if line_end <= from || line_end >= end {
+                parts.push(whole);
+                break;
+            }
+            if let Some(part) = range(from, line_end).await {
+                parts.push(part);
+            }
+            from = line_end;
+        }
+        parts
     }
 
     /// The re-check's read of one object and the scroll areas above it.
@@ -655,7 +849,12 @@ fn started(pid: u32) -> Option<u64> {
 /// Field 22 of a `/proc/<pid>/stat` line. The name, field 2, is in
 /// parentheses and may hold spaces, so count from after it.
 fn start_time(stat: &str) -> Option<u64> {
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
