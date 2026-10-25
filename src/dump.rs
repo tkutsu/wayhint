@@ -20,9 +20,9 @@ use crate::{
     cli::Dump,
     desktop::{self, Desktop, Kind, Monitor, Window, filter},
     geometry::Rect,
-    pixels::Detector,
+    pixels::{Detector, Found},
     snapshot::{Read, Snapshot},
-    text::{Search, Text},
+    text::{Place, Search, Text},
 };
 
 pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
@@ -47,6 +47,18 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
     }
 
     let mut desktop = Desktop::connect()?;
+    // kitty has no tree: its text comes from kitty itself.
+    if let Some(query) = &args.text
+        && desktop::is_kitty(&window)
+    {
+        let read = Read::Pixels {
+            window: &window,
+            found: &Found::default(),
+            scale: 1.0,
+            stats: &desktop::Stats::default(),
+        };
+        return text(&desktop, &Snapshot::build(1, window.monitor, [read]), query);
+    }
     let (tree, stats) = desktop.read_tree(&window)?;
     if args.raw {
         return print(&Raw {
@@ -185,6 +197,8 @@ struct TextDump<'a> {
     locate_ms: f64,
     /// Why the reading stopped early, if it did.
     incomplete: Option<String>,
+    /// The windows whose text couldn't be read, and why.
+    unread: Vec<String>,
     texts: Vec<TextRow<'a>>,
     matches: Vec<MatchRow<'a>>,
 }
@@ -214,9 +228,9 @@ struct MatchRow<'a> {
 fn text(desktop: &Desktop, snapshot: &Snapshot, query: &str) -> Result<()> {
     let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
-    let (texts, incomplete) = desktop.read_text(snapshot);
+    let reading = desktop.read_text(snapshot);
     let read_ms = ms(started);
-    let mut search = Search::new(texts);
+    let mut search = Search::new(reading.texts);
     query.chars().for_each(|c| search.push(c));
     let wanted = search.wanted();
     let started = Instant::now();
@@ -224,11 +238,15 @@ fn text(desktop: &Desktop, snapshot: &Snapshot, query: &str) -> Result<()> {
     let locate_ms = ms(started);
     search.located(&wanted, boxes);
     search.update(&|_, _| true);
-    let role = |text: &Text| snapshot.texts[text.source].role.as_str();
+    let role = |text: &Text| match text.place {
+        Place::Object(index) => snapshot.texts[index].role.as_str(),
+        Place::Cells(_) => "terminal",
+    };
     print(&TextDump {
         read_ms,
         locate_ms,
-        incomplete,
+        incomplete: reading.incomplete,
+        unread: reading.unread.iter().map(|e| format!("{e:#}")).collect(),
         texts: search
             .texts()
             .iter()
