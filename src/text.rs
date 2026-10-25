@@ -17,7 +17,8 @@
 //!
 //! [`Search`] is the state of one text mode: the query, where its matches
 //! are, which one is current. Where a match is comes from the app, one
-//! request per match, so it's asked for only once ([`Search::wanted`]).
+//! request per match, so it's asked for only once ([`Search::wanted`]);
+//! in a terminal, from the cells its characters sit in ([`Cells`]).
 
 use std::{collections::HashMap, ops::Range};
 
@@ -35,8 +36,8 @@ const MIN_SIZE: i32 = 2;
 /// One object's text, as read when text mode starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
-    /// Its source, as an index into [`crate::snapshot::Snapshot::texts`].
-    pub source: usize,
+    /// Where it came from: what to ask where a match is.
+    pub place: Place,
     /// Its window, as an index into the snapshot's windows.
     pub window: usize,
     /// Its accessible name, for the re-check.
@@ -57,6 +58,87 @@ impl Text {
         let skip = start.saturating_sub(self.start) as usize;
         let take = end.saturating_sub(start) as usize;
         self.content.chars().skip(skip).take(take).collect()
+    }
+}
+
+/// Where a text came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// An accessible object, as an index into
+    /// [`crate::snapshot::Snapshot::texts`]: the app says where a match is.
+    Object(usize),
+    /// A terminal's cells: where a match is is arithmetic.
+    Cells(Cells),
+}
+
+/// A terminal pane's text laid out in its cells. A terminal has no
+/// accessibility tree, but it knows its grid: kitty says what each row
+/// shows and where its first cell is (see `desktop::kitty`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cells {
+    /// The pane, as kitty numbers it, to read again before acting.
+    pub pane: u64,
+    /// Its window's top-left, global logical px.
+    pub window: Point,
+    /// The first cell's top-left in the window, and a cell's size, in the
+    /// window's physical px.
+    pub first: Point,
+    pub cell: (i32, i32),
+    /// Physical px to logical px: `scale.0` of the first make `scale.1`.
+    pub scale: (i32, i32),
+    /// For each character of the text: its row, and the columns
+    /// `start..end` it covers. A line break covers none.
+    pub at: Vec<(u16, u16, u16)>,
+}
+
+impl Cells {
+    /// Where characters `start..end` are: a box per row, global.
+    pub fn boxes(&self, start: u32, end: u32) -> Vec<Rect> {
+        let mut rows: Vec<(u16, u16, u16)> = Vec::new();
+        let chars = self.at.iter().skip(start as usize);
+        for &(row, from, to) in chars.take(end.saturating_sub(start) as usize) {
+            match rows.last_mut() {
+                _ if to <= from => {}
+                Some(last) if last.0 == row => last.2 = last.2.max(to),
+                _ => rows.push((row, from, to)),
+            }
+        }
+        rows.into_iter()
+            .map(|(row, from, to)| {
+                let (x, y) = (i32::from(from), i32::from(row));
+                self.rect(x, y, i32::from(to) - x, 1)
+            })
+            .collect()
+    }
+
+    /// Whether characters `start..end` sit in the same cells, at the same
+    /// place on screen, in `other`.
+    pub fn same_place(&self, other: &Self, start: u32, end: u32) -> bool {
+        let range = start as usize..end as usize;
+        (self.window, self.first, self.cell, self.scale)
+            == (other.window, other.first, other.cell, other.scale)
+            && self.at.get(range.clone()) == other.at.get(range)
+    }
+
+    /// The box of every row and column with a character in it.
+    pub fn whole(&self) -> Rect {
+        let rows = self.at.last().map_or(0, |&(row, ..)| row + 1);
+        let columns = self.at.iter().map(|&(.., to)| to).max().unwrap_or(0);
+        self.rect(0, 0, i32::from(columns), i32::from(rows))
+    }
+
+    /// Columns `x..x + w` of rows `y..y + h`, global logical px.
+    fn rect(&self, x: i32, y: i32, w: i32, h: i32) -> Rect {
+        let (cw, ch) = self.cell;
+        #[allow(clippy::cast_possible_truncation)]
+        let logical = |px: i32| {
+            (f64::from(px) * f64::from(self.scale.1) / f64::from(self.scale.0)).round() as i32
+        };
+        let left = logical(self.first.x + x * cw);
+        let top = logical(self.first.y + y * ch);
+        let right = logical(self.first.x + (x + w) * cw);
+        let bottom = logical(self.first.y + (y + h) * ch);
+        Rect::new(left, top, right - left, bottom - top).offset(self.window)
     }
 }
 
@@ -393,7 +475,7 @@ mod tests {
 
     fn text(content: &str, rect: Rect) -> Text {
         Text {
-            source: 0,
+            place: Place::Object(0),
             window: 0,
             name: String::new(),
             rect,
@@ -522,5 +604,37 @@ mod tests {
             Point::new(20, 5),
             "clicked on its first line"
         );
+    }
+
+    /// `ab` then a wide `你` on row 0, a line break, `xy` on row 1: cells
+    /// 10x20 physical px from (4, 6), at scale 2, in a window at (100, 50).
+    fn cells() -> Cells {
+        Cells {
+            pane: 1,
+            window: Point::new(100, 50),
+            first: Point::new(4, 6),
+            cell: (10, 20),
+            scale: (2, 1),
+            at: vec![
+                (0, 0, 1),
+                (0, 1, 2),
+                (0, 2, 4),
+                (0, 4, 4),
+                (1, 0, 1),
+                (1, 1, 2),
+            ],
+        }
+    }
+
+    #[test]
+    fn cells_give_a_box_per_row_in_logical_px() {
+        let cells = cells();
+        assert_eq!(cells.boxes(1, 3), [Rect::new(107, 53, 15, 10)]);
+        assert_eq!(
+            cells.boxes(2, 6),
+            [Rect::new(112, 53, 10, 10), Rect::new(102, 63, 10, 10)],
+            "the line break has no box"
+        );
+        assert_eq!(cells.whole(), Rect::new(102, 53, 20, 20));
     }
 }
