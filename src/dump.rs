@@ -60,7 +60,7 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
         .into_iter()
         .find(|m| m.id == window.monitor)
     {
-        desktop.layout(&mut snapshot, &monitor);
+        desktop.layout(&mut snapshot, &monitor, &desktop::Stack::default(), &[]);
     }
     if let Some(query) = &args.text {
         return text(&desktop, &snapshot, query);

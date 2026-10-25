@@ -74,7 +74,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// A key was released, and its press counted (see `gate.rs`), with
-    /// the modifiers held at its press; an arrow comes as it's pressed
+    /// the modifiers held at its press. Keys come in the order they went
+    /// down, not the order they came up. An arrow comes as it's pressed
     /// instead. Modifier keys come too, and mean nothing to `pick`.
     /// Shift is in both: in the [`Key`], because `_` and `-` are different
     /// keys to the config, and in the [`Mods`], for a Shift-click.

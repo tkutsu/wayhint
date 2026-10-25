@@ -7,6 +7,8 @@
 //! turns key presses into [`Input`]s and draws whatever [`Selector`] says
 //! is still possible.
 
+use std::collections::HashMap;
+
 use crate::{
     action::{Act, Action, Mods},
     geometry::Point,
@@ -67,13 +69,18 @@ fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
 /// splits one label into `size`, so all but one keep theirs.
 pub fn relabel(kept: &[Option<&[usize]>], size: usize) -> Vec<Vec<usize>> {
     let all = all_labels(kept.len(), size);
+    let index: HashMap<&[usize], usize> = all
+        .iter()
+        .enumerate()
+        .map(|(at, l)| (l.as_slice(), at))
+        .collect();
     let mut free = vec![true; all.len()];
     // `mem::replace` marks the label taken and says whether it was free:
     // a second target with the same old label takes a free one instead.
     let claimed: Vec<Option<usize>> = kept
         .iter()
         .map(|label| {
-            let at = all.iter().position(|l| Some(l.as_slice()) == *label)?;
+            let at = *index.get(label.as_ref()?)?;
             std::mem::replace(&mut free[at], false).then_some(at)
         })
         .collect();
