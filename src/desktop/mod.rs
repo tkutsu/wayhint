@@ -45,8 +45,10 @@ pub use self::{
     surfaces::Stack,
 };
 use crate::{
+    geometry::{Point, Rect},
     pixels::{self, Detector, Found},
     snapshot::{Read, Snapshot, Target},
+    space::Space,
 };
 
 /// How long the re-check may take: one object, four small requests.
@@ -59,6 +61,9 @@ const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 /// How long a window's picture may take, connecting included: the
 /// spike's took 6 to 12 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The patch a document body's tag sits on, as a terminal's, in logical px.
+const BODY_TAG: (i32, i32) = (36, 24);
 
 /// A connection to the accessibility bus plus the runtime its calls run on.
 pub struct Desktop {
@@ -249,9 +254,10 @@ impl Desktop {
 
     /// Capture what labels may cover separately from target detection. An
     /// unreadable window stays fully protected instead of guessing it is blank.
+    /// The same picture puts each document body's tag in its clearest spot.
     pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor) {
         let mut obstacles = Vec::new();
-        for scanned in &snapshot.windows {
+        for (index, scanned) in snapshot.windows.iter().enumerate() {
             let window = &scanned.window;
             if window.rect.intersect(monitor.rect).is_none() {
                 continue;
@@ -267,26 +273,30 @@ impl Desktop {
                 };
                 let (frame, scale) =
                     pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
-                #[allow(clippy::cast_possible_truncation)]
-                let rects = crate::space::Space::pixels(&frame)
-                    .obstacles()
-                    .into_iter()
-                    .map(|r| {
-                        let x = (f64::from(r.x) / scale).floor() as i32;
-                        let y = (f64::from(r.y) / scale).floor() as i32;
-                        let right = (f64::from(r.right()) / scale).ceil() as i32;
-                        let bottom = (f64::from(r.bottom()) / scale).ceil() as i32;
-                        crate::geometry::Rect::new(x, y, right - x, bottom - y)
-                            .offset(window.rect.origin())
-                    })
-                    .collect::<Vec<_>>();
-                Ok(rects)
+                Ok((Space::pixels(&frame), scale))
             })();
-            match captured {
-                Ok(rects) => obstacles.extend(rects),
+            let origin = window.rect.origin();
+            match &captured {
+                #[allow(clippy::cast_possible_truncation)]
+                Ok((space, scale)) => obstacles.extend(space.obstacles().into_iter().map(|r| {
+                    let x = (f64::from(r.x) / scale).floor() as i32;
+                    let y = (f64::from(r.y) / scale).floor() as i32;
+                    let right = (f64::from(r.right()) / scale).ceil() as i32;
+                    let bottom = (f64::from(r.bottom()) / scale).ceil() as i32;
+                    Rect::new(x, y, right - x, bottom - y).offset(origin)
+                })),
                 Err(_) => obstacles.push(window.rect),
             }
+            for target in snapshot
+                .targets
+                .iter_mut()
+                .filter(|t| t.window == index && filter::is_body(&t.role, t.editable))
+            {
+                focus_body(target, origin, captured.as_ref().ok());
+            }
         }
+        // A body's click moved off its middle.
+        snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
         // Complete small controls, including flat interiors. Large parent
         // containers (tab rows, panes) leave their blank body available.
         obstacles.extend(
@@ -413,6 +423,38 @@ pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
     });
     // A tag that moved onto a line may be out of reading order now.
     snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
+}
+
+/// Shrinks a document body's tag to the clearest tag-sized patch nearest
+/// its middle, and clicks there: an empty cell of a sheet, a blank stretch
+/// of a page. Grid lines are ink too, but every empty cell has the same
+/// few, so the nearest empty one still wins. `picture` is the window's at
+/// some pixels per logical pixel, whose corner is at `origin`; without
+/// one, the middle.
+#[allow(clippy::cast_possible_truncation)]
+fn focus_body(target: &mut Target, origin: Point, picture: Option<&(Space, f64)>) {
+    let body = target.visible;
+    let (w, h) = (BODY_TAG.0.min(body.w), BODY_TAG.1.min(body.h));
+    let middle = body.center();
+    let mut patch = Rect::new(middle.x - w / 2, middle.y - h / 2, w, h);
+    if let Some((space, scale)) = picture {
+        let pixel = |v: i32| (f64::from(v) * scale).round() as i32;
+        let (pw, ph) = (pixel(w), pixel(h));
+        let area = body.inset(4);
+        let (x, y) = (pixel(area.x - origin.x), pixel(area.y - origin.y));
+        let corners = Rect::new(x, y, pixel(area.w) - pw, pixel(area.h) - ph);
+        let aim = Point::new(pixel(middle.x - origin.x), pixel(middle.y - origin.y));
+        let distance = |r: Rect| (r.center().x - aim.x).abs() + (r.center().y - aim.y).abs();
+        if corners.w >= 0
+            && corners.h >= 0
+            && let Some(r) = space.clearest(corners, pw, ph, distance)
+        {
+            let logical = |v: i32| (f64::from(v) / scale).round() as i32;
+            patch = Rect::new(logical(r.x) + origin.x, logical(r.y) + origin.y, w, h);
+        }
+    }
+    target.visible = patch;
+    target.hit = patch.center();
 }
 
 /// Match executable basenames as well as classes; terminal profiles often
@@ -554,5 +596,84 @@ mod tests {
         let mut snapshot = Snapshot::build(1, 0, [read()]);
         keep_visible(&mut snapshot, &stack(vec![below.clone(), big]), &monitor);
         assert_eq!(snapshot.targets, []);
+    }
+
+    fn sheet(visible: Rect) -> Target {
+        Target {
+            object: None,
+            window: 0,
+            rect: visible,
+            visible,
+            hit: visible.center(),
+            role: "document spreadsheet".into(),
+            name: String::new(),
+            editable: true,
+            clips: Vec::new(),
+            opens: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_sheet_tag_goes_to_the_empty_cell_nearest_its_middle() {
+        // A window at 100,50 whose sheet starts 80 px down: cells 80x20,
+        // with text in the two around the middle (320,280 in the picture).
+        let origin = Point::new(100, 50);
+        let body = Rect::new(100, 130, 640, 400);
+        let text = [Rect::new(244, 283, 70, 12), Rect::new(324, 283, 70, 12)];
+        let rows = (80..=480).step_by(20).map(|y| Rect::new(0, y, 640, 1));
+        let columns = (0..=640).step_by(80).map(|x| Rect::new(x, 80, 1, 400));
+        let ink: Vec<Rect> = rows.chain(columns).chain(text).collect();
+        let picture = (Space::rectangles(Rect::new(0, 0, 800, 600), &ink), 1.0);
+
+        let mut target = sheet(body);
+        focus_body(&mut target, origin, Some(&picture));
+        let patch = target.visible;
+        assert_eq!((patch.w, patch.h), BODY_TAG);
+        assert_eq!(target.hit, patch.center());
+        assert_eq!(patch.intersect(body), Some(patch), "inside the sheet");
+        let in_picture = Rect::new(patch.x - origin.x, patch.y - origin.y, patch.w, patch.h);
+        assert!(text.iter().all(|t| t.intersect(in_picture).is_none()));
+        let middle = body.center();
+        let off = (target.hit.x - middle.x).abs() + (target.hit.y - middle.y).abs();
+        assert!(off <= 60, "an empty cell next to the text, {off} px off");
+    }
+
+    #[test]
+    fn calc_tag_sits_on_an_empty_cell_or_the_least_busy_one() {
+        // Calc at 0,38 (2026-10-23): data in A1:E19 at the top left, the
+        // rest of the sheet empty.
+        let frame = pixels::tests::load(std::path::Path::new("tests/fixtures/calc.png"));
+        let picture = (Space::pixels(&frame), 1.0);
+        let origin = Point::new(0, 38);
+        let ink = |r: Rect| picture.0.ink(r.offset(Point::new(0, -38)));
+        let middle_patch = |body: Rect| {
+            let c = body.center();
+            Rect::new(c.x - 18, c.y - 12, 36, 24)
+        };
+        let data = Rect::new(45, 208, 220, 320);
+        for (body, reach) in [(Rect::new(45, 208, 2438, 1168), 100), (data, 400)] {
+            let mut target = sheet(body);
+            focus_body(&mut target, origin, Some(&picture));
+            let patch = target.visible;
+            assert_eq!(patch.intersect(body), Some(patch), "inside the sheet");
+            assert!(
+                ink(patch) <= ink(middle_patch(body)),
+                "no busier than the middle"
+            );
+            let middle = body.center();
+            let off = (target.hit.x - middle.x).abs() + (target.hit.y - middle.y).abs();
+            assert!(off <= reach, "{off} px from the middle");
+            if body != data {
+                assert!(patch.intersect(data).is_none(), "off the data");
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_without_a_picture_is_tagged_and_clicked_in_its_middle() {
+        let mut target = sheet(Rect::new(0, 0, 400, 300));
+        focus_body(&mut target, Point::new(0, 0), None);
+        assert_eq!(target.visible, Rect::new(182, 138, 36, 24));
+        assert_eq!(target.hit, Point::new(200, 150));
     }
 }

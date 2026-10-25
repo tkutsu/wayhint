@@ -1,5 +1,6 @@
 //! Clear space in a window: coarse ink cells and constant-time rectangle
-//! queries. Both terminal focus hints and displaced labels use this map.
+//! queries. Terminal and document focus hints and displaced labels use
+//! this map.
 
 // Frame coordinates fit i32; signed values are clipped before indexing.
 #![allow(
@@ -121,6 +122,29 @@ impl Space {
             }
         }
         false
+    }
+
+    /// The `w`x`h` patch with the least ink whose corner lies in `corners`
+    /// (edges included, every 4 px), the lowest `cost` among equals. Rows
+    /// go bottom to top, so an exact tie takes the lower patch.
+    pub fn clearest(
+        &self,
+        corners: Rect,
+        w: i32,
+        h: i32,
+        cost: impl Fn(Rect) -> i32,
+    ) -> Option<Rect> {
+        let mut best = None;
+        for y in (corners.y..=corners.bottom()).rev().step_by(CELL) {
+            for x in (corners.x..=corners.right()).step_by(CELL) {
+                let r = Rect::new(x, y, w, h);
+                let score = (self.ink(r), cost(r));
+                if best.as_ref().is_none_or(|(old, _)| score < *old) {
+                    best = Some((score, r));
+                }
+            }
+        }
+        best.map(|(_, r)| r)
     }
 
     /// Horizontal occupied runs for snapshot replay, coalesced vertically.

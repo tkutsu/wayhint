@@ -189,4 +189,4 @@ fn words(frame: &Frame, policy: &Policy) -> Vec<Corners> {
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;
