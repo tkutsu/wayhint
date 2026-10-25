@@ -155,6 +155,8 @@ text = "#ffffffff"
 matched = "#ffffff66"   # letters already typed
 background = "#1e1e2ef0"
 border = "#d0d0d0ff"
+position = "bottom-right"  # on the target: center, top, bottom, left, right, or a corner
+offset = [0, 0]         # px from there, right and down
 ```
 
 Keys are read with your keyboard's own keymap, the one the compositor

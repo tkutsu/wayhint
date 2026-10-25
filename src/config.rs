@@ -723,6 +723,7 @@ mod tests {
         assert!(err("[keys]\nalphabet = \"aA\"").contains("needs Shift"));
         assert!(err("[keys]\nalphabet = \"aa\"").contains("same key"));
         assert!(err("[keys]\nalphabet = \"a\"").contains("at least two"));
+        assert!(err("[style]\nposition = \"middle\"").contains("bottom-right"));
         assert!(err("[keys]\nalphabet = \"aé\"").contains("isn't a key"));
         assert!(
             err("[keys]\nalphabet = \"ab\"\n[keys.aliases]\n\";\" = \"c\"")
@@ -894,7 +895,7 @@ mod tests {
     #[test]
     fn rendered_config_reads_back_the_same() {
         let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
-                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\n[pointer]\nafter = \"leave\"\nnudge = 9";
+                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\nposition = \"top\"\noffset = [3, -2]\n[pointer]\nafter = \"leave\"\nnudge = 9";
         let config = Config::parse(text, &us()).unwrap();
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.alphabet, config.alphabet);

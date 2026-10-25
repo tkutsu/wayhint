@@ -57,6 +57,11 @@ pub struct Target {
     pub window: usize,
     /// The whole box, as the app reports it.
     pub rect: Rect,
+    /// The part of `rect` in view, inside its window and scroll areas:
+    /// what the tag is placed on. Empty in a snapshot saved before it was
+    /// kept; [`Target::shown`] reads `rect` then.
+    #[serde(default)]
+    pub visible: Rect,
     /// Where a click goes: the centre of the box's visible part.
     pub hit: Point,
     pub role: String,
@@ -73,6 +78,17 @@ pub struct Target {
     /// these lines instead of acting (see [`Snapshot::open`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opens: Vec<Rect>,
+}
+
+impl Target {
+    /// The box its tag is placed on: the part in view.
+    pub fn shown(&self) -> Rect {
+        if self.visible.is_empty() {
+            self.rect
+        } else {
+            self.visible
+        }
+    }
 }
 
 /// A target as [`Snapshot::survivors`] recognises it across scans.
@@ -134,11 +150,13 @@ impl Snapshot {
                 let node = &tree.nodes[kept.node];
                 // The filter only keeps nodes with a box and details.
                 let bounds = node.bounds.unwrap_or(kept.visible);
+                let visible = kept.visible.offset(origin);
                 Target {
                     object: Some(node.object.clone()),
                     window,
                     rect: bounds.offset(origin),
-                    hit: kept.visible.offset(origin).center(),
+                    visible,
+                    hit: visible.center(),
                     role: node.role.clone(),
                     name: node
                         .details
@@ -254,6 +272,7 @@ fn pixel_target(window: usize, rect: Rect, role: &str) -> Target {
         object: None,
         window,
         rect,
+        visible: rect,
         hit: rect.center(),
         role: role.to_string(),
         name: String::new(),

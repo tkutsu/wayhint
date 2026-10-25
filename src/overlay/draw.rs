@@ -18,7 +18,7 @@ use tiny_skia::{
 use crate::{
     geometry::Point,
     overlay::font,
-    style::{Color, Style},
+    style::{Color, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -39,8 +39,8 @@ pub struct Frame {
     pub dots: Vec<Dot>,
 }
 
-/// Where a nudged command lands, `at`, and the point it was nudged from:
-/// its tag's hit point, or the pointer for `Space`.
+/// Where a nudged command lands, `at`, and where its line starts, `from`:
+/// its tag, or the pointer for `Space`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dot {
     pub from: Point,
@@ -50,8 +50,11 @@ pub struct Dot {
 /// One tag to draw, in overlay coordinates (the monitor's top-left is 0, 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tag {
-    /// Where the tag's centre goes: the target's hit point.
+    /// Where the tag goes: that point on its target's box.
     pub at: Point,
+    /// Which of the tag's own points sits on `at`: its bottom-right corner
+    /// for `BottomRight`, so the tag lies up and left of it.
+    pub position: Position,
     pub text: String,
     /// How many leading letters are already typed (drawn dimmed).
     pub typed: usize,
@@ -167,7 +170,7 @@ impl Painter {
 
     fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
         let size = self.size(&tag.text);
-        let Some(rect) = place(tag.at, size, area) else {
+        let Some(rect) = place(tag.at, tag.position, size, area) else {
             return;
         };
         let style = &self.style;
@@ -254,14 +257,21 @@ impl Painter {
     }
 }
 
-/// Where a tag of `size` centred on `at` goes, nudged to stay `EDGE` px
-/// inside an area of `area`. `None` only if the area is too small to hold it.
+/// Where a tag of `size` goes with its `position` point on `at`, nudged to
+/// stay `EDGE` px inside an area of `area`. `None` only if the area is too
+/// small to hold it.
 #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
-fn place(at: Point, (w, h): (f32, f32), (area_w, area_h): (f32, f32)) -> Option<Rect> {
-    let x = (at.x as f32 - w / 2.0)
+fn place(
+    at: Point,
+    position: Position,
+    (w, h): (f32, f32),
+    (area_w, area_h): (f32, f32),
+) -> Option<Rect> {
+    let (across, down) = position.halves();
+    let x = (at.x as f32 - w * across as f32 / 2.0)
         .round()
         .clamp(EDGE, (area_w - w - EDGE).max(EDGE));
-    let y = (at.y as f32 - h / 2.0)
+    let y = (at.y as f32 - h * down as f32 / 2.0)
         .round()
         .clamp(EDGE, (area_h - h - EDGE).max(EDGE));
     Rect::from_xywh(x, y, w, h)
@@ -357,16 +367,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tags_centre_on_their_point() {
-        let r = place(Point::new(100, 50), (20.0, 10.0), (800.0, 600.0)).unwrap();
-        assert_eq!((r.x(), r.y()), (90.0, 45.0));
+    fn tags_put_their_position_on_their_point() {
+        let at = |position| {
+            let r = place(Point::new(100, 50), position, (20.0, 10.0), (800.0, 600.0)).unwrap();
+            (r.x(), r.y())
+        };
+        assert_eq!(at(Position::Center), (90.0, 45.0));
+        assert_eq!(at(Position::TopLeft), (100.0, 50.0));
+        assert_eq!(at(Position::Bottom), (90.0, 40.0));
+        assert_eq!(at(Position::BottomRight), (80.0, 40.0));
     }
 
     #[test]
     fn tags_are_nudged_inside_the_edges() {
-        let top_left = place(Point::new(0, 0), (20.0, 10.0), (800.0, 600.0)).unwrap();
+        let place = |at| place(at, Position::Center, (20.0, 10.0), (800.0, 600.0)).unwrap();
+        let top_left = place(Point::new(0, 0));
         assert_eq!((top_left.x(), top_left.y()), (EDGE, EDGE));
-        let bottom_right = place(Point::new(800, 600), (20.0, 10.0), (800.0, 600.0)).unwrap();
+        let bottom_right = place(Point::new(800, 600));
         assert_eq!(
             (bottom_right.right(), bottom_right.bottom()),
             (800.0 - EDGE, 600.0 - EDGE)
