@@ -121,7 +121,8 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
             eprintln!("wayhint: {} where the pointer is", act.action.name());
         }
         Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),
-        Pick::Leave => {}
+        // Only a run follows workspaces: tags from a file stay put.
+        Pick::Leave | Pick::Rescan => {}
     }
     Ok(())
 }
