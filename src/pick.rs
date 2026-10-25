@@ -13,7 +13,7 @@ use crate::{
     keys::{Key, KeyCode},
     overlay::{Dot, Event, Frame, Overlay, Tag},
     search::{self, Chosen},
-    selection::{Input, Selector, Step, relabel},
+    selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
     style::Position,
     text::{Span, Text},
@@ -94,7 +94,7 @@ pub trait Source {
 ///
 /// Every `[scan] refresh` with no pick, `source` scans again and the tags
 /// follow: a target found again keeps its tag, and what was typed for it
-/// stays typed (see `selection::relabel`).
+/// stays typed (see `Selector::relabel`).
 ///
 /// A block's tag (a pixel target with lines in `opens`) opens it instead
 /// of picking: `shown` becomes the block opened, its lines filtered by
@@ -238,13 +238,7 @@ fn rescan(
     };
     fresh.merge_nearby(config.merge_distance);
     let changed = targets_changed(shown, &fresh);
-    let kept: Vec<Option<&[usize]>> = fresh
-        .survivors(shown)
-        .into_iter()
-        .map(|was| was.map(|i| selector.labels()[i].as_slice()))
-        .collect();
-    let labels = relabel(&kept, config.alphabet.len());
-    selector.relabel(labels);
+    selector.relabel(&fresh.survivors(shown), config.alphabet.len());
     *shown = fresh;
     Ok(Some(changed))
 }

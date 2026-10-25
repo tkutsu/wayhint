@@ -227,18 +227,36 @@ impl Selector {
     pub fn reopen(&mut self, count: usize, alphabet_size: usize) {
         self.labels = labels(count, alphabet_size);
         self.typed.clear();
+        self.armed_at = 0;
     }
 
-    /// The same command on the targets of a new scan, with `labels` from
-    /// [`relabel`]: everything typed stays, as the tags it was typed for
-    /// kept their labels. Letters no longer leading to a tag go (their
-    /// targets left), and a verb typed after them stays.
-    pub fn relabel(&mut self, labels: Vec<Vec<usize>>) {
-        self.labels = labels;
+    /// The same command on the targets of a new scan, where `survivors[i]`
+    /// is the index target `i` had before, if it was there (from
+    /// `Snapshot::survivors`): each keeps its label where it can (see
+    /// [`relabel`]), and everything typed stays while a label goes on from
+    /// it. The letters go if none does, or if one more letter would pick a
+    /// tag new under them: a key already on its way, typed for a tag that
+    /// left, must not land on another. A verb typed after them stays.
+    pub fn relabel(&mut self, survivors: &[Option<usize>], alphabet_size: usize) {
+        let kept: Vec<Option<&[usize]>> = survivors
+            .iter()
+            .map(|was| was.map(|i| self.labels[i].as_slice()))
+            .collect();
+        let labels = relabel(&kept, alphabet_size);
         // Labels are prefix-free, so one equal to `typed` means none goes
         // on from it, and the next letter could pick nothing.
-        let leads = |l: &Vec<usize>| l.len() > self.typed.len() && l.starts_with(&self.typed);
-        if !self.labels.iter().any(leads) {
+        let after = |label: &[usize]| {
+            label
+                .strip_prefix(self.typed.as_slice())
+                .map_or(0, <[usize]>::len)
+        };
+        let leads = labels.iter().any(|label| after(label) > 0);
+        let instant = labels
+            .iter()
+            .zip(&kept)
+            .any(|(label, was)| *was != Some(label.as_slice()) && after(label) == 1);
+        self.labels = labels;
+        if !leads || instant {
             self.typed.clear();
             self.armed_at = 0;
         }
@@ -678,17 +696,60 @@ mod tests {
         let mut s = five();
         s.press(verb(Action::Right));
         s.press(letter(3));
-        // `fa` and `fs` are still there, in another order.
-        s.relabel(vec![vec![3, 1], vec![0], vec![3, 0]]);
+        // `fs`, `a` and `fa` are still there, in another order, and two
+        // new targets came: fs a fa s d.
+        s.relabel(&[Some(4), Some(0), Some(3), None, None], 4);
         assert_eq!(s.typed(), [3]);
         assert_eq!(s.press(letter(0)), picked(2, Action::Right));
         s.press(letter(3));
         // Every `f…` target left: the letters go, the verb stays.
         s.press(verb(Action::Right));
-        s.relabel(vec![vec![0], vec![1], vec![3]]);
+        s.relabel(&[Some(1), Some(3), None], 4);
         assert_eq!((s.typed(), s.armed()), (&[][..], Some(Action::Right)));
         s.press(Input::Backspace);
         assert_eq!(s.armed(), None, "Backspace takes the verb back");
+    }
+
+    #[test]
+    fn a_rescan_drops_letters_one_key_from_a_new_tag() {
+        // a ba bb over two letters, `b` typed, and both `b…` targets left:
+        // the two new ones take `ba` and `bb`, and must not be picked by
+        // the letter that finishes what was typed for the old ones.
+        let mut s = Selector::new(3, 2, Action::Left);
+        s.press(letter(1));
+        s.relabel(&[Some(0), None, None], 2);
+        assert_eq!(s.labels(), [vec![0], vec![1, 0], vec![1, 1]]);
+        assert_eq!(s.typed(), [0usize; 0]);
+        // a s d fa fs, `f` typed: `fa` is still there, but a new target
+        // took `fs`, so one key could still land on it.
+        let mut s = five();
+        s.press(letter(3));
+        s.relabel(&[Some(0), Some(1), Some(2), Some(3), None], 4);
+        assert_eq!(s.typed(), [0usize; 0]);
+    }
+
+    #[test]
+    fn a_rescan_keeps_letters_new_tags_need_two_more_keys_for() {
+        // aa aba abb baa bab bba bbb, `b` typed, and every `b…` target
+        // left: the new ones under `b` are two keys away, so no key
+        // already typed can pick one.
+        let mut s = Selector::new(7, 2, Action::Left);
+        s.press(letter(1));
+        s.relabel(&[Some(0), Some(1), Some(2), None, None, None, None], 2);
+        assert_eq!(s.labels()[3], [1, 0, 0]);
+        assert_eq!(s.typed(), [1]);
+    }
+
+    #[test]
+    fn backspace_takes_back_a_verb_typed_between_a_blocks_letters() {
+        // `f r` then the block's `a`: `pick` reopens what was typed before
+        // that last letter, which still has `f` in it.
+        let mut s = five();
+        s.press(letter(3));
+        s.press(verb(Action::Right));
+        s.reopen(2, 4);
+        s.press(Input::Backspace);
+        assert_eq!(s.armed(), None, "the verb was the last thing kept");
     }
 
     proptest! {

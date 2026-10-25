@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// A point. `i32` because global coordinates can be negative (a monitor to
 /// the left of the primary one).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
