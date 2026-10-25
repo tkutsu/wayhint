@@ -10,7 +10,7 @@
 //! small "user data" type implementing `Dispatch2`, which is where their
 //! events land: [`NoEvents`], [`ImeEvents`], [`Synced`], [`Answered`].
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Instant};
 
 use smithay_client_toolkit::{
     compositor::CompositorHandler,
@@ -55,6 +55,7 @@ use crate::{
     overlay::{
         Event, draw,
         gate::{KeyGate, Seen},
+        hold::Holds,
     },
 };
 
@@ -93,6 +94,8 @@ pub struct State {
     pub gate: KeyGate,
     /// The keys this grab saw go down, to tell the app's releases apart.
     pub seen: Seen,
+    /// The arrows held down, for their repeats.
+    pub holds: Holds,
     /// Passes the app what the input-method grab takes from it and wayhint
     /// doesn't use (see `keyboard.rs`). Made before the first grab, so a
     /// key let go the moment the grab starts still reaches the app.
@@ -152,6 +155,7 @@ impl State {
     /// grab, so while wayhint isn't reading keys no app sees an input method
     /// that would never answer it.
     pub fn release_keys(&mut self) {
+        self.holds.clear();
         match std::mem::replace(&mut self.grab, Grab::Released) {
             Grab::InputMethod { method, grab } => {
                 grab.release();
@@ -206,6 +210,10 @@ impl State {
     /// Modifier keys come through here too, as keys nothing in the config
     /// is, so `pick` skips them; what they hold arrives as `modifiers`. The
     /// release of a key pressed before the grab goes on to the app.
+    ///
+    /// An arrow acts as it goes down, and again while held (`hold.rs`):
+    /// it never ends the pick, so acting early leaves no release behind
+    /// for the app. Every other key acts as it's let go.
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
         if pressed {
@@ -214,7 +222,10 @@ impl State {
                 code,
                 shift: self.held.shift,
             };
-            self.gate.press(key, self.held);
+            if self.gate.press(key, self.held) && code.is_arrow() {
+                self.events.push_back(Event::Key(key, self.held));
+                self.holds.press(key, self.held, Instant::now());
+            }
             return;
         }
         if self.seen.release(code)
@@ -222,7 +233,10 @@ impl State {
         {
             passthrough.release(code);
         }
-        if let Some((key, mods)) = self.gate.release(code) {
+        let held = self.holds.release(code);
+        if let Some((key, mods)) = self.gate.release(code)
+            && !held
+        {
             // Acting on release: press and release were both swallowed, so
             // nothing reaches the app once the grab ends.
             self.events.push_back(Event::Key(key, mods));
