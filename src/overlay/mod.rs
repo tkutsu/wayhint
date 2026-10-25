@@ -288,6 +288,11 @@ impl Overlay {
         Ok(())
     }
 
+    /// Whether an arrow is held down, ticking.
+    pub fn holding(&self) -> bool {
+        !self.state.holds.is_empty()
+    }
+
     /// Which way keys come in, for messages.
     pub fn keyboard_mode(&self) -> &'static str {
         match self.state.grab {
