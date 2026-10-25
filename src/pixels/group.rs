@@ -143,8 +143,9 @@ pub fn group(frame: &Frame, words: &[Corners], policy: &Policy) -> Found {
 /// Groups a terminal's `words`. Its text sits in lines on a grid, in any
 /// colour, and none of it is a control: each line is one phrase, or one
 /// per column where three blank cells or more part them; lines stacked
-/// into a block get one tag, and a line alone is a tag. Boxes that aren't
-/// text, such as rules and frames drawn in box characters, are dropped.
+/// into a block get one tag, and a line alone is a tag, as is a cursor.
+/// Boxes that aren't text, such as rules and frames drawn in box
+/// characters, are dropped.
 pub fn terminal(frame: &Frame, words: &[Corners]) -> Found {
     let bands = bands(words);
     if bands.is_empty() {
@@ -170,7 +171,12 @@ pub fn terminal(frame: &Frame, words: &[Corners]) -> Found {
     }
     let media = texture::media(frame);
     phrases.retain(|&p| !media.iter().any(|&r| inside(centre(p), r)));
+    // The line holding a cursor is where you type: it leaves its block,
+    // and the cursor is its tag, so a click there leaves the cursor be.
+    let cursors = cursors(frame, h);
+    phrases.retain(|&p| !cursors.iter().any(|&c| inside(centre(c), p)));
     let mut found = Found {
+        direct: cursors,
         media,
         ..Found::default()
     };
@@ -204,6 +210,65 @@ fn bands(words: &[Corners]) -> Vec<(Corners, Vec<Corners>)> {
         }
     }
     out
+}
+
+/// A terminal's cursors: boxes one cell big in one colour, solid (the
+/// focused window's) or hollow (any other's), each side ending where the
+/// box does. A cell is a line `h` tall or taller, under twice that, and
+/// under three quarters as wide as it is tall. The gaps glyphs leave are
+/// boxes like that too, in the background's colour, which no cursor is.
+fn cursors(frame: &Frame, h: i32) -> Vec<Corners> {
+    let (w, ht) = (frame.width as i32, frame.height as i32);
+    let (pixels, _) = frame.rgb.as_chunks::<3>();
+    let at = |x: i32, y: i32| {
+        ((0..w).contains(&x) && (0..ht).contains(&y))
+            .then(|| pixels[y as usize * frame.width + x as usize])
+    };
+    let bg = background(pixels);
+    // How far `c` runs down from x, y, up to 2h.
+    let down = |x: i32, y: i32, c| {
+        (y..ht.min(y + 2 * h))
+            .take_while(|&y| at(x, y) == c)
+            .count()
+    };
+    let mut out = Vec::new();
+    for (y, row) in (0..).zip(pixels.chunks_exact(frame.width)) {
+        let mut x0 = 0;
+        for run in row.chunk_by(|a, b| a == b) {
+            let (c, x1) = (Some(run[0]), x0 + run.len() as i32);
+            if c != Some(bg)
+                && (3..2 * h).contains(&(x1 - x0))
+                && at(x0, y - 1) != c
+                && at(x1 - 1, y - 1) != c
+            {
+                let side = down(x0, y, c) as i32;
+                let bottom = y + side - 1;
+                if (h..2 * h).contains(&side)
+                    && 4 * (x1 - x0) < 3 * side
+                    && down(x1 - 1, y, c) as i32 == side
+                    && (x0..x1).all(|x| at(x, bottom) == c)
+                    && at(x0 - 1, bottom) != c
+                    && at(x1, bottom) != c
+                {
+                    out.push([x0, y, x1, y + side]);
+                }
+            }
+            x0 = x1;
+        }
+    }
+    out
+}
+
+/// The colour most of `pixels` are, from every 61st: a prime, so the
+/// sample doesn't keep to a few columns.
+fn background(pixels: &[[u8; 3]]) -> [u8; 3] {
+    let mut seen: HashMap<[u8; 3], usize> = HashMap::new();
+    for &p in pixels.iter().step_by(61) {
+        *seen.entry(p).or_default() += 1;
+    }
+    seen.into_iter()
+        .max_by_key(|&(c, n)| (n, c))
+        .map_or([0; 3], |(c, _)| c)
 }
 
 /// The words whose centres lie in `p`, in their order.
@@ -813,5 +878,41 @@ mod tests {
             }]
         );
         assert_eq!(found.direct, [[200, 44, 240, 57], [10, 120, 80, 133]]);
+    }
+
+    #[test]
+    fn a_cursor_is_its_lines_tag() {
+        let (w, h) = (120, 60);
+        let mut rgb = vec![20; w * h * 3];
+        let mut paint = |r: Corners, hollow: bool| {
+            for y in r[1]..r[3] {
+                for x in r[0]..r[2] {
+                    let edge = x == r[0] || x == r[2] - 1 || y == r[1] || y == r[3] - 1;
+                    if edge || !hollow {
+                        let i = (y as usize * w + x as usize) * 3;
+                        rgb[i..i + 3].fill(200);
+                    }
+                }
+            }
+        };
+        // A hollow cursor after a word, and a solid one on the next line.
+        paint([30, 10, 37, 27], true);
+        paint([60, 30, 67, 47], false);
+        // Three cells wide, and shorter than a line: neither is a cursor.
+        paint([80, 30, 101, 47], false);
+        paint([10, 50, 17, 58], false);
+        let frame = Frame {
+            width: w,
+            height: h,
+            rgb,
+        };
+        let words = [[10, 12, 28, 25], [30, 10, 37, 27], [10, 31, 50, 44]];
+        let found = terminal(&frame, &words);
+        // The first line leaves the block it made with the second.
+        assert_eq!(
+            found.direct,
+            [[30, 10, 37, 27], [60, 30, 67, 47], [10, 30, 50, 45]]
+        );
+        assert_eq!(found.blocks, []);
     }
 }
