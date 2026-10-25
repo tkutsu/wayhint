@@ -12,6 +12,7 @@ use crate::{
     overlay::{Dot, Event, Frame, Overlay, Tag},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
+    style::Position,
 };
 
 /// How far above the monitor's bottom edge the status pill sits, in px.
@@ -179,6 +180,9 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 /// for a verb that has no key (`--verb`) and for `Space`, which uses no
 /// tag. The pill is drawn as one more tag: same look, no new drawing code.
 ///
+/// A tag sits at `[style] position` on its target's visible box, moved by
+/// `[style] offset`. The pill stays centred.
+///
 /// A nudge leaves the tags where they are and puts a dot where each one
 /// lands, one for `Space` too, at the pointer: a tag moved by the arrows
 /// would cover the very spot being aimed at. A line joins each dot to its
@@ -197,10 +201,16 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
         .zip(scene.targets)
         .filter(|(label, _)| selector.matches(label))
         .collect();
+    let style = &config.style;
+    let spot = |target: &Target| {
+        let [x, y] = style.offset;
+        style.position.on(target.shown()).offset(Point::new(x, y))
+    };
     let mut tags: Vec<Tag> = open
         .iter()
         .map(|(label, target)| Tag {
-            at: target.hit,
+            at: spot(target),
+            position: style.position,
             text: prefix
                 .chars()
                 .chain(label.iter().map(|&i| upper(letters[i].label)))
@@ -211,6 +221,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     if let Some(action) = selector.armed() {
         tags.push(Tag {
             at: Point::new(scene.screen.center().x, scene.screen.bottom() - PILL_LIFT),
+            position: Position::Center,
             text: action.name().into(),
             typed: 0,
         });
@@ -219,14 +230,16 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     let dots = if nudge == Point::default() {
         Vec::new()
     } else {
-        let points = open.iter().map(|(_, target)| target.hit);
+        // Each line runs from the tag to where its click lands: from its
+        // hit point, nudged.
+        let starts = open.iter().map(|(_, target)| (spot(target), target.hit));
         // A pointer on another monitor draws nothing here, as it should:
         // `lands` keeps its dot on that monitor, off this overlay.
-        points
-            .chain(scene.pointer)
-            .map(|from| Dot {
+        starts
+            .chain(scene.pointer.map(|p| (p, p)))
+            .map(|(from, hit)| Dot {
                 from,
-                at: lands(from, nudge, &[scene.screen]),
+                at: lands(hit, nudge, &[scene.screen]),
             })
             .collect()
     };
@@ -365,6 +378,7 @@ mod tests {
             }),
             window: 0,
             rect: Rect::new(x - 20, 90, 40, 20),
+            visible: Rect::new(x - 20, 90, 40, 20),
             hit: Point::new(x, 100),
             role: "button".into(),
             name: String::new(),
@@ -387,9 +401,10 @@ mod tests {
                 .collect()
         };
         selector.press(Input::Nudge(Point::new(0, 14)));
-        assert_eq!(froms(&selector), [100, 200, 300], "nudged before typing");
+        // Lines start at the tags, in the boxes' bottom-right corners.
+        assert_eq!(froms(&selector), [120, 220, 320], "nudged before typing");
         selector.press(Input::Letter(1, Mods::NONE));
-        assert_eq!(froms(&selector), [200, 300], "b leaves ba and bb");
+        assert_eq!(froms(&selector), [220, 320], "b leaves ba and bb");
         selector.press(Input::Nudge(Point::new(14, 0)));
         let dots = frame(&selector, &config, &scene).dots;
         assert_eq!(

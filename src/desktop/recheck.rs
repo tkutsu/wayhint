@@ -159,6 +159,7 @@ mod tests {
             }),
             window: 0,
             rect: Rect::new(110, 60, 80, 30),
+            visible: Rect::new(110, 60, 80, 30),
             hit: Point::new(150, 75),
             role: "button".into(),
             name: "OK".into(),
