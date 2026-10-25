@@ -45,6 +45,11 @@ impl KeyCode {
         Self(code)
     }
 
+    /// Whether this is one of the four arrows, which nudge and repeat.
+    pub const fn is_arrow(self) -> bool {
+        matches!(self, Self::UP | Self::DOWN | Self::LEFT | Self::RIGHT)
+    }
+
     /// The code as the virtual keyboard protocol takes it: evdev again.
     pub const fn evdev(self) -> u32 {
         self.0

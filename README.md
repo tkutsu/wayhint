@@ -69,7 +69,7 @@ bind = SUPER, slash, exec, wayhint
 | `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
 | `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection |
 | `Space` | Does the default action, or the verb typed before it, where the pointer is |
-| arrows, before the tag's last letter or `Space` | Move where that one click lands, 14 px per press |
+| arrows, before the tag's last letter or `Space` | Move where that one click lands, 10 px per press; held, they keep going, faster |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
 | `Backspace` | Removes the last letter or verb typed |
 | `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
@@ -81,9 +81,11 @@ shows at the bottom of the screen, until the tag is typed. Typing another
 verb replaces it. Right Alt doesn't count as Alt, since on many layouts
 it's AltGr.
 
-Arrows let a tag click anywhere near it: `→ → ↓` then a tag clicks 28 px
-right of the control and 14 px below. A dot marks where each tag would
-land, so the tags stay readable. A move stops at the edge of its monitor.
+Arrows let a tag click anywhere near it: `→ → ↓` then a tag clicks 20 px
+right of the control and 10 px below. Hold an arrow to go further: it
+repeats after a quarter of a second and speeds up to four times as fast. A
+dot marks where each tag would land, so the tags stay readable. A move
+stops 5 px inside the edge of its monitor, so its dot stays in sight.
 It is for that one click, and the repeat key does it again. With `Space`,
 the dot follows the pointer at each key you press, and the click lands on
 the dot.
@@ -140,7 +142,7 @@ repeat = "q"            # the last command again; no key unless you set one
 
 [pointer]
 after = "restore"       # cursor back after a click; "leave" keeps it on the target
-nudge = 14              # px one arrow press moves a click
+nudge = 10              # px one arrow press moves a click
 
 [pixels]
 detector = "full"       # windows with no accessibility tree: "fast", or "off"
