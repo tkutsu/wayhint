@@ -250,6 +250,17 @@ impl<'c> Walk<'c> {
         Ok(found)
     }
 
+    /// When the bus started: its registry starts with it.
+    async fn bus_started(&self) -> Option<u64> {
+        let dbus = zbus::fdo::DBusProxy::new(self.conn).await.ok()?;
+        let registry = "org.a11y.atspi.Registry".try_into().ok()?;
+        let pid = self
+            .call(dbus.get_connection_unix_process_id(registry))
+            .await
+            .ok()?;
+        started(pid)
+    }
+
     /// The showing top-level frames of `apps`, boxed in screen coordinates.
     async fn frames(&self, apps: &[ObjectId]) -> Result<Vec<Frame>> {
         let mut frames = Vec::new();
@@ -290,8 +301,19 @@ impl<'c> Walk<'c> {
     ) -> Result<ObjectId> {
         let apps = self.find_apps(a11y, window.pid).await?;
         if apps.is_empty() {
+            // Qt apps don't rejoin a restarted bus (Qt 6.12), and Chromium and
+            // Electron apps don't join without the flag.
+            let bus = self.bus_started().await;
+            if started(window.pid).zip(bus).is_some_and(|(app, bus)| app < bus) {
+                bail!(
+                    "pid {} isn't on the accessibility bus, which restarted after it started: \
+                     reopen it so wayhint can see its controls",
+                    window.pid
+                );
+            }
             bail!(
-                "pid {} isn't on the accessibility bus, so wayhint can't see its controls",
+                "pid {} isn't on the accessibility bus, so wayhint can't see its controls \
+                 (Chromium and Electron apps join it with --force-renderer-accessibility)",
                 window.pid
             );
         }
@@ -625,9 +647,28 @@ pub fn millis(d: Duration) -> f64 {
     (d.as_secs_f64() * 10_000.0).round() / 10.0
 }
 
+/// When process `pid` started, in clock ticks since boot.
+fn started(pid: u32) -> Option<u64> {
+    start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Field 22 of a `/proc/<pid>/stat` line. The name, field 2, is in
+/// parentheses and may hold spaces, so count from after it.
+fn start_time(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_time_is_field_22_even_with_spaces_in_the_name() {
+        let stat = "783639 (dolphin (x) 1) S 1 2 3 0 -1 4 5 6 7 8 9 10 11 12 20 0 4 0 \
+                    81500123 4096 100";
+        assert_eq!(start_time(stat), Some(81_500_123));
+        assert!(started(std::process::id()).is_some());
+    }
 
     const WINDOW: Rect = Rect::new(0, 0, 800, 600);
 

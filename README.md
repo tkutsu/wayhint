@@ -44,6 +44,11 @@ author's laptop, plus 10 to 25 ms for Hyprland to render the picture.
   Firefox and Dolphin were checked. Apps that are not on the bus (kitty,
   many Electron and Chromium apps started without accessibility) get tags
   from their pixels, through Hyprland's `hyprland_toplevel_export_v1`.
+  Chromium and Electron apps join the bus with
+  `--force-renderer-accessibility` (on Arch, a line in
+  `~/.config/chromium-flags.conf` or `~/.config/electron-flags.conf`). Qt
+  apps don't rejoin a bus that restarted after them; wayhint says so, and
+  reopening them fixes it.
 
 ## Build
 
