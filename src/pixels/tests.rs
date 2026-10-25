@@ -51,7 +51,7 @@ fn a_dense_grid_gets_a_tag_per_square() {
         }
     });
     for detector in [Detector::Full, Detector::Fast] {
-        let found = find(&f, detector);
+        let found = find(&f, detector, false);
         assert_eq!(found.direct.len(), 40 * 20, "{detector:?}");
         assert!(found.blocks.is_empty() && found.media.is_empty());
     }
@@ -61,11 +61,11 @@ fn a_dense_grid_gets_a_tag_per_square() {
 fn a_blank_frame_has_nothing() {
     for detector in [Detector::Full, Detector::Fast] {
         assert_eq!(
-            find(&frame(64, 48, |_, _| [30, 30, 30]), detector),
+            find(&frame(64, 48, |_, _| [30, 30, 30]), detector, false),
             Found::default()
         );
         assert_eq!(
-            find(&frame(0, 0, |_, _| [0; 3]), detector),
+            find(&frame(0, 0, |_, _| [0; 3]), detector, false),
             Found::default()
         );
     }
@@ -84,7 +84,7 @@ fn a_button_is_one_tag() {
         }
     });
     for detector in [Detector::Full, Detector::Fast] {
-        let found = find(&f, detector);
+        let found = find(&f, detector, false);
         assert_eq!(found.direct.len(), 1, "{detector:?}: {found:?}");
         let (x, y) = group::centre(found.direct[0]);
         assert!(
@@ -102,6 +102,9 @@ struct Case {
     png: String,
     full: Vec<Corners>,
     fast: Vec<Corners>,
+    /// Grouped as a terminal's text.
+    #[serde(default)]
+    terminal: bool,
 }
 
 fn found_json(found: &Found) -> serde_json::Value {
@@ -151,13 +154,13 @@ fn corpus() {
             "segment": segment::boxes(&frame),
             "grouped_full": found_json(&group::group(&frame, &case.full, &full_policy)),
             "grouped_fast": found_json(&group::group(&frame, &case.fast, &fast_policy)),
-            "find_full": found_json(&find(&frame, Detector::Full)),
-            "find_fast": found_json(&find(&frame, Detector::Fast)),
+            "find_full": found_json(&find(&frame, Detector::Full, case.terminal)),
+            "find_fast": found_json(&find(&frame, Detector::Fast, case.terminal)),
             "ms": {
                 "contour": time(&|| drop(contour::boxes(&frame))),
                 "segment": time(&|| drop(segment::boxes(&frame))),
-                "full": time(&|| drop(find(&frame, Detector::Full))),
-                "fast": time(&|| drop(find(&frame, Detector::Fast))),
+                "full": time(&|| drop(find(&frame, Detector::Full, case.terminal))),
+                "fast": time(&|| drop(find(&frame, Detector::Fast, case.terminal))),
             },
         });
         eprintln!("{}: {}", case.name, row["ms"]);

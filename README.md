@@ -163,6 +163,10 @@ half the work. It finds nearly as many controls (82% one tag away) but
 gives about 15% more tags, and 43% of its tags land on nothing clickable,
 against 33% for `"full"`.
 
+Terminals (kitty, foot, Alacritty, Ghostty, WezTerm, XTerm) are read as
+lines of text with the one-pass reading, whichever detector is set: each
+passage gets one tag, and typing it shows a tag on each of its lines.
+
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that
 is in the alphabet you wrote stays off instead, and `wayhint config` lists
