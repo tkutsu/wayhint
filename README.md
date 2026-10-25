@@ -226,11 +226,45 @@ padding = [2, 5]        # vertical, horizontal
 
 [text.style.current]    # the current match; unset fields come from [text.style]
 background = "#ff963280"
+border = "#d0d0d0ff"
+border_width = 0
+radius = 4
+padding = [2, 5]
+
+[text.input]            # the typed query; unset font/colour/box fields inherit [style]
+prefix = ""            # before the query, for example "find: "
+suffix = ""            # after the query, before the match count
+font = "Inter:bold"
+size = 13
+text = "#ffffffff"
+matched = "#ffffff66"   # the armed action's name, before the query
+background = "#1e1e2ef0"
+border = "#d0d0d0ff"
+border_width = 1
+radius = 4
+padding = [2, 5]        # vertical, horizontal
+position = "bottom"    # on the screen, independent of hint placement
+offset = [0, -48]      # px right and down from that position
 ```
 
 Text mode's boxes are neon yellow at half opacity with no border, and the
 current match's is orange, as in a browser's find bar. Their radius and
 padding come from the tags unless you set them.
+
+`[text.style.current]` controls the selected match independently: background,
+border colour and width, radius, and padding. These boxes sit over the app's
+text, which shows through their background.
+
+`[text.input]` controls the query display. Its nine screen positions are
+`top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`,
+`bottom`, and `bottom-right`. `top` and `bottom` centre it horizontally;
+`left` and `right` centre it vertically. The box keeps that alignment as
+you type. Offsets are `[x, y]` in logical pixels: positive values move it
+right and down, negative values left and up. The display stays inside the
+screen. Font, size, colours, border, radius, and padding inherit `[style]`
+unless set here; position defaults to `bottom`, offset to `[0, -48]`.
+Prefix and suffix surround the nonempty query and never affect matching.
+The action name and match count stay outside them.
 
 Keys are read with your keyboard's own keymap, the one the compositor
 gives every app, so a custom layout or a keymap file (Hyprland's

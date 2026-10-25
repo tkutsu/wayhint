@@ -25,7 +25,7 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::{Color, Mark, Marks, Style},
+    style::{Color, Input, Mark, Marks, Position, Style},
 };
 
 /// The file as written. `#[serde(default)]` lets every table and field be
@@ -46,6 +46,60 @@ struct File {
 #[serde(default, deny_unknown_fields)]
 struct FileText {
     style: FileMarks,
+    input: FileInput,
+}
+
+/// `[text.input]`: query decorations and a look independent of the tags.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileInput {
+    prefix: String,
+    suffix: String,
+    font: Option<String>,
+    size: Option<f32>,
+    text: Option<Color>,
+    matched: Option<Color>,
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+    position: Option<Position>,
+    offset: Option<[i32; 2]>,
+}
+
+impl FileInput {
+    /// Inherit the tags' look, with screen positioning instead of a target.
+    fn resolve(self, tags: &Style) -> Result<Input> {
+        let base = Input::new(tags);
+        let style = Style {
+            font: self.font.unwrap_or(base.style.font),
+            size: self.size.unwrap_or(base.style.size),
+            text: self.text.unwrap_or(base.style.text),
+            matched: self.matched.unwrap_or(base.style.matched),
+            background: self.background.unwrap_or(base.style.background),
+            border: self.border.unwrap_or(base.style.border),
+            border_width: self.border_width.unwrap_or(base.style.border_width),
+            radius: self.radius.unwrap_or(base.style.radius),
+            padding: self.padding.unwrap_or(base.style.padding),
+            position: self.position.unwrap_or(base.style.position),
+            offset: self.offset.unwrap_or(base.style.offset),
+        };
+        style.validate_table("text.input")?;
+        if [&self.prefix, &self.suffix]
+            .iter()
+            .any(|s| s.chars().any(char::is_control))
+        {
+            bail!(
+                "[text.input] prefix and suffix must be single-line text without control characters"
+            );
+        }
+        Ok(Input {
+            prefix: self.prefix,
+            suffix: self.suffix,
+            style,
+        })
+    }
 }
 
 /// `[text.style]`, every match's mark, with `[text.style.current]` inside
@@ -295,6 +349,8 @@ pub struct Config {
     pub style: Style,
     /// How text mode marks its matches: `[text.style]`.
     pub marks: Marks,
+    /// Text mode's query display: `[text.input]`.
+    pub input: Input,
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
@@ -759,6 +815,7 @@ impl Config {
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
         let marks = file.text.style.resolve(&file.style)?;
+        let input = file.text.input.resolve(&file.style)?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
@@ -770,6 +827,7 @@ impl Config {
             layout: layout.name().to_string(),
             style: file.style,
             marks,
+            input,
             after: file.pointer.after,
             nudge: nudge.into(),
             pixels: match file.pixels.detector {
@@ -845,6 +903,7 @@ impl Config {
         out.push('\n');
         out.push_str(&self.style.render());
         out.push_str(&self.marks.render());
+        out.push_str(&self.input.render());
         let after = match self.after {
             After::Restore => {
                 "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
@@ -1229,6 +1288,93 @@ mod tests {
     }
 
     #[test]
+    fn text_input_inherits_tags_but_has_its_own_screen_position() {
+        let config = Config::parse(
+            "[style]\nfont = 'serif'\nsize = 22\ntext = '#123456'\nposition = 'top-right'\noffset = [3, 4]",
+            &us(),
+        ).unwrap();
+        let mut look = config.style.clone();
+        look.position = Position::Bottom;
+        look.offset = [0, -48];
+        assert_eq!(config.input.style, look);
+        assert!(config.input.prefix.is_empty() && config.input.suffix.is_empty());
+    }
+
+    #[test]
+    fn text_input_and_current_match_settings_round_trip_independently() {
+        let config = Config::parse(
+            r##"
+[style]
+size = 11
+[text.style.current]
+background = "#10203040"
+border = "#50607080"
+border_width = 2
+radius = 6
+padding = [3, 4]
+[text.input]
+prefix = "find \""
+suffix = '" \literal'
+font = "serif"
+size = 28
+text = "#abcdef"
+matched = "#778899"
+background = "#01020304"
+border = "#05060708"
+border_width = 3
+radius = 7
+padding = [8, 9]
+position = "top-right"
+offset = [-13, 17]
+"##,
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(config.input.prefix, "find \"");
+        assert_eq!(config.input.style.position, Position::TopRight);
+        assert_eq!(config.input.style.offset, [-13, 17]);
+        assert_eq!(config.input.style.size, 28.0);
+        assert_eq!(config.input.style.text, Color::rgba(0xab, 0xcd, 0xef, 0xff));
+        assert_eq!(
+            config.marks.current.background,
+            Color::rgba(0x10, 0x20, 0x30, 0x40)
+        );
+        assert_eq!(
+            config.marks.current.border,
+            Color::rgba(0x50, 0x60, 0x70, 0x80)
+        );
+        assert_eq!(config.marks.current.padding, [3.0, 4.0]);
+        assert_eq!(config.style.size, 11.0);
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.input, config.input);
+        assert_eq!(again.marks, config.marks);
+    }
+
+    #[test]
+    fn invalid_text_input_settings_fail_before_the_keyboard_grab() {
+        for (field, expected) in [
+            ("size = nan", "[text.input] size"),
+            ("size = 0", "[text.input] size"),
+            ("font = ''", "[text.input] font"),
+            ("padding = [-1, 2]", "[text.input] padding"),
+            ("radius = inf", "[text.input] radius"),
+            ("border_width = -1", "[text.input] border_width"),
+            ("offset = [501, 0]", "[text.input] offset"),
+            ("background = 'red'", "isn't a colour"),
+            ("position = 'nowhere'", "unknown variant"),
+            ("colour = '#ffffff'", "unknown field"),
+            (r#"prefix = "line\nline""#, "single-line"),
+            (r#"suffix = "\t""#, "single-line"),
+        ] {
+            let error = Config::parse(&format!("[text.input]\n{field}"), &us()).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{field}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn rendered_config_reads_back_the_same() {
         let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
                     [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\nposition = \"top\"\noffset = [3, -2]\n[pointer]\nafter = \"leave\"\nnudge = 9";
@@ -1237,6 +1383,7 @@ mod tests {
         assert_eq!(again.alphabet, config.alphabet);
         assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
+        assert_eq!(again.input, config.input);
         assert_eq!(again.after, config.after);
         assert_eq!(again.nudge, 9);
     }

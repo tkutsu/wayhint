@@ -19,12 +19,13 @@ use anyhow::{Result, bail};
 use crate::{
     action::{Act, Action},
     desktop,
-    geometry::Rect,
+    geometry::{Point, Rect},
     keys::KeyCode,
-    overlay::{Event, Frame, Highlight, Overlay},
-    pick::{Pick, Source, pill},
+    overlay::{Event, Frame, Highlight, Overlay, Tag},
+    pick::{Pick, Source},
     selection::Selector,
     snapshot::{Snapshot, Target},
+    style::Input,
     text::Search,
 };
 
@@ -49,12 +50,13 @@ pub fn search(
     shown: &Snapshot,
     selector: &Selector,
     source: &mut dyn Source,
+    input: &Input,
 ) -> Result<Option<Pick>> {
     if let Err(e) = overlay.start_typing() {
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
         return Ok(None);
     }
-    let result = keys(overlay, shown, selector, source);
+    let result = keys(overlay, shown, selector, source, input);
     overlay.stop_typing();
     result
 }
@@ -65,13 +67,14 @@ fn keys(
     shown: &Snapshot,
     selector: &Selector,
     source: &mut dyn Source,
+    input: &Input,
 ) -> Result<Option<Pick>> {
     let screen = overlay.monitor().rect;
     let verb = selector.armed().map(Action::name);
     // The tags go before the text is read: none is left to be typed.
-    overlay.update(&frame(None, false, verb, screen))?;
+    overlay.update(&frame(None, false, verb, screen, input))?;
     let mut search = Search::new(source.read_text(shown));
-    overlay.update(&frame(Some(&search), false, verb, screen))?;
+    overlay.update(&frame(Some(&search), false, verb, screen, input))?;
     // The query changed since the matches were found.
     let mut stale = false;
     loop {
@@ -141,7 +144,7 @@ fn keys(
             KeyCode::END => search.last(),
             _ => {}
         }
-        overlay.update(&frame(Some(&search), stale, verb, screen))?;
+        overlay.update(&frame(Some(&search), stale, verb, screen, input))?;
     }
 }
 
@@ -187,16 +190,27 @@ fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
 /// `stale` while the query's matches are being found: the pill shows `...`
 /// for the count then, and nothing is marked. The pill names the armed
 /// `verb`, dimmed, before the query.
-fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, screen: Rect) -> Frame {
+fn frame(
+    search: Option<&Search>,
+    stale: bool,
+    verb: Option<&str>,
+    screen: Rect,
+    input: &Input,
+) -> Frame {
     let prefix = verb.map(|v| format!("{v} ")).unwrap_or_default();
     let typed = prefix.chars().count();
     let status = match search {
         None => "text ...".to_string(),
         Some(search) if search.query().is_empty() => "text".to_string(),
-        Some(search) if stale => format!("{}  ...", search.query()),
+        Some(search) if stale => format!("{}{}{}  ...", input.prefix, search.query(), input.suffix),
         Some(search) => {
             let (at, count) = search.position();
-            format!("{}  {at}/{count}", search.query())
+            format!(
+                "{}{}{}  {at}/{count}",
+                input.prefix,
+                search.query(),
+                input.suffix
+            )
         }
     };
     let search = search.filter(|_| !stale);
@@ -214,16 +228,27 @@ fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, screen: Rect)
         })
         .unwrap_or_default();
     Frame {
-        tags: vec![pill(screen, format!("{prefix}{status}"), typed)],
+        tags: Vec::new(),
         dots: Vec::new(),
         highlights,
+        input: Some(Tag {
+            at: input
+                .style
+                .position
+                .on(screen)
+                .offset(Point::new(input.style.offset[0], input.style.offset[1])),
+            position: input.style.position,
+            text: format!("{prefix}{status}"),
+            typed,
+            target: None,
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{geometry::Point, text::Text};
+    use crate::{style::Style, text::Text};
 
     fn search(contents: &[&str]) -> Search {
         let texts = contents
@@ -262,14 +287,20 @@ mod tests {
 
     const SCREEN: Rect = Rect::new(0, 0, 1920, 1080);
 
+    fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, screen: Rect) -> Frame {
+        super::frame(search, stale, verb, screen, &Input::new(&Style::default()))
+    }
+
     #[test]
     fn the_tags_go_and_the_pill_says_what_is_typed() {
         let loading = frame(None, false, None, SCREEN);
-        assert_eq!(loading.tags.len(), 1, "only the pill");
-        assert_eq!(loading.tags[0].text, "text ...");
+        assert!(loading.tags.is_empty(), "target tags are hidden");
+        assert_eq!(loading.input.unwrap().text, "text ...");
         let mut found = search(&["contact", "falcon"]);
         let pill = |found: &Search, stale| {
-            frame(Some(found), stale, Some("double"), SCREEN).tags[0].clone()
+            frame(Some(found), stale, Some("double"), SCREEN)
+                .input
+                .unwrap()
         };
         assert_eq!(pill(&found, false).text, "double text");
         typed(&mut found, "con");
@@ -280,6 +311,52 @@ mod tests {
             "the verb is dimmed"
         );
         assert_eq!(pill(&found, true).text, "double con  ...", "being found");
+    }
+
+    #[test]
+    fn query_decorations_leave_matching_and_status_intact() {
+        let mut found = search(&["άλλο", "Άλλο"]);
+        typed(&mut found, "αλλ");
+        let input = Input {
+            prefix: "find [".into(),
+            suffix: "]".into(),
+            ..Input::new(&Style::default())
+        };
+        let display = |stale| {
+            super::frame(Some(&found), stale, Some("double"), SCREEN, &input)
+                .input
+                .unwrap()
+        };
+        assert_eq!(display(false).text, "double find [αλλ]  1/2");
+        assert_eq!(display(true).text, "double find [αλλ]  ...");
+        assert_eq!(display(false).typed, 7, "only the armed verb is dimmed");
+        assert_eq!(found.query(), "αλλ", "decorations are display only");
+    }
+
+    #[test]
+    fn query_positions_use_the_monitor_and_signed_offsets() {
+        use crate::style::Position;
+        let screen = Rect::new(-1920, 100, 1920, 1080);
+        for (position, at) in [
+            (Position::TopLeft, Point::new(-1920, 100)),
+            (Position::Top, Point::new(-960, 100)),
+            (Position::TopRight, Point::new(0, 100)),
+            (Position::Left, Point::new(-1920, 640)),
+            (Position::Center, Point::new(-960, 640)),
+            (Position::Right, Point::new(0, 640)),
+            (Position::BottomLeft, Point::new(-1920, 1180)),
+            (Position::Bottom, Point::new(-960, 1180)),
+            (Position::BottomRight, Point::new(0, 1180)),
+        ] {
+            let mut input = Input::new(&Style::default());
+            input.style.position = position;
+            input.style.offset = [-17, 23];
+            let tag = super::frame(None, false, None, screen, &input)
+                .input
+                .unwrap();
+            assert_eq!(tag.at, at.offset(Point::new(-17, 23)));
+            assert_eq!(tag.position, position);
+        }
     }
 
     #[test]

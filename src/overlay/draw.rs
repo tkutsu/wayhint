@@ -20,7 +20,7 @@ use crate::{
     overlay::font,
     placement::{self, Label},
     space::Space,
-    style::{Color, Mark, Marks, Position, Style},
+    style::{Color, Input, Mark, Marks, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -41,6 +41,8 @@ pub struct Frame {
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
+    /// Text mode's query, drawn independently of target placement.
+    pub input: Option<Tag>,
 }
 
 /// A translucent box over one line of a match in text mode.
@@ -83,17 +85,11 @@ struct Glyph {
     pixmap: Option<Pixmap>,
 }
 
-/// Draws tags in one style. Keeps the font and every letter it has drawn,
-/// so each letter is rasterized once per colour per run.
+/// Draws tags, matches and the query, caching each font's rasterized glyphs.
 pub struct Painter {
-    style: Style,
+    tags: TextPainter,
+    input: TextPainter,
     marks: Marks,
-    font: fontdue::Font,
-    /// Distance from a line's top to its baseline, and its full height.
-    ascent: f32,
-    line_height: f32,
-    /// Keyed by letter and whether it's drawn in the typed colour.
-    glyphs: HashMap<(char, bool), Glyph>,
     space: Option<Space>,
     regions: Vec<BoxRect>,
     /// How far each tag was moved off its own box, keyed by its anchor and
@@ -103,20 +99,11 @@ pub struct Painter {
 }
 
 impl Painter {
-    pub fn new(style: &Style, marks: &Marks) -> Result<Self> {
-        let font = font::load(&style.font, style.size)?;
-        let (ascent, line_height) = font
-            .horizontal_line_metrics(style.size)
-            .map_or((style.size, style.size * 1.2), |m| {
-                (m.ascent, m.ascent - m.descent)
-            });
+    pub fn new(style: &Style, marks: &Marks, input: &Input) -> Result<Self> {
         Ok(Self {
-            style: style.clone(),
+            tags: TextPainter::new(style)?,
+            input: TextPainter::new(&input.style)?,
             marks: *marks,
-            font,
-            ascent,
-            line_height,
-            glyphs: HashMap::new(),
             space: None,
             regions: Vec::new(),
             placed: HashMap::new(),
@@ -137,7 +124,7 @@ impl Painter {
             .tags
             .iter()
             .map(|tag| {
-                let rect = place(tag.at, tag.position, self.size(&tag.text), area).unwrap();
+                let rect = place(tag.at, tag.position, self.tags.size(&tag.text), area).unwrap();
                 BoxRect::new(
                     rect.x() as i32,
                     rect.y() as i32,
@@ -198,7 +185,7 @@ impl Painter {
     /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
     ///
     /// Highlights go first, under everything. Lines start at their tags'
-    /// nearest edges and go under the tags. Dots go last, over everything.
+    /// nearest edges and go under the tags. Dots follow, then the query.
     pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         for highlight in &frame.highlights {
@@ -210,10 +197,11 @@ impl Painter {
         let frame = &arranged;
         for &dot in &frame.dots {
             let from = if let Some(tag) = dot.tag.and_then(|i| frame.tags.get(i)) {
-                let Some(rect) = place(tag.at, tag.position, self.size(&tag.text), area) else {
+                let Some(rect) = place(tag.at, tag.position, self.tags.size(&tag.text), area)
+                else {
                     continue;
                 };
-                let Some(from) = nearest_edge(rect, self.style.radius, centre(dot.at)) else {
+                let Some(from) = nearest_edge(rect, self.tags.style.radius, centre(dot.at)) else {
                     continue;
                 };
                 from
@@ -223,10 +211,13 @@ impl Painter {
             self.paint_line(pixmap, from, centre(dot.at));
         }
         for tag in &frame.tags {
-            self.paint_tag(pixmap, tag, area);
+            self.tags.paint_tag(pixmap, tag, area);
         }
         for &dot in &frame.dots {
             self.paint_dot(pixmap, dot.at);
+        }
+        if let Some(tag) = &frame.input {
+            self.input.paint_tag(pixmap, tag, area);
         }
     }
 
@@ -240,8 +231,8 @@ impl Painter {
             return;
         };
         for (width, color) in [
-            (LINE + RING, self.style.background),
-            (LINE, self.style.text),
+            (LINE + RING, self.tags.style.background),
+            (LINE, self.tags.style.text),
         ] {
             let stroke = Stroke {
                 width,
@@ -256,7 +247,10 @@ impl Painter {
     /// dark windows alike.
     fn paint_dot(&self, pixmap: &mut Pixmap, at: Point) {
         let (x, y) = centre(at);
-        for (radius, color) in [(DOT + RING, self.style.background), (DOT, self.style.text)] {
+        for (radius, color) in [
+            (DOT + RING, self.tags.style.background),
+            (DOT, self.tags.style.text),
+        ] {
             if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
                 pixmap.fill_path(
                     &circle,
@@ -267,19 +261,6 @@ impl Painter {
                 );
             }
         }
-    }
-
-    /// The tag's box size: its text plus padding on every side.
-    fn size(&self, text: &str) -> (f32, f32) {
-        let [pad_y, pad_x] = self.style.padding;
-        let width: f32 = text
-            .chars()
-            .map(|c| self.font.metrics(c, self.style.size).advance_width)
-            .sum();
-        (
-            (width + 2.0 * pad_x).ceil(),
-            (self.line_height + 2.0 * pad_y).ceil(),
-        )
     }
 
     /// One line of a match: its box grown by the mark's padding, filled
@@ -302,6 +283,48 @@ impl Painter {
             return;
         };
         paint_box(pixmap, rect, &mark);
+    }
+}
+
+/// A font and glyph cache for one look; tags and the query have separate ones.
+struct TextPainter {
+    style: Style,
+    font: fontdue::Font,
+    /// Distance from a line's top to its baseline, and its full height.
+    ascent: f32,
+    line_height: f32,
+    /// Keyed by letter and whether it's drawn in the typed colour.
+    glyphs: HashMap<(char, bool), Glyph>,
+}
+
+impl TextPainter {
+    fn new(style: &Style) -> Result<Self> {
+        let font = font::load(&style.font, style.size)?;
+        let (ascent, line_height) = font
+            .horizontal_line_metrics(style.size)
+            .map_or((style.size, style.size * 1.2), |m| {
+                (m.ascent, m.ascent - m.descent)
+            });
+        Ok(Self {
+            style: style.clone(),
+            font,
+            ascent,
+            line_height,
+            glyphs: HashMap::new(),
+        })
+    }
+
+    /// The tag's box size: its text plus padding on every side.
+    fn size(&self, text: &str) -> (f32, f32) {
+        let [pad_y, pad_x] = self.style.padding;
+        let width: f32 = text
+            .chars()
+            .map(|c| self.font.metrics(c, self.style.size).advance_width)
+            .sum();
+        (
+            (width + 2.0 * pad_x).ceil(),
+            (self.line_height + 2.0 * pad_y).ceil(),
+        )
     }
 
     fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
@@ -534,6 +557,159 @@ mod tests {
     use super::*;
 
     #[test]
+    fn query_has_its_own_font_colours_and_box_above_the_marks() {
+        let config = crate::config::Config::parse(
+            r##"
+[style]
+size = 8
+text = "#ff0000"
+[text.style]
+background = "#0000ff"
+padding = [0, 0]
+radius = 0
+[text.style.current]
+background = "#ff00ff"
+[text.input]
+font = "serif"
+size = 28
+text = "#00ff00"
+matched = "#00ffff"
+background = "#111111"
+border = "#ffff00"
+border_width = 2
+radius = 0
+padding = [8, 12]
+"##,
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
+        let mut pixmap = Pixmap::new(300, 160).unwrap();
+        let tag = Tag {
+            at: Point::new(20, 20),
+            position: Position::TopLeft,
+            text: "AB".into(),
+            typed: 1,
+            target: None,
+        };
+        assert!(painter.input.size("AB").0 > painter.tags.size("AB").0);
+        let mut frame = Frame {
+            highlights: vec![
+                Highlight {
+                    rect: BoxRect::new(0, 0, 300, 160),
+                    current: false,
+                },
+                Highlight {
+                    rect: BoxRect::new(200, 100, 50, 20),
+                    current: true,
+                },
+            ],
+            input: Some(tag),
+            ..Frame::default()
+        };
+        painter.paint(&mut pixmap, &frame);
+        let rgb = |map: &Pixmap, x, y| {
+            let p = map.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        assert_eq!(rgb(&pixmap, 290, 150), (0, 0, 255), "ordinary mark");
+        assert_eq!(rgb(&pixmap, 220, 110), (255, 0, 255), "selected mark");
+        assert_eq!(rgb(&pixmap, 20, 20), (255, 255, 0), "input border");
+        assert_eq!(rgb(&pixmap, 24, 24), (17, 17, 17), "input background");
+        assert!(
+            pixmap
+                .pixels()
+                .iter()
+                .any(|p| p.green() > 200 && p.red() < 30 && p.blue() < 30),
+            "input text"
+        );
+        assert!(
+            pixmap
+                .pixels()
+                .iter()
+                .any(|p| p.green() > 200 && p.blue() > 200 && p.red() < 30),
+            "dimmed verb colour"
+        );
+        frame.input = None;
+        painter.paint(&mut pixmap, &frame);
+        assert_eq!(
+            rgb(&pixmap, 24, 24),
+            (0, 0, 255),
+            "no query left when returning to hints"
+        );
+    }
+
+    #[test]
+    fn query_box_keeps_its_screen_alignment_as_the_query_grows() {
+        let style = Style::default();
+        let mut input = Input::new(&style);
+        input.style.radius = 0.0;
+        input.style.background = Color::rgba(30, 30, 30, 255);
+        let mut painter = Painter::new(&style, &Marks::new(&style), &input).unwrap();
+        let mut pixmap = Pixmap::new(800, 600).unwrap();
+        for position in [
+            Position::TopLeft,
+            Position::Top,
+            Position::TopRight,
+            Position::Left,
+            Position::Center,
+            Position::Right,
+            Position::BottomLeft,
+            Position::Bottom,
+            Position::BottomRight,
+        ] {
+            let (across, down) = position.halves();
+            let offset = Point::new(
+                if across == 2 { -12 } else { 12 },
+                if down == 2 { -16 } else { 16 },
+            );
+            for text in ["a", "a longer query  1/2"] {
+                let frame = Frame {
+                    input: Some(Tag {
+                        at: position.on(BoxRect::new(0, 0, 800, 600)).offset(offset),
+                        position,
+                        text: text.into(),
+                        typed: 0,
+                        target: None,
+                    }),
+                    ..Frame::default()
+                };
+                painter.paint(&mut pixmap, &frame);
+                let ink: Vec<_> = pixmap
+                    .pixels()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.alpha() > 0)
+                    .map(|(i, _)| (i % 800, i / 800))
+                    .collect();
+                let left = i32::try_from(ink.iter().map(|p| p.0).min().unwrap()).unwrap();
+                let right = i32::try_from(ink.iter().map(|p| p.0).max().unwrap()).unwrap() + 1;
+                let top = i32::try_from(ink.iter().map(|p| p.1).min().unwrap()).unwrap();
+                let bottom = i32::try_from(ink.iter().map(|p| p.1).max().unwrap()).unwrap() + 1;
+                let near = |got: i32, want: i32| {
+                    assert!((got - want).abs() <= 1, "{position:?}: {got} != {want}");
+                };
+                near(
+                    match across {
+                        0 => left,
+                        1 => left.midpoint(right),
+                        _ => right,
+                    },
+                    400 * across + offset.x,
+                );
+                near(
+                    match down {
+                        0 => top,
+                        1 => top.midpoint(bottom),
+                        _ => bottom,
+                    },
+                    300 * down + offset.y,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tags_put_their_position_on_their_point() {
         let at = |position| {
             let r = place(Point::new(100, 50), position, (20.0, 10.0), (800.0, 600.0)).unwrap();
@@ -587,7 +763,7 @@ mod tests {
             radius: 6.0,
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
         let mut pixmap = Pixmap::new(240, 200).unwrap();
         let mut frame = Frame {
             tags: vec![Tag {
@@ -603,6 +779,7 @@ mod tests {
                 tag: Some(0),
             }],
             highlights: vec![],
+            input: None,
         };
         for (dot, (x, y)) in [
             (Point::new(60, 90), (90, 90)),
@@ -674,7 +851,7 @@ mod collision_tests {
             offset: [3, 3],
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
         let mut pixmap = Pixmap::new(300, 600).unwrap();
         painter.set_space(
             BoxRect::new(0, 0, 300, 600),
@@ -700,13 +877,14 @@ mod collision_tests {
             .collect(),
             dots: vec![],
             highlights: vec![],
+            input: None,
         };
         painter.paint(&mut pixmap, &frame);
         let arranged = painter.arrange(&frame, (300.0, 600.0));
         let boxes: Vec<_> = arranged
             .tags
             .iter()
-            .map(|t| place(t.at, t.position, painter.size(&t.text), (300.0, 600.0)).unwrap())
+            .map(|t| place(t.at, t.position, painter.tags.size(&t.text), (300.0, 600.0)).unwrap())
             .collect();
         assert!(
             boxes[0].intersect(&boxes[1]).is_none(),
@@ -794,7 +972,7 @@ mod capture_replay {
             highlights,
             ..Frame::default()
         };
-        let mut painter = Painter::new(&config.style, &config.marks).unwrap();
+        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
         let mut marks = Pixmap::new(picture.width(), picture.height()).unwrap();
         painter.paint(&mut marks, &frame);
         picture.draw_pixmap(
@@ -860,7 +1038,7 @@ mod capture_replay {
             tags,
             ..Frame::default()
         };
-        let mut painter = Painter::new(&config.style, &config.marks).unwrap();
+        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
         let obstacles: Vec<_> = snapshot.obstacles.iter().map(|r| r.offset(shift)).collect();
         painter.set_space(area, &obstacles, vec![area]);
         let size = (area.w as f32, area.h as f32);
@@ -868,7 +1046,7 @@ mod capture_replay {
             f.tags
                 .iter()
                 .map(|t| {
-                    let r = place(t.at, t.position, p.size(&t.text), size).unwrap();
+                    let r = place(t.at, t.position, p.tags.size(&t.text), size).unwrap();
                     BoxRect::new(
                         r.x() as i32,
                         r.y() as i32,

@@ -67,7 +67,7 @@ use crate::{
     geometry::Point,
     keyboard::{self, Keyboard, Locks},
     keys::{Key, KeyCode},
-    style::{Marks, Style},
+    style::{Input, Marks, Style},
 };
 
 /// Something the run loop has to react to.
@@ -122,9 +122,15 @@ impl Overlay {
     /// before anything starts other threads: it blocks SIGINT and SIGTERM
     /// so they arrive as [`Event::Interrupted`], and threads started later
     /// inherit that.
-    pub fn new(conn: &Connection, style: &Style, marks: &Marks, monitor: &Monitor) -> Result<Self> {
+    pub fn new(
+        conn: &Connection,
+        style: &Style,
+        marks: &Marks,
+        input: &Input,
+        monitor: &Monitor,
+    ) -> Result<Self> {
         // The font first: a bad `[style] font` fails before any grab.
-        let painter = Painter::new(style, marks)?;
+        let painter = Painter::new(style, marks, input)?;
 
         let (globals, mut queue) =
             registry_queue_init::<State>(conn).context("connecting to Wayland")?;
@@ -408,6 +414,10 @@ impl Overlay {
                     current: h.current,
                 })
                 .collect(),
+            input: frame.input.as_ref().map(|t| Tag {
+                at: to_local(t.at),
+                ..t.clone()
+            }),
         };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;

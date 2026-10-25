@@ -237,7 +237,8 @@ impl Selector {
     /// it. The letters go if none does, or if one more letter would pick a
     /// tag new under them: a key already on its way, typed for a tag that
     /// left, must not land on another. A verb typed after them stays.
-    pub fn relabel(&mut self, survivors: &[Option<usize>], alphabet_size: usize) {
+    /// Returns whether any label names a different target now.
+    pub fn relabel(&mut self, survivors: &[Option<usize>], alphabet_size: usize) -> bool {
         let kept: Vec<Option<&[usize]>> = survivors
             .iter()
             .map(|was| was.map(|i| self.labels[i].as_slice()))
@@ -255,11 +256,17 @@ impl Selector {
             .iter()
             .zip(&kept)
             .any(|(label, was)| *was != Some(label.as_slice()) && after(label) == 1);
+        let retagged = labels.len() != self.labels.len()
+            || labels
+                .iter()
+                .zip(&kept)
+                .any(|(label, was)| *was != Some(label.as_slice()));
         self.labels = labels;
         if !leads || instant {
             self.typed.clear();
             self.armed_at = 0;
         }
+        retagged
     }
 
     /// Whether a label is still possible: it starts with what's typed.
