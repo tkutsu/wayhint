@@ -172,8 +172,13 @@ impl Default for Style {
 impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
+        self.validate_table("style")
+    }
+
+    /// Validate a tag or input style, naming the table that supplied it.
+    pub fn validate_table(&self, table: &str) -> Result<()> {
         if !(4.0..=200.0).contains(&self.size) {
-            bail!("[style] size: {} px is outside 4-200", self.size);
+            bail!("[{table}] size: {} px is outside 4-200", self.size);
         }
         let lengths = [
             ("border_width", self.border_width),
@@ -183,23 +188,28 @@ impl Style {
         ];
         for (name, value) in lengths {
             if !(0.0..=100.0).contains(&value) {
-                bail!("[style] {name}: {value} px is outside 0-100");
+                bail!("[{table}] {name}: {value} px is outside 0-100");
             }
         }
         for value in self.offset {
             if !(-OFFSET..=OFFSET).contains(&value) {
-                bail!("[style] offset: {value} px is outside -{OFFSET} to {OFFSET}");
+                bail!("[{table}] offset: {value} px is outside -{OFFSET} to {OFFSET}");
             }
         }
         if self.font.trim().is_empty() {
-            bail!("[style] font: empty");
+            bail!("[{table}] font: empty");
         }
         Ok(())
     }
 
     /// The table as TOML, for `wayhint config`.
     pub fn render(&self) -> String {
-        let mut out = String::from("[style]\n");
+        self.render_table("style", "on the target")
+    }
+
+    /// A complete look under its owning table, for `wayhint config`.
+    fn render_table(&self, table: &str, anchor: &str) -> String {
+        let mut out = format!("[{table}]\n");
         let _ = writeln!(
             out,
             "font = {}   # a fontconfig pattern, as fc-match takes it",
@@ -223,7 +233,7 @@ impl Style {
         );
         let _ = writeln!(
             out,
-            "position = \"{}\"   # on the target: center, top, bottom, left, right, or a corner as top-left",
+            "position = \"{}\"   # {anchor}: center, top, bottom, left, right, or a corner as top-left",
             self.position.name()
         );
         let _ = writeln!(
@@ -232,6 +242,40 @@ impl Style {
             self.offset[0], self.offset[1]
         );
         out
+    }
+}
+
+/// The typed query's decorations and look, resolved from `[text.input]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Input {
+    pub prefix: String,
+    pub suffix: String,
+    pub style: Style,
+}
+
+impl Input {
+    /// Keep the tags' colours and font, centred near the screen's bottom.
+    pub fn new(tags: &Style) -> Self {
+        Self {
+            prefix: String::new(),
+            suffix: String::new(),
+            style: Style {
+                position: Position::Bottom,
+                offset: [0, -48],
+                ..tags.clone()
+            },
+        }
+    }
+
+    /// The resolved query settings as editable TOML.
+    pub fn render(&self) -> String {
+        let look = self.style.render_table("text.input", "on the screen");
+        let (header, fields) = look.split_once('\n').unwrap();
+        format!(
+            "\n{header}\nprefix = {}\nsuffix = {}\n{fields}",
+            crate::config::quote(&self.prefix),
+            crate::config::quote(&self.suffix),
+        )
     }
 }
 
