@@ -34,6 +34,27 @@ pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     labels
 }
 
+/// The labels for `count` targets before `labels` cuts the list to
+/// `count`: every way to finish a label, at least `count` of them.
+fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
+    assert!(size >= 2, "the config guarantees two letters or more");
+    let mut labels: Vec<Vec<usize>> = (0..size).map(|letter| vec![letter]).collect();
+    while labels.len() < count {
+        let shortest = labels[0].len();
+        // The last label of the shortest length: just before the first longer one.
+        let last = labels
+            .iter()
+            .rposition(|l| l.len() == shortest)
+            .unwrap_or(0);
+        let prefix = labels[last].clone();
+        let children = (0..size).map(|letter| [prefix.as_slice(), &[letter]].concat());
+        // `splice` replaces a range with the items of an iterator in place:
+        // here the one prefix label with its `size` children.
+        labels.splice(last..=last, children);
+    }
+    labels
+}
+
 /// Labels for targets scanned again, where `kept[i]` is the label target
 /// `i` had before, if it was there: it keeps that label if it's still one
 /// `kept.len()` targets can have, so a tag doesn't move to another target
@@ -64,27 +85,6 @@ pub fn relabel(kept: &[Option<&[usize]>], size: usize) -> Vec<Vec<usize>> {
             all[at.expect("`all_labels` gives at least one label per target")].clone()
         })
         .collect()
-}
-
-/// The labels for `count` targets before `labels` cuts the list to
-/// `count`: every way to finish a label, at least `count` of them.
-fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
-    assert!(size >= 2, "the config guarantees two letters or more");
-    let mut labels: Vec<Vec<usize>> = (0..size).map(|letter| vec![letter]).collect();
-    while labels.len() < count {
-        let shortest = labels[0].len();
-        // The last label of the shortest length: just before the first longer one.
-        let last = labels
-            .iter()
-            .rposition(|l| l.len() == shortest)
-            .unwrap_or(0);
-        let prefix = labels[last].clone();
-        let children = (0..size).map(|letter| [prefix.as_slice(), &[letter]].concat());
-        // `splice` replaces a range with the items of an iterator in place:
-        // here the one prefix label with its `size` children.
-        labels.splice(last..=last, children);
-    }
-    labels
 }
 
 /// One thing the user did, already decoded from a key, with the modifiers
@@ -691,7 +691,9 @@ mod tests {
                 }
             }
         }
+    }
 
+    proptest! {
         #[test]
         fn labels_obey_every_rule(count in 0usize..600, size in 2usize..12) {
             let ls = labels(count, size);
