@@ -57,6 +57,17 @@ const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 /// spike's took 6 to 12 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Terminals by class: their pictures are read as lines of text.
+const TERMINALS: [&str; 7] = [
+    "kitty",
+    "foot",
+    "footclient",
+    "Alacritty",
+    "com.mitchellh.ghostty",
+    "org.wezfurlong.wezterm",
+    "XTerm",
+];
+
 /// A connection to the accessibility bus plus the runtime its calls run on.
 pub struct Desktop {
     runtime: tokio::runtime::Runtime,
@@ -354,7 +365,8 @@ fn look(
     };
     let picture = camera.shoot(&window.address, until)?;
     let (frame, scale) = pixels::shrink(picture, window.rect.w);
-    let found = pixels::find(&frame, detector);
+    let terminal = TERMINALS.contains(&window.class.as_str());
+    let found = pixels::find(&frame, detector, terminal);
     let stats = Stats {
         ms: start.elapsed().as_secs_f64() * 1000.0,
         ..Stats::default()
