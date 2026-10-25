@@ -5,36 +5,46 @@
 //! `Monitor`, `Snapshot`, `Verdict`), never a socket, a D-Bus proxy or a
 //! future.
 //!
+//! A window with no accessibility tree is tagged from its pixels: a
+//! picture through Hyprland's window export (`capture`), read by
+//! [`crate::pixels`].
+//!
 //! The async scan runs on a Tokio runtime that [`Desktop`] owns. Each call
 //! blocks until its answer is in (`block_on`), so callers stay ordinary
 //! synchronous code: the first release is one straight loop, and nothing
 //! else needs to run while a scan does.
 
 mod atspi;
+mod capture;
 pub mod filter;
 mod hyprland;
 pub mod recheck;
 pub mod surfaces;
 pub mod tree;
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::future;
 
 use self::{
     atspi::Bounds,
+    capture::Camera,
     surfaces::{place, popup, uncovered, unknown},
 };
 pub use self::{
     atspi::Stats,
-    hyprland::{
-        Kind, Monitor, Window, cursor, focused_window, monitors, notify, window_by_address,
-    },
+    hyprland::{Kind, Monitor, Window, cursor, focused_window, monitors, warn, window_by_address},
     recheck::Verdict,
     surfaces::Stack,
 };
-use crate::snapshot::{Snapshot, Target};
+use crate::{
+    pixels::{self, Detector, Found},
+    snapshot::{Read, Snapshot, Target},
+};
 
 /// How long the re-check may take: one object, four small requests.
 const RECHECK_TIMEOUT: Duration = Duration::from_millis(300);
@@ -43,6 +53,10 @@ const RECHECK_TIMEOUT: Duration = Duration::from_millis(300);
 /// frame, and a shell has a handful.
 const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// How long a window's picture may take, connecting included: the
+/// spike's took 6 to 12 ms.
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// A connection to the accessibility bus plus the runtime its calls run on.
 pub struct Desktop {
     runtime: tokio::runtime::Runtime,
@@ -50,6 +64,28 @@ pub struct Desktop {
     bounds: Bounds,
     /// Scan counter, written into each snapshot.
     scans: u32,
+    /// Made the first time a window has no tree: most runs never need it.
+    camera: Option<Camera>,
+}
+
+/// One window as the scan saw it, until the snapshot is built from it.
+enum Seen {
+    Tree(tree::Tree, filter::Filtered, Stats),
+    Pixels(Window, Found, f64, Stats),
+}
+
+impl Seen {
+    fn read(&self) -> Read<'_> {
+        match self {
+            Self::Tree(tree, filtered, stats) => Read::Tree(tree, filtered, stats),
+            Self::Pixels(window, found, scale, stats) => Read::Pixels {
+                window,
+                found,
+                scale: *scale,
+                stats,
+            },
+        }
+    }
 }
 
 impl Desktop {
@@ -65,6 +101,7 @@ impl Desktop {
             scanner,
             bounds: Bounds::default(),
             scans: 0,
+            camera: None,
         })
     }
 
@@ -137,45 +174,52 @@ impl Desktop {
 
     /// Scans every surface in `stack` (from [`Desktop::stack`]) at once and
     /// keeps what deserves a tag: on `monitor`, and not under a surface
-    /// that may be above its own. A surface that can't be read (not on the
-    /// accessibility bus, or no frame clearly its own) gets no tags; why
-    /// comes back next to the snapshot, with any frames `stack` couldn't
-    /// place.
-    pub fn scan(&mut self, stack: &Stack, monitor: &Monitor) -> (Snapshot, Vec<anyhow::Error>) {
+    /// that may be above its own. A client that can't be read (not on the
+    /// accessibility bus, or no frame clearly its own) is tagged from its
+    /// pixels with `pixels`, or gets no tags when that's `None`; a layer or
+    /// popup that can't be read gets none, since Hyprland's window export
+    /// only takes pictures of clients. Why comes back next to the
+    /// snapshot, with any frames `stack` couldn't place.
+    pub fn scan(
+        &mut self,
+        stack: &Stack,
+        monitor: &Monitor,
+        pixels: Option<Detector>,
+    ) -> (Snapshot, Vec<anyhow::Error>) {
         // A layer with no frame only covers.
-        let readable = stack
+        let readable: Vec<&Window> = stack
             .windows
             .iter()
-            .filter(|w| w.kind == Kind::Client || !w.frames.is_empty());
+            .filter(|w| w.kind == Kind::Client || !w.frames.is_empty())
+            .collect();
         // `join_all` runs the scans side by side on the one thread: each
         // waits on its own app, so three windows take as long as the
         // slowest, not the sum.
-        let reads = readable.map(|w| self.read(w));
+        let reads = readable.iter().map(|w| self.read(w));
         let reads = self.runtime.block_on(future::join_all(reads));
-        let mut trees = Vec::new();
+        let mut seen = Vec::new();
         // `anyhow!` copies the text into the error: `Error::msg` takes it
         // as it is, and an error can't hold a borrowed `&String`.
-        let mut failed: Vec<_> = stack
-            .unplaced
-            .iter()
-            .map(|u| anyhow::anyhow!("{u}"))
-            .collect();
-        for read in reads {
-            match read {
-                Ok(tree) => trees.push(tree),
-                Err(e) => failed.push(e),
+        let mut failed: Vec<_> = stack.unplaced.iter().map(|u| anyhow!("{u}")).collect();
+        for (window, read) in readable.into_iter().zip(reads) {
+            let detector = pixels.filter(|_| window.kind == Kind::Client);
+            match (read, detector) {
+                (Ok((tree, stats)), _) => {
+                    let filtered = filter::filter(&tree);
+                    seen.push(Seen::Tree(tree, filtered, stats));
+                }
+                (Err(e), None) => failed.push(e),
+                (Err(no_tree), Some(detector)) => match look(&mut self.camera, window, detector) {
+                    Ok((found, scale, stats)) => {
+                        seen.push(Seen::Pixels(window.clone(), found, scale, stats));
+                    }
+                    Err(e) => failed.push(anyhow!("{no_tree:#}, and {e:#}")),
+                },
             }
         }
-        let filtered: Vec<_> = trees.iter().map(|(tree, _)| filter::filter(tree)).collect();
         self.scans += 1;
-        let scans = trees.iter().zip(&filtered).map(|((t, s), f)| (t, f, s));
-        let mut snapshot = Snapshot::build(self.scans, monitor.id, scans);
-        // Two fields of `snapshot`, borrowed apart: the closure reads
-        // `windows` while `retain` changes `targets`.
-        snapshot.targets.retain(|t| {
-            let address = &snapshot.windows[t.window].window.address;
-            monitor.rect.contains(t.hit) && uncovered(stack, address, t.hit).is_some()
-        });
+        let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
+        keep_visible(&mut snapshot, stack, monitor);
         (snapshot, failed)
     }
 
@@ -226,25 +270,171 @@ impl Desktop {
 
     /// Asks a target's object again, right before clicking it: still there,
     /// still the same thing, same place, still in view, and nothing over it.
+    /// A pixel target has no object: its window must still be where it was,
+    /// with nothing over the spot.
     pub fn recheck(&self, snapshot: &Snapshot, target: &Target) -> Result<Verdict> {
         // Where the surface is now and how big, unless it's gone, something
         // came over the spot (a dialog opened, a popup closed), or the frame
         // its tags came from isn't clearly its own any more (a layer that
         // reports the same box was mapped).
-        let then = &snapshot.windows[target.window].window;
+        let scanned = &snapshot.windows[target.window].window;
         let stack = self.stack(snapshot.monitor)?;
         let same_frames = stack
             .windows
             .iter()
-            .find(|w| w.address == then.address)
-            .is_some_and(|now| then.frames.iter().all(|f| now.frames.contains(f)));
+            .find(|w| w.address == scanned.address)
+            .is_some_and(|now| scanned.frames.iter().all(|f| now.frames.contains(f)));
         let window = same_frames
-            .then(|| uncovered(&stack, &then.address, target.hit))
+            .then(|| uncovered(&stack, &scanned.address, target.hit))
             .flatten();
-        let read = self
-            .scanner
-            .read(&target.object, &target.clips, RECHECK_TIMEOUT);
+        let Some(object) = &target.object else {
+            return Ok(recheck::unread(scanned.rect, window));
+        };
+        let read = self.scanner.read(object, &target.clips, RECHECK_TIMEOUT);
         let fresh = self.runtime.block_on(read).ok();
         Ok(recheck::verdict(target, fresh.as_ref(), window))
+    }
+}
+
+/// Keeps the targets worth a tag: on `monitor`, and not under a surface
+/// that may be above their own (see [`uncovered`]). A block whose middle
+/// is covered stays while one of its lines shows, with its tag on the
+/// first of those: it's the only way to those lines.
+pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
+    // Two fields of `snapshot`, borrowed apart: the closure reads
+    // `windows` while `retain_mut` changes `targets`.
+    snapshot.targets.retain_mut(|t| {
+        let address = &snapshot.windows[t.window].window.address;
+        let shows = |at| monitor.rect.contains(at) && uncovered(stack, address, at).is_some();
+        if shows(t.hit) {
+            return true;
+        }
+        match t
+            .opens
+            .iter()
+            .map(|line| line.center())
+            .find(|&at| shows(at))
+        {
+            Some(at) => {
+                t.hit = at;
+                true
+            }
+            None => false,
+        }
+    });
+    // A tag that moved onto a line may be out of reading order now.
+    snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
+}
+
+/// `window` tagged from its pixels alone: what `dump --pixels` prints.
+pub fn read_pixels(window: &Window, detector: Detector) -> Result<Snapshot> {
+    let (found, scale, stats) = look(&mut None, window, detector)?;
+    let read = Read::Pixels {
+        window,
+        found: &found,
+        scale,
+        stats: &stats,
+    };
+    Ok(Snapshot::build(1, window.monitor, [read]))
+}
+
+/// Takes a picture of `window` and finds its tags, with the `camera`
+/// made on first use. Also returns the picture's pixels per logical pixel
+/// and what it cost.
+fn look(
+    camera: &mut Option<Camera>,
+    window: &Window,
+    detector: Detector,
+) -> Result<(Found, f64, Stats)> {
+    let start = Instant::now();
+    let until = start + CAPTURE_TIMEOUT;
+    let camera = match camera {
+        Some(camera) => camera,
+        empty => empty.insert(Camera::connect(until)?),
+    };
+    let picture = camera.shoot(&window.address, until)?;
+    let (frame, scale) = pixels::shrink(picture, window.rect.w);
+    let found = pixels::find(&frame, detector);
+    let stats = Stats {
+        ms: start.elapsed().as_secs_f64() * 1000.0,
+        ..Stats::default()
+    };
+    Ok((found, scale, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        geometry::{Point, Rect},
+        pixels::Block,
+    };
+
+    fn window(address: &str, rect: Rect) -> Window {
+        Window {
+            address: address.into(),
+            pid: 1,
+            class: "kitty".into(),
+            title: String::new(),
+            rect,
+            monitor: 0,
+            focused: true,
+            kind: Kind::Client,
+            frames: Vec::new(),
+        }
+    }
+
+    fn stack(windows: Vec<Window>) -> Stack {
+        Stack {
+            popup_floor: windows.len(),
+            windows,
+            ..Stack::default()
+        }
+    }
+
+    #[test]
+    fn a_block_with_its_middle_covered_moves_its_tag_to_a_line_that_shows() {
+        let below = window("0x1", Rect::new(0, 0, 800, 600));
+        let found = Found {
+            blocks: vec![Block {
+                rect: [100, 100, 300, 200],
+                phrases: vec![
+                    [100, 100, 300, 120],
+                    [100, 140, 300, 160],
+                    [100, 180, 300, 200],
+                ],
+            }],
+            ..Found::default()
+        };
+        let monitor = Monitor {
+            id: 0,
+            name: "test".into(),
+            rect: below.rect,
+            scale: 1.0,
+            focused: true,
+        };
+        let stats = Stats::default();
+        let read = || Read::Pixels {
+            window: &below,
+            found: &found,
+            scale: 1.0,
+            stats: &stats,
+        };
+        // A small window over the block's middle and its middle line only.
+        let small = window("0x2", Rect::new(180, 135, 40, 30));
+        let mut snapshot = Snapshot::build(1, 0, [read()]);
+        keep_visible(&mut snapshot, &stack(vec![below.clone(), small]), &monitor);
+        assert_eq!(snapshot.targets.len(), 1, "the block stays");
+        assert_eq!(
+            snapshot.targets[0].hit,
+            Point::new(200, 110),
+            "on its first line"
+        );
+
+        // One over the whole block: nothing of it shows.
+        let big = window("0x3", Rect::new(50, 50, 400, 300));
+        let mut snapshot = Snapshot::build(1, 0, [read()]);
+        keep_visible(&mut snapshot, &stack(vec![below.clone(), big]), &monitor);
+        assert_eq!(snapshot.targets, []);
     }
 }

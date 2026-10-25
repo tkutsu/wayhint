@@ -4,7 +4,11 @@
 //! checked alone: `--window` after Hyprland, `--raw` after the walk, the
 //! default after the filter (a snapshot, which `overlay --from` reads).
 //! `--surfaces` is the whole monitor as a run sees it: what stacks where,
-//! which frame each layer got, and what couldn't be placed.
+//! which frame each layer got, and what couldn't be placed; with
+//! `--pixels`, windows without a tree are tagged from their pixels too.
+//! `--pixels` alone skips the tree and prints the tags the window's picture
+//! gives, whether or not it has a tree: the pixel detector, on windows
+//! whose tree says what the right answers are.
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
@@ -13,12 +17,13 @@ use crate::{
     cli::Dump,
     desktop::{self, Desktop, Kind, Monitor, Window, filter},
     geometry::Rect,
-    snapshot::Snapshot,
+    pixels::Detector,
+    snapshot::{Read, Snapshot},
 };
 
 pub fn run(args: &Dump) -> Result<()> {
     if args.surfaces {
-        return surfaces();
+        return surfaces(args.pixels);
     }
     let window = match &args.address {
         Some(address) => {
@@ -28,6 +33,9 @@ pub fn run(args: &Dump) -> Result<()> {
     };
     if args.window {
         return print(&window_and_monitor(&window)?);
+    }
+    if let Some(detector) = args.pixels {
+        return print(&desktop::read_pixels(&window, detector)?);
     }
 
     let desktop = Desktop::connect()?;
@@ -39,7 +47,7 @@ pub fn run(args: &Dump) -> Result<()> {
         });
     }
     let filtered = filter::filter(&tree);
-    let snapshot = Snapshot::build(1, window.monitor, [(&tree, &filtered, &stats)]);
+    let snapshot = Snapshot::build(1, window.monitor, [Read::Tree(&tree, &filtered, &stats)]);
     if !args.explain {
         return print(&snapshot);
     }
@@ -116,15 +124,16 @@ struct Surfaces<'a> {
     unread: Vec<String>,
 }
 
-/// `dump --surfaces`: the focused monitor's stack, scanned as a run scans it.
-fn surfaces() -> Result<()> {
+/// `dump --surfaces`: the focused monitor's stack, scanned as a run scans
+/// it, with `pixels` for the windows without a tree.
+fn surfaces(pixels: Option<Detector>) -> Result<()> {
     let monitor = desktop::monitors()?
         .into_iter()
         .find(|m| m.focused)
         .context("no monitor has focus")?;
     let mut desktop = Desktop::connect()?;
     let stack = desktop.stack(monitor.id)?;
-    let (snapshot, unread) = desktop.scan(&stack, &monitor);
+    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels);
     let tags = |w: &Window| {
         let targets = snapshot.targets.iter();
         targets

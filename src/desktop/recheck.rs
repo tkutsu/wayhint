@@ -59,6 +59,9 @@ pub enum Why {
     Scrolled,
     /// A scroll area above it didn't answer, so what's in view is unknown.
     ScrollAreaUnread,
+    /// A pixel target's window moved or changed size: the picture no
+    /// longer says what's where.
+    WindowChanged,
 }
 
 impl fmt::Display for Why {
@@ -73,6 +76,7 @@ impl fmt::Display for Why {
             Self::Outside => "its window no longer covers it",
             Self::Scrolled => "it's scrolled out of view",
             Self::ScrollAreaUnread => "a scroll area above it didn't answer",
+            Self::WindowChanged => "its window moved or changed size",
         })
     }
 }
@@ -114,6 +118,19 @@ pub fn verdict(target: &Target, fresh: Option<&Fresh>, window: Option<Rect>) -> 
     }
 }
 
+/// The verdict on a target found in pixels, which has no object to ask:
+/// its window is still where the picture was taken (`then`) and the same
+/// size, with nothing over the spot (`now` is `None` otherwise, as for
+/// [`verdict`]). What the app drew since can't be checked without another
+/// picture. Nothing says whether it's a text field.
+pub fn unread(then: Rect, now: Option<Rect>) -> Verdict {
+    match now {
+        None => Verdict::Refuse(Why::Covered),
+        Some(now) if now != then => Verdict::Refuse(Why::WindowChanged),
+        Some(_) => Verdict::Click { editable: false },
+    }
+}
+
 /// Why a scroll area above the target hides `hit` now, if one does. The
 /// filter's rule again (`filter::clip`): an empty box says nothing, one
 /// that didn't answer hides everything. `origin` is the window's, which
@@ -136,10 +153,10 @@ mod tests {
 
     fn target() -> Target {
         Target {
-            object: ObjectId {
+            object: Some(ObjectId {
                 bus: ":1.7".into(),
                 path: "/ok".into(),
-            },
+            }),
             window: 0,
             rect: Rect::new(110, 60, 80, 30),
             hit: Point::new(150, 75),
@@ -147,7 +164,22 @@ mod tests {
             name: "OK".into(),
             editable: false,
             clips: Vec::new(),
+            opens: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_pixel_target_clicks_while_its_window_stays_put() {
+        assert_eq!(
+            unread(WINDOW, Some(WINDOW)),
+            Verdict::Click { editable: false }
+        );
+        assert_eq!(unread(WINDOW, None), Verdict::Refuse(Why::Covered));
+        let taller = Rect { h: 310, ..WINDOW };
+        assert_eq!(
+            unread(WINDOW, Some(taller)),
+            Verdict::Refuse(Why::WindowChanged)
+        );
     }
 
     fn fresh() -> Fresh {
