@@ -19,12 +19,13 @@
 mod draw;
 mod font;
 mod gate;
+mod hold;
 mod wayland;
 
 use std::{
     collections::VecDeque,
     io::{ErrorKind, Read as _},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -70,11 +71,15 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// A key was released, and its press counted (see `gate.rs`), with
-    /// the modifiers held at its press. Modifier keys come too, and mean
-    /// nothing to `pick`.
+    /// the modifiers held at its press; an arrow comes as it's pressed
+    /// instead. Modifier keys come too, and mean nothing to `pick`.
     /// Shift is in both: in the [`Key`], because `_` and `-` are different
     /// keys to the config, and in the [`Mods`], for a Shift-click.
     Key(Key, Mods),
+    /// An arrow is still held: its tick so far, 1 for the first (see
+    /// `hold.rs`). Its press came as a `Key`, and its release brings
+    /// nothing.
+    Held(Key, Mods, u16),
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
     /// The compositor closed the overlay (its monitor went away) or
@@ -133,6 +138,7 @@ impl Overlay {
             grab: Grab::Released,
             gate: gate::KeyGate::default(),
             seen: gate::Seen::default(),
+            holds: hold::Holds::default(),
             passthrough: None,
             held: Mods::NONE,
             keymap: None,
@@ -351,17 +357,28 @@ impl Overlay {
     /// aimed at the old tags. Two taps can arrive in one read; after the
     /// first picks a target, the second would pick from the next scan.
     fn new_tags(&mut self) -> u32 {
-        self.state.events.retain(|e| !matches!(e, Event::Key(..)));
+        self.state
+            .events
+            .retain(|e| !matches!(e, Event::Key(..) | Event::Held(..)));
+        self.state.holds.clear();
         self.state.gate.redrawn()
     }
 
-    /// Waits for the next thing to react to.
+    /// Waits for the next thing to react to, or for a held arrow's next
+    /// tick.
     pub fn next_event(&mut self) -> Result<Event> {
         loop {
             if let Some(event) = self.state.events.pop_front() {
                 return Ok(event);
             }
-            self.event_loop.dispatch(None, &mut self.state)?;
+            let tick = self.state.holds.next();
+            let wait = tick.map(|at| at.saturating_duration_since(Instant::now()));
+            self.event_loop.dispatch(wait, &mut self.state)?;
+            let ticks = self.state.holds.due(Instant::now());
+            let held = ticks
+                .into_iter()
+                .map(|(key, mods, n)| Event::Held(key, mods, n));
+            self.state.events.extend(held);
         }
     }
 

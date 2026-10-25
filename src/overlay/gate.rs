@@ -50,10 +50,14 @@ impl KeyGate {
         }
     }
 
-    pub fn press(&mut self, key: Key, mods: Mods) {
-        if self.armed && !self.live.iter().any(|(k, _)| k.code == key.code) {
+    /// Whether the press counts: it came after the round trip, and its key
+    /// isn't already down.
+    pub fn press(&mut self, key: Key, mods: Mods) -> bool {
+        let counts = self.armed && !self.live.iter().any(|(k, _)| k.code == key.code);
+        if counts {
             self.live.push((key, mods));
         }
+        counts
     }
 
     /// The key and modifiers as they were at the press, if this release
