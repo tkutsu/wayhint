@@ -123,6 +123,12 @@ pub fn pick(
     let mut due = next();
     loop {
         let Some(event) = overlay.next_event(due)? else {
+            // A scan holds up the keys for as long as it takes, so none
+            // while an arrow is held: the nudge would freeze mid-move.
+            if overlay.holding() {
+                due = next();
+                continue;
+            }
             due = None;
             let Some(mut fresh) = source.rescan()? else {
                 continue;
