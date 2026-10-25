@@ -29,6 +29,46 @@ use crate::{
 /// trades one label for `size`, so the list grows by `size - 1`, and it
 /// stays sorted by length because the expanded label was the last short one.
 pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
+    let mut labels = all_labels(count, size);
+    labels.truncate(count);
+    labels
+}
+
+/// Labels for targets scanned again, where `kept[i]` is the label target
+/// `i` had before, if it was there: it keeps that label if it's still one
+/// `kept.len()` targets can have, so a tag doesn't move to another target
+/// while you read it or type it. The rest take the free ones, shortest
+/// first.
+///
+/// The labels to choose from are the whole set `labels` cuts its list
+/// from, which is prefix-free too: a target found again keeps a long label
+/// while a shorter one is free, as stable beats short. One more target
+/// splits one label into `size`, so all but one keep theirs.
+pub fn relabel(kept: &[Option<&[usize]>], size: usize) -> Vec<Vec<usize>> {
+    let all = all_labels(kept.len(), size);
+    let mut free = vec![true; all.len()];
+    // `mem::replace` marks the label taken and says whether it was free:
+    // a second target with the same old label takes a free one instead.
+    let claimed: Vec<Option<usize>> = kept
+        .iter()
+        .map(|label| {
+            let at = all.iter().position(|l| Some(l.as_slice()) == *label)?;
+            std::mem::replace(&mut free[at], false).then_some(at)
+        })
+        .collect();
+    let mut rest = (0..all.len()).filter(|&at| free[at]);
+    claimed
+        .into_iter()
+        .map(|at| {
+            let at = at.or_else(|| rest.next());
+            all[at.expect("`all_labels` gives at least one label per target")].clone()
+        })
+        .collect()
+}
+
+/// The labels for `count` targets before `labels` cuts the list to
+/// `count`: every way to finish a label, at least `count` of them.
+fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     assert!(size >= 2, "the config guarantees two letters or more");
     let mut labels: Vec<Vec<usize>> = (0..size).map(|letter| vec![letter]).collect();
     while labels.len() < count {
@@ -44,7 +84,6 @@ pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
         // here the one prefix label with its `size` children.
         labels.splice(last..=last, children);
     }
-    labels.truncate(count);
     labels
 }
 
@@ -183,6 +222,21 @@ impl Selector {
     pub fn reopen(&mut self, count: usize, alphabet_size: usize) {
         self.labels = labels(count, alphabet_size);
         self.typed.clear();
+    }
+
+    /// The same command on the targets of a new scan, with `labels` from
+    /// [`relabel`]: everything typed stays, as the tags it was typed for
+    /// kept their labels. Letters no longer leading to a tag go (their
+    /// targets left), and a verb typed after them stays.
+    pub fn relabel(&mut self, labels: Vec<Vec<usize>>) {
+        self.labels = labels;
+        // Labels are prefix-free, so one equal to `typed` means none goes
+        // on from it, and the next letter could pick nothing.
+        let leads = |l: &Vec<usize>| l.len() > self.typed.len() && l.starts_with(&self.typed);
+        if !self.labels.iter().any(leads) {
+            self.typed.clear();
+            self.armed_at = 0;
+        }
     }
 
     /// Whether a label is still possible: it starts with what's typed.
@@ -545,7 +599,99 @@ mod tests {
     // Property tests: proptest makes up thousands of (count, size) pairs and
     // checks each rule holds for all of them, then shrinks any failure to the
     // smallest case that still fails.
+    /// Labels as text over "asdf", from `relabel`.
+    fn relabelled(kept: &[Option<&str>]) -> Vec<String> {
+        let letters = |l: &str| {
+            l.bytes()
+                .map(|b| b"asdf".iter().position(|&a| a == b).unwrap())
+                .collect()
+        };
+        let kept: Vec<Option<Vec<usize>>> = kept.iter().map(|k| k.map(letters)).collect();
+        let kept: Vec<Option<&[usize]>> = kept.iter().map(Option::as_deref).collect();
+        relabel(&kept, 4)
+            .iter()
+            .map(|l| l.iter().map(|&i| "asdf".as_bytes()[i] as char).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_target_found_again_keeps_its_label() {
+        // `d` left and a new target came first: `s` and `f` stay put.
+        assert_eq!(
+            relabelled(&[None, Some("s"), Some("f")]),
+            ["a", "s", "f"],
+            "the new one takes the first free label"
+        );
+        assert_eq!(relabelled(&[Some("f"), None]), ["f", "a"]);
+    }
+
+    #[test]
+    fn one_more_target_moves_one_label() {
+        // a s d f, then a fifth: f splits into fa fs fd ff.
+        let mut kept = vec![Some("a"), Some("s"), Some("d"), Some("f")];
+        kept.insert(2, None);
+        assert_eq!(relabelled(&kept), ["a", "s", "fa", "d", "fs"]);
+    }
+
+    #[test]
+    fn a_label_gone_from_the_set_or_claimed_twice_is_replaced() {
+        // Down to two targets: `fs` isn't one of a s d f any more.
+        assert_eq!(relabelled(&[Some("fs"), Some("s")]), ["a", "s"]);
+        assert_eq!(relabelled(&[Some("s"), Some("s")]), ["s", "a"]);
+    }
+
+    #[test]
+    fn a_rescan_keeps_letters_that_still_lead_somewhere() {
+        let mut s = five();
+        s.press(verb(Action::Right));
+        s.press(letter(3));
+        // `fa` and `fs` are still there, in another order.
+        s.relabel(vec![vec![3, 1], vec![0], vec![3, 0]]);
+        assert_eq!(s.typed(), [3]);
+        assert_eq!(s.press(letter(0)), picked(2, Action::Right));
+        s.press(letter(3));
+        // Every `f…` target left: the letters go, the verb stays.
+        s.press(verb(Action::Right));
+        s.relabel(vec![vec![0], vec![1], vec![3]]);
+        assert_eq!((s.typed(), s.armed()), (&[][..], Some(Action::Right)));
+        s.press(Input::Backspace);
+        assert_eq!(s.armed(), None, "Backspace takes the verb back");
+    }
+
     proptest! {
+        #[test]
+        fn relabels_stay_prefix_free_and_keep_what_they_can(
+            size in 2usize..8,
+            before in 1usize..300,
+            was in prop::collection::vec(prop::option::of(any::<usize>()), 0..300),
+        ) {
+            // Some targets were there before, under any of the old labels,
+            // two of them under the same one at times.
+            let old = labels(before, size);
+            let kept: Vec<Option<&[usize]>> = was
+                .iter()
+                .map(|w| w.map(|i| old[i % old.len()].as_slice()))
+                .collect();
+            let count = kept.len();
+            let ls = relabel(&kept, size);
+            prop_assert_eq!(ls.len(), count);
+            for (i, a) in ls.iter().enumerate() {
+                for b in &ls[i + 1..] {
+                    prop_assert!(!b.starts_with(a) && !a.starts_with(b), "{:?} and {:?}", a, b);
+                }
+            }
+            // A kept label that's in the set, claimed first, is kept.
+            let all = all_labels(count, size);
+            for (i, k) in kept.iter().enumerate() {
+                if let Some(k) = k
+                    && all.iter().any(|l| l == k)
+                    && !kept[..i].contains(&Some(*k))
+                {
+                    prop_assert_eq!(&ls[i][..], *k);
+                }
+            }
+        }
+
         #[test]
         fn labels_obey_every_rule(count in 0usize..600, size in 2usize..12) {
             let ls = labels(count, size);

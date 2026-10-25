@@ -85,6 +85,18 @@ fn dispatch(cli: &Cli) -> Result<()> {
     }
 }
 
+/// Targets from a file: they never change, and opened blocks show all
+/// their lines, with no windows to check them against.
+struct Saved;
+
+impl pick::Source for Saved {
+    fn rescan(&mut self) -> Result<Option<Snapshot>> {
+        Ok(None)
+    }
+
+    fn keep(&self, _: &mut Snapshot) {}
+}
+
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
@@ -106,9 +118,14 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         overlay.keyboard_mode()
     );
     let cursor = || anyhow::bail!("no pointer when drawing from a file");
-    // Opened blocks show all their lines: nothing to check them against.
-    let keep = |_: &mut Snapshot| {};
-    match pick::pick(&mut overlay, config, &mut snapshot, None, &cursor, &keep)? {
+    match pick::pick(
+        &mut overlay,
+        config,
+        &mut snapshot,
+        None,
+        &cursor,
+        &mut Saved,
+    )? {
         Pick::Target { index, act } => {
             let (x, y) = (act.nudge.x, act.nudge.y);
             eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());

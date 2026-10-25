@@ -21,7 +21,7 @@ mod wayland;
 use std::{
     collections::VecDeque,
     io::{ErrorKind, Read as _},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -320,13 +320,18 @@ impl Overlay {
         self.state.gate.redrawn()
     }
 
-    /// Waits for the next thing to react to.
-    pub fn next_event(&mut self) -> Result<Event> {
+    /// Waits for the next thing to react to, until `until` if given: `None`
+    /// when that time comes first.
+    pub fn next_event(&mut self, until: Option<Instant>) -> Result<Option<Event>> {
         loop {
             if let Some(event) = self.state.events.pop_front() {
-                return Ok(event);
+                return Ok(Some(event));
             }
-            self.event_loop.dispatch(None, &mut self.state)?;
+            let wait = until.map(|until| until.saturating_duration_since(Instant::now()));
+            if wait == Some(Duration::ZERO) {
+                return Ok(None);
+            }
+            self.event_loop.dispatch(wait, &mut self.state)?;
         }
     }
 
