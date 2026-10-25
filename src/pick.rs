@@ -2,6 +2,8 @@
 //! the user leaves. The glue between `overlay` (pixels and keys) and
 //! `selection` (what the keys mean), so neither has to know the other.
 
+use std::time::Instant;
+
 use anyhow::{Result, bail};
 
 use crate::{
@@ -10,7 +12,7 @@ use crate::{
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
     overlay::{Dot, Event, Frame, Overlay, Tag},
-    selection::{Input, Selector, Step},
+    selection::{Input, Selector, Step, relabel},
     snapshot::{Snapshot, Target},
 };
 
@@ -53,24 +55,40 @@ impl<'a> Scene<'a> {
     }
 }
 
+/// Where a pick's targets come from, asked again while the tags are up.
+pub trait Source {
+    /// The targets as they are now, or `None` when they can't change (a
+    /// saved snapshot). A run scans its windows again.
+    fn rescan(&mut self) -> Result<Option<Snapshot>>;
+    /// Drops the lines of an opened block that another window covers or
+    /// the monitor cuts off.
+    fn keep(&self, opened: &mut Snapshot);
+}
+
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
 /// `verb` (from `--verb`) is armed as if its key were the first one typed.
 /// `cursor` reads where the pointer is. The overlay never sees the mouse
 /// move, so it's read again at every key: a dot shows where a nudged
 /// `Space` lands from the pointer as of the last key.
 ///
+/// Every `[scan] refresh` with no pick, `source` scans again and the tags
+/// follow: a target found again keeps its tag, and what was typed for it
+/// stays typed (see `selection::relabel`).
+///
 /// A block's tag (a pixel target with lines in `opens`) opens it instead
 /// of picking: `shown` becomes the block opened, its lines filtered by
-/// `keep` (none under another window or off the monitor), and the command
-/// goes on there, with what was typed before the block's tag (a verb, its
-/// Shift, arrows). `shown` ends as the snapshot the pick was made in.
+/// `source` (none under another window or off the monitor), and the
+/// command goes on there, with what was typed before the block's tag (a
+/// verb, its Shift, arrows). The lines stay as they were opened: a rescan
+/// has no blocks to open. `shown` ends as the snapshot the pick was made
+/// in.
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
     shown: &mut Snapshot,
     verb: Option<Action>,
     cursor: &dyn Fn() -> Result<Point>,
-    keep: &dyn Fn(&mut Snapshot),
+    source: &mut dyn Source,
 ) -> Result<Pick> {
     let mut selector = Selector::new(
         shown.targets.len(),
@@ -89,8 +107,39 @@ pub fn pick(
         config,
         &Scene::new(&shown.targets, screen, pointer),
     ))?;
+    // When the tags are next brought up to date. The wait starts once a
+    // scan is done, so a slow scan never runs back to back with the next.
+    let next = || config.refresh.map(|every| Instant::now() + every);
+    let mut due = next();
     loop {
-        let input = match overlay.next_event()? {
+        let Some(event) = overlay.next_event(due)? else {
+            due = None;
+            let Some(fresh) = source.rescan()? else {
+                continue;
+            };
+            // The new scan replaces the old even when its targets are the
+            // same: the re-check reads its windows too.
+            let changed = fresh.targets != shown.targets;
+            let kept: Vec<Option<&[usize]>> = fresh
+                .survivors(shown)
+                .into_iter()
+                .map(|was| was.map(|i| selector.labels()[i].as_slice()))
+                .collect();
+            let labels = relabel(&kept, config.alphabet.len());
+            selector.relabel(labels);
+            *shown = fresh;
+            if changed {
+                pointer = cursor().ok();
+                overlay.update(&frame(
+                    &selector,
+                    config,
+                    &Scene::new(&shown.targets, screen, pointer),
+                ))?;
+            }
+            due = next();
+            continue;
+        };
+        let input = match event {
             Event::Key(key, mods) => match input_of(key, mods, config) {
                 Some(input) => input,
                 None => continue,
@@ -112,13 +161,14 @@ pub fn pick(
             }
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
                 let mut opened = shown.open(index);
-                keep(&mut opened);
+                source.keep(&mut opened);
                 selector = before;
                 // A block with no line left to show stays shut, as if its
                 // last letter missed.
                 if !opened.targets.is_empty() {
                     *shown = opened;
                     selector.reopen(shown.targets.len(), config.alphabet.len());
+                    due = None;
                 }
                 overlay.update(&frame(
                     &selector,

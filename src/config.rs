@@ -15,6 +15,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -36,7 +37,19 @@ struct File {
     style: Style,
     pointer: FilePointer,
     pixels: FilePixels,
+    scan: FileScan,
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileScan {
+    /// Ms from the end of one scan to the next while the tags are up, `0`
+    /// for no rescans but the one after each click.
+    refresh: Option<u32>,
+}
+
+/// How often the tags are brought up to date, in ms, unless the file says.
+const REFRESH: u32 = 500;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -164,6 +177,9 @@ pub struct Config {
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
+    /// How long the tags stay up before the windows are scanned again,
+    /// `None` for only after a click: `[scan] refresh`.
+    pub refresh: Option<Duration>,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -551,6 +567,10 @@ impl Config {
                 Pixels::Fast => Some(Detector::Fast),
                 Pixels::Off => None,
             },
+            refresh: match file.scan.refresh.unwrap_or(REFRESH) {
+                0 => None,
+                ms => Some(Duration::from_millis(ms.into())),
+            },
         })
     }
 
@@ -632,6 +652,11 @@ impl Config {
         let _ = write!(
             out,
             "\n[pixels]\ndetector = \"{detector}\"   # windows with no accessibility tree: \"full\", \"fast\" for slower CPUs, or \"off\"\n"
+        );
+        let refresh = self.refresh.map_or(0, |every| every.as_millis());
+        let _ = write!(
+            out,
+            "\n[scan]\nrefresh = {refresh}   # ms the tags stay up before a rescan; 0 for only after a click\n"
         );
         out
     }
@@ -823,6 +848,28 @@ mod tests {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
+        }
+    }
+
+    #[test]
+    fn tags_refresh_every_half_second_unless_set() {
+        let read = |text: &str| Config::parse(text, &us()).unwrap().refresh;
+        assert_eq!(read(""), Some(Duration::from_millis(500)));
+        assert_eq!(
+            read("[scan]\nrefresh = 250"),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(read("[scan]\nrefresh = 0"), None);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[scan]\nrefresh = -1").contains("invalid value"));
+        assert!(err("[scan]\nrefrash = 9").contains("unknown field"));
+        for text in ["", "[scan]\nrefresh = 250", "[scan]\nrefresh = 0"] {
+            let config = Config::parse(text, &us()).unwrap();
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(
+                again.refresh, config.refresh,
+                "{text:?} reads back the same"
+            );
         }
     }
 
