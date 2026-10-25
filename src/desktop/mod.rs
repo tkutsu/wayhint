@@ -18,6 +18,7 @@ mod atspi;
 mod capture;
 pub mod filter;
 mod hyprland;
+mod kitty;
 mod notify;
 pub mod recheck;
 pub mod surfaces;
@@ -28,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use futures::future;
 
 use self::{
@@ -43,6 +44,7 @@ pub use self::{
         Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors,
         window_by_address,
     },
+    kitty::is_kitty,
     notify::warn,
     recheck::Verdict,
     surfaces::Stack,
@@ -52,7 +54,7 @@ use crate::{
     pixels::{self, Detector, Found, Frame},
     snapshot::{Read, Snapshot, Target},
     space::Space,
-    text::{Span, Text},
+    text::{Place, Span, Text},
 };
 
 /// How long the re-check may take: one object, four small requests.
@@ -71,6 +73,10 @@ const TEXT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long finding where a query's new matches are may take.
 const LOCATE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long kitty may take to say what one window shows: one request,
+/// answered in a few ms.
+const KITTY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The patch a document body's tag sits on, as a terminal's, in logical px.
 const BODY_TAG: (i32, i32) = (36, 24);
@@ -449,9 +455,37 @@ impl Desktop {
         Ok(recheck::verdict(target, fresh.as_ref(), window))
     }
 
-    /// The text of every object in `snapshot.texts` that shows some, for
-    /// text mode, and why the reading stopped early, if it did.
-    pub fn read_text(&self, snapshot: &Snapshot) -> (Vec<Text>, Option<String>) {
+    /// The text of every object in `snapshot.texts` that shows some, and
+    /// of every kitty pane, for text mode.
+    pub fn read_text(&self, snapshot: &Snapshot) -> Reading {
+        let (mut texts, incomplete) = self.read_objects(snapshot);
+        let mut unread = Vec::new();
+        let kitties = snapshot.windows.iter().enumerate();
+        for (index, scanned) in kitties.filter(|(_, s)| is_kitty(&s.window)) {
+            let window = &scanned.window;
+            match kitty::read(window, KITTY_TIMEOUT) {
+                Ok(panes) => texts.extend(panes.into_iter().map(|pane| Text {
+                    rect: pane.cells.whole(),
+                    place: Place::Cells(pane.cells),
+                    window: index,
+                    name: pane.title,
+                    area: window.rect,
+                    start: 0,
+                    content: pane.content,
+                })),
+                Err(e) => unread.push(e.context(window.class.clone())),
+            }
+        }
+        Reading {
+            texts,
+            incomplete,
+            unread,
+        }
+    }
+
+    /// The text of every object in `snapshot.texts` that shows some, and
+    /// why the reading stopped early, if it did.
+    fn read_objects(&self, snapshot: &Snapshot) -> (Vec<Text>, Option<String>) {
         let origin = |window: usize| snapshot.windows[window].window.rect.origin();
         let objects: Vec<(&ObjectId, Rect, bool)> = snapshot
             .texts
@@ -470,7 +504,7 @@ impl Desktop {
             .filter_map(|(read, (index, source))| {
                 let read = read?;
                 Some(Text {
-                    source: index,
+                    place: Place::Object(index),
                     window: source.window,
                     name: read.name,
                     rect: read.bounds.offset(origin(source.window)),
@@ -485,13 +519,17 @@ impl Desktop {
 
     /// Where each of `spans` of `texts` (read from `snapshot`) is on
     /// screen: a global box per line, none if the app can't say. A text
-    /// that is a name has no characters to ask about.
+    /// that is a name has no characters to ask about; a terminal's isn't
+    /// asked, its cells say.
     pub fn locate(&self, snapshot: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
         let asks: Vec<Option<(&ObjectId, u32, u32)>> = spans
             .iter()
-            .map(|s| {
-                let source = &snapshot.texts[texts[s.text].source];
-                (!source.named).then_some((&source.object, s.start, s.end))
+            .map(|s| match texts[s.text].place {
+                Place::Object(index) => {
+                    let source = &snapshot.texts[index];
+                    (!source.named).then_some((&source.object, s.start, s.end))
+                }
+                Place::Cells(_) => None,
             })
             .collect();
         let boxes = self
@@ -501,21 +539,60 @@ impl Desktop {
             .into_iter()
             .zip(spans)
             .map(|(parts, span)| {
-                let origin = snapshot.windows[texts[span.text].window]
-                    .window
-                    .rect
-                    .origin();
+                let text = &texts[span.text];
+                if let Place::Cells(cells) = &text.place {
+                    return cells.boxes(span.start, span.end);
+                }
+                let origin = snapshot.windows[text.window].window.rect.origin();
                 parts.into_iter().map(|r| r.offset(origin)).collect()
             })
             .collect()
     }
 
-    /// Characters `start..end` of `object`'s text as they are now: the
-    /// last look before acting on a match.
-    pub fn read_range(&self, object: &ObjectId, start: u32, end: u32) -> Result<String> {
-        let read = self.scanner.read_range(object, start, end, RECHECK_TIMEOUT);
-        self.runtime.block_on(read)
+    /// Characters `start..end` of a text in `snapshot`'s window `window`
+    /// as they are now: the last look before acting on a match. A
+    /// terminal's must also still be in the same cells.
+    pub fn read_range(
+        &self,
+        snapshot: &Snapshot,
+        window: usize,
+        place: &Place,
+        start: u32,
+        end: u32,
+    ) -> Result<String> {
+        let cells = match place {
+            Place::Object(index) => {
+                let object = &snapshot.texts[*index].object;
+                let read = self.scanner.read_range(object, start, end, RECHECK_TIMEOUT);
+                return self.runtime.block_on(read);
+            }
+            Place::Cells(cells) => cells,
+        };
+        let panes = kitty::read(&snapshot.windows[window].window, KITTY_TIMEOUT)?;
+        let pane = panes
+            .into_iter()
+            .find(|p| p.cells.pane == cells.pane)
+            .context("the pane closed")?;
+        if !pane.cells.same_place(cells, start, end) {
+            bail!("the text moved");
+        }
+        let take = end.saturating_sub(start) as usize;
+        Ok(pane
+            .content
+            .chars()
+            .skip(start as usize)
+            .take(take)
+            .collect())
     }
+}
+
+/// What text mode reads: the texts, and what got in the way.
+pub struct Reading {
+    pub texts: Vec<Text>,
+    /// Why reading the accessible objects stopped early, if it did.
+    pub incomplete: Option<String>,
+    /// The windows whose text couldn't be read, and why.
+    pub unread: Vec<anyhow::Error>,
 }
 
 /// Whether the frame `scanned`'s tags came from is still clearly the
