@@ -49,6 +49,14 @@ pub enum Pick {
     Rescan,
 }
 
+/// A refresh can move tags without changing which targets their keys name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    Unchanged,
+    Redraw,
+    Retag,
+}
+
 /// What the screen holds while a pick runs: the targets, the monitor they
 /// are on, and the pointer, if known, for where a nudged `Space` lands.
 struct Scene<'a> {
@@ -150,15 +158,18 @@ pub fn pick(
             }
             // A source that can't change is asked once.
             due = None;
-            let Some(changed) = rescan(config, shown, &mut selector, source)? else {
+            let Some(refresh) = rescan(config, shown, &mut selector, source)? else {
                 continue;
             };
-            if changed {
+            if refresh != Refresh::Unchanged {
                 overlay.set_layout(shown);
                 pointer = cursor().ok();
-                // A label may name a different target now. Keys aimed at
-                // the previous scan must not pick from the new one.
-                overlay.show(&tags(&selector, shown, pointer))?;
+                let frame = tags(&selector, shown, pointer);
+                if refresh == Refresh::Retag {
+                    overlay.show(&frame)?;
+                } else {
+                    overlay.update(&frame)?;
+                }
             }
             due = next();
             continue;
@@ -225,32 +236,42 @@ pub fn pick(
 
 /// Brings `shown` up to date with a fresh scan from `source`: a target
 /// found again keeps its tag, and what was typed for it stays typed (see
-/// `selection::relabel`). Whether the targets changed, and so must be
-/// drawn again; `None` if they never can (a saved snapshot).
+/// `selection::relabel`). Says whether tags need drawing or new input;
+/// `None` if targets never change (a saved snapshot).
 fn rescan(
     config: &Config,
     shown: &mut Snapshot,
     selector: &mut Selector,
     source: &mut dyn Source,
-) -> Result<Option<bool>> {
+) -> Result<Option<Refresh>> {
     let Some(mut fresh) = source.rescan()? else {
         return Ok(None);
     };
     fresh.merge_nearby(config.merge_distance);
-    let changed = targets_changed(shown, &fresh);
-    selector.relabel(&fresh.survivors(shown), config.alphabet.len());
-    *shown = fresh;
-    Ok(Some(changed))
-}
-
-/// Pixel targets can have identical fields in a replacement window, so
-/// compare their owners too before deciding whether tags must be redrawn.
-fn targets_changed(before: &Snapshot, after: &Snapshot) -> bool {
-    after.obstacles != before.obstacles
-        || after.targets != before.targets
-        || after.targets.iter().zip(&before.targets).any(|(now, old)| {
-            after.windows[now.window].window.address != before.windows[old.window].window.address
+    let changed = fresh.obstacles != shown.obstacles || fresh.targets != shown.targets;
+    let survivors = fresh.survivors(shown);
+    let retagged = selector.relabel(&survivors, config.alphabet.len());
+    // Movement and captured ink need a redraw, not a fresh input gate.
+    // An object reused for a different action, or a replacement window
+    // with identical pixel boxes, must still discard stale keys.
+    let replaced = fresh.targets.iter().zip(&survivors).any(|(now, was)| {
+        was.is_none_or(|i| {
+            let old = &shown.targets[i];
+            fresh.windows[now.window].window.address != shown.windows[old.window].window.address
+                || now.role != old.role
+                || now.name != old.name
+                || now.editable != old.editable
+                || now.opens != old.opens
         })
+    });
+    *shown = fresh;
+    Ok(Some(if retagged || replaced {
+        Refresh::Retag
+    } else if changed {
+        Refresh::Redraw
+    } else {
+        Refresh::Unchanged
+    }))
 }
 
 /// What a key means: a built-in key, else a verb or repeat, else a tag
@@ -413,6 +434,158 @@ fn upper(letter: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Source for Snapshot {
+        fn rescan(&mut self) -> Result<Option<Snapshot>> {
+            Ok(Some(self.clone()))
+        }
+
+        fn keep(&self, _: &mut Snapshot) {
+            unreachable!("refresh tests do not open blocks")
+        }
+
+        fn read_text(&mut self, _: &Snapshot) -> Vec<Text> {
+            unreachable!("refresh tests do not enter text mode")
+        }
+
+        fn locate(&mut self, _: &Snapshot, _: &[Text], _: &[Span]) -> Vec<Vec<Rect>> {
+            unreachable!("refresh tests do not locate text")
+        }
+
+        fn shows(&self, _: &Snapshot, _: usize, _: Point) -> bool {
+            unreachable!("refresh tests do not locate text")
+        }
+    }
+
+    fn refresh_scene() -> (Config, Snapshot, Selector) {
+        let config = Config::parse(
+            "[keys]\nalphabet = \"ab\"\nleft = \"\"",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let window = crate::desktop::Window {
+            address: "0x1".into(),
+            pid: 1,
+            class: "test".into(),
+            title: String::new(),
+            rect: Rect::new(0, 0, 800, 600),
+            monitor: 0,
+            focused: true,
+            kind: crate::desktop::Kind::Client,
+            frames: Vec::new(),
+        };
+        let found = crate::pixels::Found {
+            direct: vec![[10, 10, 30, 30], [50, 10, 70, 30], [90, 10, 110, 30]],
+            ..crate::pixels::Found::default()
+        };
+        let mut snapshot = Snapshot::build(
+            1,
+            0,
+            [crate::snapshot::Read::Pixels {
+                window: &window,
+                found: &found,
+                scale: 1.0,
+                stats: &crate::desktop::Stats::default(),
+            }],
+        );
+        for (i, target) in snapshot.targets.iter_mut().enumerate() {
+            target.object = Some(crate::desktop::tree::ObjectId {
+                bus: ":1.7".into(),
+                path: format!("/{i}"),
+            });
+        }
+        let selector = Selector::new(3, config.alphabet.len(), Action::Left);
+        (config, snapshot, selector)
+    }
+
+    #[test]
+    fn a_refresh_of_the_same_controls_keeps_hint_input_live() {
+        let (config, mut shown, mut selector) = refresh_scene();
+        let mut fresh = shown.clone();
+        // An animated control moves while the user presses the first b
+        // of ba/bb. Resetting the gate here loses its release entirely.
+        fresh.targets[1].rect.x += 1;
+        fresh.targets[1].visible.x += 1;
+        fresh.targets[1].hit.x += 1;
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Redraw),
+            "a redraw must keep queued keys and presses awaiting release"
+        );
+        assert_eq!(selector.press(Input::Letter(1, Mods::NONE)), Step::Typing);
+        assert_eq!(selector.typed(), [1]);
+    }
+
+    #[test]
+    fn obstacle_changes_and_target_reordering_keep_partial_hints() {
+        let (config, mut shown, mut selector) = refresh_scene();
+        assert_eq!(selector.press(Input::Letter(1, Mods::NONE)), Step::Typing);
+        let mut fresh = shown.clone();
+        fresh.obstacles.push(Rect::new(200, 200, 20, 20));
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Redraw)
+        );
+        fresh.targets.reverse();
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Redraw)
+        );
+        assert_eq!(selector.typed(), [1]);
+        assert!(matches!(
+            selector.press(Input::Letter(0, Mods::NONE)),
+            Step::Picked { index: 1, .. }
+        ));
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Unchanged)
+        );
+    }
+
+    #[test]
+    fn changed_tag_meanings_still_reset_hint_input() {
+        let check = |change: fn(&mut Snapshot)| {
+            let (config, mut shown, mut selector) = refresh_scene();
+            let mut fresh = shown.clone();
+            change(&mut fresh);
+            assert_eq!(
+                rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+                Some(Refresh::Retag)
+            );
+        };
+        check(|s| s.targets[1].name = "Replacement action".into());
+        check(|s| s.targets[1].role = "entry".into());
+        check(|s| s.targets[1].editable = true);
+        check(|s| s.targets[1].opens.push(Rect::new(50, 10, 20, 5)));
+        check(|s| s.targets[1].object.as_mut().unwrap().path = "/new".into());
+        check(|s| s.windows[0].window.address = "0x2".into());
+        check(|s| s.targets.truncate(2));
+    }
+
+    #[test]
+    fn pixel_hints_stay_live_when_their_window_moves_but_not_when_replaced() {
+        let (config, mut shown, mut selector) = refresh_scene();
+        for target in &mut shown.targets {
+            target.object = None;
+        }
+        let mut fresh = shown.clone();
+        let by = Point::new(10, 20);
+        fresh.windows[0].window.rect = fresh.windows[0].window.rect.offset(by);
+        for target in &mut fresh.targets {
+            target.rect = target.rect.offset(by);
+            target.visible = target.visible.offset(by);
+            target.hit = target.hit.offset(by);
+        }
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Redraw)
+        );
+        fresh.windows[0].window.address = "0x2".into();
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Retag)
+        );
+    }
 
     #[test]
     fn upper_keeps_one_character() {
