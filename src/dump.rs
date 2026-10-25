@@ -3,6 +3,9 @@
 //! Each flag stops the pipeline at a different seam, so every part can be
 //! checked alone: `--window` after Hyprland, `--raw` after the walk, the
 //! default after the filter (a snapshot, which `overlay --from` reads).
+//! `--pixels` skips the tree and prints the tags the window's picture
+//! gives, whether or not it has a tree: the pixel detector, on windows
+//! whose tree says what the right answers are.
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
@@ -11,7 +14,7 @@ use crate::{
     cli::Dump,
     desktop::{self, Desktop, Monitor, Window, filter},
     geometry::Rect,
-    snapshot::Snapshot,
+    snapshot::{Read, Snapshot},
 };
 
 pub fn run(args: &Dump) -> Result<()> {
@@ -24,6 +27,9 @@ pub fn run(args: &Dump) -> Result<()> {
     if args.window {
         return print(&window_and_monitor(&window)?);
     }
+    if let Some(detector) = args.pixels {
+        return print(&desktop::read_pixels(&window, detector)?);
+    }
 
     let desktop = Desktop::connect()?;
     let (tree, stats) = desktop.read_tree(&window)?;
@@ -34,7 +40,7 @@ pub fn run(args: &Dump) -> Result<()> {
         });
     }
     let filtered = filter::filter(&tree);
-    let snapshot = Snapshot::build(1, window.monitor, [(&tree, &filtered, &stats)]);
+    let snapshot = Snapshot::build(1, window.monitor, [Read::Tree(&tree, &filtered, &stats)]);
     if !args.explain {
         return print(&snapshot);
     }

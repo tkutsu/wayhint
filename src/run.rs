@@ -8,7 +8,9 @@
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
-//! one, except where another window covers them.
+//! one, except where another window covers them. A window with no
+//! accessibility tree gets tags from its pixels; a block of text there
+//! gets one tag, which opens into tags on its lines.
 //!
 //! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
 //! before the tag's last letter), or a verb and the spot under the
@@ -18,7 +20,7 @@
 //! so a tag near the spot can click anywhere.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
-//! where it was.
+//! where it was. A pixel target has none, so it can't be repeated.
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
@@ -62,10 +64,10 @@ struct Session {
 /// A command on a target, as the repeat key does it again, nudge and all.
 /// The target is kept as its accessibility object, which stays the same
 /// across scans for as long as the control exists; its tag and position
-/// may not.
+/// may not. `None` for a target found in pixels.
 #[derive(Debug, Clone)]
 struct Command {
-    object: ObjectId,
+    object: Option<ObjectId>,
     act: Act,
 }
 
@@ -112,19 +114,23 @@ impl Session {
         loop {
             // No tags while scanning: nothing stale can be typed.
             self.overlay.clear()?;
-            let monitor = self.overlay.monitor();
+            // A copy: the overlay is lent to the pick while blocks open.
+            let monitor = &self.overlay.monitor().clone();
             let stack = desktop::stack(monitor.id)?;
-            let (snapshot, unread) = self.desktop.scan(&stack, monitor);
-            report(&snapshot, &unread)?;
+            let (scanned, unread) = self.desktop.scan(&stack, monitor, config.pixels);
+            report(&scanned, &unread)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
-            // later rounds start with the default action again.
+            // later rounds start with the default action again. `snapshot`
+            // is what the pick ends in: the scan, or a block opened in it.
+            let mut snapshot = scanned.clone();
             let picked = pick::pick(
                 &mut self.overlay,
                 config,
-                &snapshot.targets,
+                &mut snapshot,
                 verb.take(),
                 &desktop::cursor,
+                &|opened| desktop::keep_visible(opened, &stack, monitor),
             )?;
             let done = match picked {
                 Pick::Leave => return Ok(()),
@@ -147,14 +153,21 @@ impl Session {
                 Pick::Repeat => {
                     // `clone`: `self.command` needs all of `self`, so
                     // `self.last` can't stay borrowed through the call.
+                    // The search is in the whole scan, even from inside an
+                    // opened block.
                     let last = self.last.clone();
                     let found = last.as_ref().and_then(|last| {
-                        let mut targets = snapshot.targets.iter();
-                        targets.position(|t| t.object == last.object)
+                        let object = last.object.as_ref()?;
+                        let mut targets = scanned.targets.iter();
+                        targets.position(|t| t.object.as_ref() == Some(object))
                     });
                     match (last, found) {
-                        (Some(last), Some(index)) => {
-                            self.command(config, &snapshot, index, last)?
+                        (Some(last), Some(index)) => self.command(config, &scanned, index, last)?,
+                        (Some(last), None) if last.object.is_none() => {
+                            eprintln!(
+                                "wayhint: not repeating: the target was found in pixels, which can't be found again"
+                            );
+                            Done::Refused
                         }
                         (Some(_), None) => {
                             eprintln!("wayhint: not repeating: the target is gone");
@@ -207,9 +220,12 @@ impl Session {
                 // A click on a text field ends the mode, so typing goes to
                 // it. So does one nudged out of the target's box: wayhint
                 // doesn't know what's there, and a field next door would
-                // take the focus while the tags took the typing. Staying on
-                // is for clicks it can vouch for. A hover only looks.
-                let ends = action.clicks() && (editable || !target.rect.contains(at));
+                // take the focus while the tags took the typing. And one on
+                // a target found in pixels, which could be a field for all
+                // wayhint knows. Staying on is for clicks it can vouch for.
+                // A hover only looks.
+                let vouched = target.object.is_some() && target.rect.contains(at);
+                let ends = action.clicks() && (editable || !vouched);
                 self.last = Some(command);
                 Ok(Done::Acted { ends })
             }
@@ -305,6 +321,12 @@ fn report(snapshot: &Snapshot, unread: &[anyhow::Error]) -> Result<()> {
     }
     for e in unread {
         eprintln!("wayhint: no tags in {e:#}");
+    }
+    for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
+        eprintln!(
+            "wayhint: tags in {} come from its pixels ({:.0} ms): it has no accessibility tree",
+            scanned.window.class, scanned.stats.ms
+        );
     }
     for scanned in &snapshot.windows {
         if let Some(why) = &scanned.stats.incomplete {
