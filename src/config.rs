@@ -119,7 +119,7 @@ struct FilePointer {
 }
 
 /// How far one arrow press moves a command, in px, unless the file says.
-const NUDGE: u16 = 14;
+const NUDGE: u16 = 10;
 
 /// Where the cursor goes after a click: `[pointer] after`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,7 +641,7 @@ impl Config {
         };
         let _ = write!(
             out,
-            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click\n",
+            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click; held, it goes on, faster\n",
             self.nudge
         );
         let detector = match self.pixels {
@@ -821,8 +821,8 @@ mod tests {
     }
 
     #[test]
-    fn nudge_is_14_px_unless_set() {
-        assert_eq!(Config::parse("", &us()).unwrap().nudge, 14);
+    fn nudge_is_10_px_unless_set() {
+        assert_eq!(Config::parse("", &us()).unwrap().nudge, 10);
         let five = Config::parse("[pointer]\nnudge = 5", &us()).unwrap();
         assert_eq!(five.nudge, 5);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());

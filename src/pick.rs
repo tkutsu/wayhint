@@ -19,6 +19,13 @@ use crate::{
 
 /// How far above the monitor's bottom edge the status pill sits, in px.
 const PILL_LIFT: i32 = 48;
+/// How far inside its monitor's edge a nudge stops, in px: far enough for
+/// the whole dot to show.
+const EDGE: i32 = 5;
+/// A held arrow speeds up by one `[pointer] nudge` a tick every this many
+/// ticks (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` a tick.
+const SPEED_UP: u16 = 8;
+const TOP_SPEED: u16 = 4;
 
 /// How a pick ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,14 +147,15 @@ pub fn pick(
             due = next();
             continue;
         };
-        let input = match event {
-            Event::Key(key, mods) => match input_of(key, mods, config) {
-                Some(input) => input,
-                None => continue,
-            },
+        let (key, mods, ticks) = match event {
+            Event::Key(key, mods) => (key, mods, 0),
+            Event::Held(key, mods, ticks) => (key, mods, ticks),
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
             Event::Workspace => return Ok(Pick::Rescan),
+        };
+        let Some(input) = input_of(key, mods, ticks, config) else {
+            continue;
         };
         // The command as it stood before this key: what a block opens with.
         let before = selector.clone();
@@ -196,9 +204,11 @@ pub fn pick(
 /// letter, else nothing. The config keeps command keys out of the alphabet
 /// and apart from each other, so the order never decides anything. A tag letter matches with or
 /// without Shift: Shift on it is a Shift-click, carried in `mods`. An
-/// arrow moves the command `[pointer] nudge` px its way, whatever is held.
-fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
-    let nudge = |x, y| Some(Input::Nudge(Point::new(x * config.nudge, y * config.nudge)));
+/// arrow moves the command `[pointer] nudge` px its way, whatever is held,
+/// and held down it goes on, faster at each of its `ticks` (see `speed`).
+fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> {
+    let step = config.nudge * speed(ticks);
+    let nudge = |x, y| Some(Input::Nudge(Point::new(x * step, y * step)));
     match key.code {
         KeyCode::ESC => Some(Input::Escape),
         KeyCode::BACKSPACE => Some(Input::Backspace),
@@ -296,14 +306,25 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     Frame { tags, dots }
 }
 
-/// Where a command nudged by `nudge` lands for the point `at`: kept on the
-/// one of `screens` (the monitors) that `at` is on, so an arrow too many
-/// stops at its edge instead of jumping to another monitor or a point no
-/// monitor has. Without a nudge that's `at` itself, wherever it is.
+/// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick
+/// held down, 0 being its press: one, and one more every `SPEED_UP` ticks,
+/// up to `TOP_SPEED`.
+fn speed(ticks: u16) -> i32 {
+    i32::from((1 + ticks / SPEED_UP).min(TOP_SPEED))
+}
+
+/// Where a command nudged by `nudge` lands for the point `at`: kept `EDGE`
+/// px inside the one of `screens` (the monitors) that `at` is on, so an
+/// arrow too many stops by its edge instead of jumping to another monitor
+/// or a point no monitor has, with its dot in sight. Without a nudge that's
+/// `at` itself, wherever it is.
 pub fn lands(at: Point, nudge: Point, screens: &[Rect]) -> Point {
+    if nudge == Point::default() {
+        return at;
+    }
     let moved = at.offset(nudge);
     match screens.iter().find(|s| s.contains(at)) {
-        Some(screen) => screen.clamp(moved),
+        Some(screen) => screen.inset(EDGE).clamp(moved),
         None => moved,
     }
 }
@@ -347,7 +368,7 @@ mod tests {
                 shift,
                 ..Mods::NONE
             };
-            input_of(key, mods, &config)
+            input_of(key, mods, 0, &config)
         };
         let shift = Mods {
             shift: true,
@@ -365,23 +386,54 @@ mod tests {
             Some(Input::Letter(0, shift)),
             "a Shift-click on a"
         );
-        assert_eq!(input(105, false), Some(Input::Nudge(Point::new(-14, 0))));
+        assert_eq!(input(105, false), Some(Input::Nudge(Point::new(-10, 0))));
         assert_eq!(
             input(103, true),
-            Some(Input::Nudge(Point::new(0, -14))),
+            Some(Input::Nudge(Point::new(0, -10))),
             "Shift changes nothing on an arrow"
+        );
+        let right = Key {
+            code: KeyCode::RIGHT,
+            shift: false,
+        };
+        let held = |ticks| input_of(right, Mods::NONE, ticks, &config);
+        assert_eq!(held(7), Some(Input::Nudge(Point::new(10, 0))));
+        assert_eq!(
+            held(8),
+            Some(Input::Nudge(Point::new(20, 0))),
+            "held, faster"
         );
     }
 
     #[test]
-    fn a_nudge_stops_at_the_edge_of_its_own_monitor() {
+    fn a_held_arrow_speeds_up_to_a_top_speed() {
+        let speeds: Vec<i32> = [0, 7, 8, 16, 24, 32, 1000].map(speed).into();
+        assert_eq!(speeds, [1, 1, 2, 3, 4, 4, 4]);
+    }
+
+    #[test]
+    fn a_nudge_stops_inside_the_edge_of_its_own_monitor() {
         let screens = [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)];
         let at = Point::new(10, 500);
         assert_eq!(
             lands(at, Point::new(28, -14), &screens),
             Point::new(38, 486)
         );
-        assert_eq!(lands(at, Point::new(-42, 0), &screens), Point::new(0, 500));
+        assert_eq!(
+            lands(at, Point::new(-42, 0), &screens),
+            Point::new(EDGE, 500)
+        );
+        let corner = Point::new(1, 1079);
+        assert_eq!(
+            lands(corner, Point::new(10, 0), &screens),
+            Point::new(11, 1079 - EDGE),
+            "a hit point on the edge: its dot comes inside it too"
+        );
+        assert_eq!(
+            lands(corner, Point::default(), &screens),
+            corner,
+            "no nudge: the click stays where it is"
+        );
         let right = Point::new(2100, 500);
         assert_eq!(
             lands(right, Point::default(), &screens[..1]),
@@ -390,8 +442,8 @@ mod tests {
         );
         assert_eq!(
             lands(right, Point::new(-196, 0), &screens),
-            Point::new(1920, 500),
-            "a nudge from the right monitor stops at its left edge"
+            Point::new(1920 + EDGE, 500),
+            "a nudge from the right monitor stops inside its left edge"
         );
     }
 

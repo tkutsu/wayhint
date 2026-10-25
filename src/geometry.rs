@@ -85,6 +85,14 @@ impl Rect {
         )
     }
 
+    /// The same rectangle `by` px smaller on every side, kept at least 1 px
+    /// across so it can still [`clamp`](Self::clamp).
+    #[must_use]
+    pub fn inset(self, by: i32) -> Self {
+        let (w, h) = ((self.w - 2 * by).max(1), (self.h - 2 * by).max(1));
+        Self::new(self.x + by, self.y + by, w, h)
+    }
+
     /// The same rectangle moved by `by`.
     #[must_use]
     pub const fn offset(self, by: Point) -> Self {
@@ -200,6 +208,13 @@ mod tests {
             Point::new(99, 0),
             "the right edge is the next rectangle's"
         );
+    }
+
+    #[test]
+    fn inset_shrinks_every_side() {
+        let r = Rect::new(10, 20, 100, 50);
+        assert_eq!(r.inset(5), Rect::new(15, 25, 90, 40));
+        assert_eq!(Rect::new(0, 0, 6, 6).inset(5), Rect::new(5, 5, 1, 1));
     }
 
     #[test]
