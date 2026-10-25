@@ -4,9 +4,14 @@
 //!
 //! ```text
 //! frame -> edge boxes ----+-> words -> phrases -> blocks -> tags
-//!       -> colour boxes --+                ^
-//!       -> texture (pictures, video) ------+
+//!       -> colour boxes --+    ^                  ^
+//!       -> sheet grids -------(drop)-> bodies ----+
+//!       -> texture (pictures, video) -------------+
 //! ```
+//!
+//! Each section of a window gets its own rule: a control or list row one
+//! tag, prose and code one tag that opens into lines, a picture none
+//! inside, a terminal or a sheet one body tag that focuses it and exits.
 //!
 //! The rules and every number come from the prototype in
 //! `.plans/pixel-tags.md` ("Baseline (2026-10-24)"), calibrated against
@@ -31,12 +36,15 @@
 
 mod buckets;
 mod contour;
+mod grid;
 mod group;
 mod runs;
 mod segment;
 mod texture;
 
 pub use group::{Block, Found};
+
+use crate::space::Space;
 
 /// A box as the prototype keeps one: left, top, right, bottom, the right
 /// and bottom edges outside it. Plain arrays sort and compare as Python's
@@ -110,17 +118,47 @@ impl Detector {
     }
 }
 
-/// Everything worth a tag in `frame`. A terminal gets one focus hint in
-/// clear space near its bottom, whichever detector is selected.
+/// Everything worth a tag in `frame`. A terminal is one body, whichever
+/// detector is selected; so is each sheet, whose cells get no tags.
 pub fn find(frame: &Frame, detector: Detector, terminal: bool) -> Found {
     if frame.width == 0 || frame.height == 0 {
         return Found::default();
     }
     if terminal {
-        return group::terminal(frame);
+        return Found {
+            bodies: vec![group::terminal(frame)],
+            ..Found::default()
+        };
     }
     let policy = detector.policy();
-    group::group(frame, &words(frame, &policy), &policy)
+    // The grid on a thread of its own, as the detector's passes are.
+    let (sheets, words) = std::thread::scope(|s| {
+        let sheets = s.spawn(|| grid::sheets(frame));
+        let words = words(frame, &policy);
+        let sheets = sheets
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        (sheets, words)
+    });
+    let words: Vec<Corners> = words
+        .into_iter()
+        .filter(|&w| !sheets.iter().any(|s| s.holds(group::centre(w))))
+        .collect();
+    let mut found = group::group(frame, &words, &policy);
+    if !sheets.is_empty() {
+        let space = Space::pixels(&grid::unruled(frame, &sheets));
+        found.bodies = sheets
+            .iter()
+            .map(|s| group::sheet(&space, s.cells))
+            .collect();
+    }
+    found
+}
+
+/// Ink in `frame` other than a sheet's grid lines: where a body's tag can
+/// go, so that an empty cell is clear space.
+pub fn cell_space(frame: &Frame) -> Space {
+    Space::pixels(&grid::unruled(frame, &grid::sheets(frame)))
 }
 
 /// `frame` at about one pixel per logical pixel, which every size rule

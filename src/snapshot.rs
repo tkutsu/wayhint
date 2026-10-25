@@ -117,8 +117,10 @@ pub enum Read<'a> {
 }
 
 /// The roles pixel tags carry, for `dump` and whoever reads a snapshot:
-/// a phrase or control, a block that opens, a picture or video.
+/// a phrase or control, a place to type into, a block that opens, a
+/// picture or video.
 const PIXELS: &str = "pixels";
+const PIXEL_BODY: &str = "pixel body";
 const PIXEL_BLOCK: &str = "pixel block";
 const PIXEL_MEDIA: &str = "pixel media";
 
@@ -333,9 +335,14 @@ fn pixel_targets(window: usize, origin: Point, scale: f64, found: &Found) -> Vec
         let (x, y) = (at(b[0]), at(b[1]));
         Rect::new(x, y, at(b[2]) - x, at(b[3]) - y).offset(origin)
     };
-    let direct = found.direct.iter().map(|&b| Target {
-        editable: found.input,
-        ..pixel_target(window, rect(b), PIXELS)
+    let direct = found
+        .direct
+        .iter()
+        .map(|&b| pixel_target(window, rect(b), PIXELS));
+    // Editable, as a text field is: the click ends the mode.
+    let bodies = found.bodies.iter().map(|&b| Target {
+        editable: true,
+        ..pixel_target(window, rect(b), PIXEL_BODY)
     });
     let blocks = found.blocks.iter().map(|block: &Block| Target {
         opens: block.phrases.iter().map(|&b| rect(b)).collect(),
@@ -345,7 +352,7 @@ fn pixel_targets(window: usize, origin: Point, scale: f64, found: &Found) -> Vec
         .media
         .iter()
         .map(|&b| pixel_target(window, rect(b), PIXEL_MEDIA));
-    direct.chain(blocks).chain(media).collect()
+    direct.chain(bodies).chain(blocks).chain(media).collect()
 }
 
 /// A target with nothing behind it but its box, clicked in the middle.
@@ -397,11 +404,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_focus_target_is_editable_and_never_opens_lines() {
+    fn a_body_is_editable_and_never_opens_lines_and_its_neighbours_are_not() {
         let window = window();
         let found = Found {
-            direct: vec![[320, 760, 356, 784]],
-            input: true,
+            direct: vec![[10, 10, 40, 30]],
+            bodies: vec![[320, 760, 356, 784]],
             ..Found::default()
         };
         let snapshot = Snapshot::build(
@@ -414,9 +421,12 @@ mod tests {
                 stats: &Stats::default(),
             }],
         );
-        assert_eq!(snapshot.targets.len(), 1);
-        assert!(snapshot.targets[0].editable && snapshot.targets[0].opens.is_empty());
-        assert!(snapshot.targets[0].object.is_none());
+        let [control, body] = &snapshot.targets[..] else {
+            panic!("{:?}", snapshot.targets);
+        };
+        assert_eq!((control.role.as_str(), control.editable), ("pixels", false));
+        assert_eq!(body.role, "pixel body");
+        assert!(body.editable && body.opens.is_empty() && body.object.is_none());
     }
 
     #[test]
@@ -479,7 +489,7 @@ mod tests {
                 phrases: vec![[0, 100, 300, 120], [0, 140, 200, 160]],
             }],
             media: vec![[400, 0, 800, 400]],
-            input: false,
+            bodies: Vec::new(),
         };
         let window = window();
         let stats = Stats::default();

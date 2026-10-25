@@ -112,7 +112,7 @@ fn found_json(found: &Found) -> serde_json::Value {
         "direct": found.direct,
         "blocks": found.blocks.iter().map(|b| json!({"rect": b.rect, "phrases": b.phrases})).collect::<Vec<_>>(),
         "media": found.media,
-        "input": found.input,
+        "bodies": found.bodies,
     })
 }
 
@@ -201,9 +201,9 @@ fn terminal_nvim_gets_one_focus_hint_on_clear_lower_pixels() {
     let frame = load(Path::new("tests/fixtures/terminal-nvim.png"));
     for detector in [Detector::Fast, Detector::Full] {
         let found = find(&frame, detector, true);
-        assert!(found.blocks.is_empty() && found.media.is_empty() && found.input);
-        assert_eq!(found.direct.len(), 1);
-        let [x, y, r, b] = found.direct[0];
+        assert!(found.direct.is_empty() && found.blocks.is_empty() && found.media.is_empty());
+        assert_eq!(found.bodies.len(), 1);
+        let [x, y, r, b] = found.bodies[0];
         assert!(y > frame.height as i32 / 2);
         assert_eq!(
             crate::space::Space::pixels(&frame).ink(crate::geometry::Rect::new(x, y, r - x, b - y)),
@@ -217,13 +217,52 @@ fn terminal_focus_is_near_the_lower_center_and_always_one_hint() {
     for (width, height) in [(900, 650), (80, 40), (8, 8)] {
         let frame = frame(width, height, |_, _| [20; 3]);
         let found = find(&frame, Detector::Fast, true);
-        assert!(found.input && found.blocks.is_empty() && found.media.is_empty());
-        assert_eq!(found.direct.len(), 1);
-        let [x, y, r, b] = found.direct[0];
+        assert!(found.direct.is_empty() && found.blocks.is_empty() && found.media.is_empty());
+        assert_eq!(found.bodies.len(), 1);
+        let [x, y, r, b] = found.bodies[0];
         assert!(x >= 0 && y >= 0 && r <= width as i32 && b <= height as i32);
         if width > 80 {
             assert!((i32::midpoint(x, r) - width as i32 / 2).abs() <= 4);
             assert!((height as i32 - b - 18).abs() <= 4);
+        }
+    }
+}
+
+/// Which captures hold a sheet: each PNG in the folders named by
+/// `WAYHINT_SHEET_SHOTS` (`:`-separated), with its grids, tags and time.
+/// Only spreadsheets should list a grid.
+#[test]
+#[ignore = "needs folders of captures"]
+fn sheet_shots() {
+    let dirs = std::env::var("WAYHINT_SHEET_SHOTS").expect("WAYHINT_SHEET_SHOTS");
+    for dir in dirs.split(':') {
+        let mut pngs: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "png"))
+            .collect();
+        pngs.sort();
+        for png in pngs {
+            let frame = load(&png);
+            let start = Instant::now();
+            let grids = grid::sheets(&frame);
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            let policy = Detector::Full.policy();
+            let start = Instant::now();
+            drop(group::group(&frame, &words(&frame, &policy), &policy));
+            let without = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let found = find(&frame, Detector::Full, false);
+            let total = start.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "{}: grids {grids:?} in {ms:.1} ms, find {total:.1} ms (without grids {without:.1}); \
+                 {} direct, {} blocks, {} bodies {:?}",
+                png.display(),
+                found.direct.len(),
+                found.blocks.len(),
+                found.bodies.len(),
+                found.bodies,
+            );
         }
     }
 }
@@ -238,12 +277,12 @@ fn terminal_tui_corpus() {
         let start = Instant::now();
         let found = find(&frame, Detector::Fast, true);
         assert!(
-            found.input && found.blocks.is_empty() && found.media.is_empty(),
+            found.direct.is_empty() && found.blocks.is_empty() && found.media.is_empty(),
             "{}",
             case.name
         );
-        assert_eq!(found.direct.len(), 1, "{}", case.name);
-        let [x, y, r, b] = found.direct[0];
+        assert_eq!(found.bodies.len(), 1, "{}", case.name);
+        let [x, y, r, b] = found.bodies[0];
         assert!(y >= frame.height as i32 / 2, "{}", case.name);
         assert!(
             (i32::midpoint(x, r) - frame.width as i32 / 2).abs() < frame.width as i32 / 4,
@@ -259,7 +298,7 @@ fn terminal_tui_corpus() {
         eprintln!(
             "{}: target={:?}, {:.2}ms",
             case.name,
-            found.direct,
+            found.bodies,
             start.elapsed().as_secs_f64() * 1000.0
         );
     }

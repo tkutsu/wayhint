@@ -262,6 +262,8 @@ impl Desktop {
             if window.rect.intersect(monitor.rect).is_none() {
                 continue;
             }
+            let is_body = |t: &Target| t.window == index && filter::is_body(&t.role, t.editable);
+            let bodies = snapshot.targets.iter().any(is_body);
             let captured = (|| -> Result<_> {
                 if window.kind != Kind::Client {
                     bail!("only clients can be exported");
@@ -273,12 +275,13 @@ impl Desktop {
                 };
                 let (frame, scale) =
                     pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
-                Ok((Space::pixels(&frame), scale))
+                let cells = bodies.then(|| pixels::cell_space(&frame));
+                Ok((Space::pixels(&frame), cells, scale))
             })();
             let origin = window.rect.origin();
             match &captured {
                 #[allow(clippy::cast_possible_truncation)]
-                Ok((space, scale)) => obstacles.extend(space.obstacles().into_iter().map(|r| {
+                Ok((space, _, scale)) => obstacles.extend(space.obstacles().into_iter().map(|r| {
                     let x = (f64::from(r.x) / scale).floor() as i32;
                     let y = (f64::from(r.y) / scale).floor() as i32;
                     let right = (f64::from(r.right()) / scale).ceil() as i32;
@@ -287,12 +290,12 @@ impl Desktop {
                 })),
                 Err(_) => obstacles.push(window.rect),
             }
-            for target in snapshot
-                .targets
-                .iter_mut()
-                .filter(|t| t.window == index && filter::is_body(&t.role, t.editable))
-            {
-                focus_body(target, origin, captured.as_ref().ok());
+            let cells = captured
+                .as_ref()
+                .ok()
+                .and_then(|(_, cells, scale)| Some((cells.as_ref()?, *scale)));
+            for target in snapshot.targets.iter_mut().filter(|t| is_body(t)) {
+                focus_body(target, origin, cells);
             }
         }
         // A body's click moved off its middle.
@@ -427,28 +430,22 @@ pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
 
 /// Shrinks a document body's tag to the clearest tag-sized patch nearest
 /// its middle, and clicks there: an empty cell of a sheet, a blank stretch
-/// of a page. Grid lines are ink too, but every empty cell has the same
-/// few, so the nearest empty one still wins. `picture` is the window's at
-/// some pixels per logical pixel, whose corner is at `origin`; without
-/// one, the middle.
+/// of a page. `picture` is the window's ink without grid lines
+/// ([`pixels::cell_space`]), at some pixels per logical pixel, whose
+/// corner is at `origin`; without one, the middle.
 #[allow(clippy::cast_possible_truncation)]
-fn focus_body(target: &mut Target, origin: Point, picture: Option<&(Space, f64)>) {
+fn focus_body(target: &mut Target, origin: Point, picture: Option<(&Space, f64)>) {
     let body = target.visible;
     let (w, h) = (BODY_TAG.0.min(body.w), BODY_TAG.1.min(body.h));
     let middle = body.center();
     let mut patch = Rect::new(middle.x - w / 2, middle.y - h / 2, w, h);
     if let Some((space, scale)) = picture {
         let pixel = |v: i32| (f64::from(v) * scale).round() as i32;
-        let (pw, ph) = (pixel(w), pixel(h));
         let area = body.inset(4);
         let (x, y) = (pixel(area.x - origin.x), pixel(area.y - origin.y));
-        let corners = Rect::new(x, y, pixel(area.w) - pw, pixel(area.h) - ph);
+        let area = Rect::new(x, y, pixel(area.w), pixel(area.h));
         let aim = Point::new(pixel(middle.x - origin.x), pixel(middle.y - origin.y));
-        let distance = |r: Rect| (r.center().x - aim.x).abs() + (r.center().y - aim.y).abs();
-        if corners.w >= 0
-            && corners.h >= 0
-            && let Some(r) = space.clearest(corners, pw, ph, distance)
-        {
+        if let Some(r) = space.spot(area, (pixel(w), pixel(h)), aim, 1) {
             let logical = |v: i32| (f64::from(v) / scale).round() as i32;
             patch = Rect::new(logical(r.x) + origin.x, logical(r.y) + origin.y, w, h);
         }
@@ -626,7 +623,7 @@ mod tests {
         let picture = (Space::rectangles(Rect::new(0, 0, 800, 600), &ink), 1.0);
 
         let mut target = sheet(body);
-        focus_body(&mut target, origin, Some(&picture));
+        focus_body(&mut target, origin, Some((&picture.0, picture.1)));
         let patch = target.visible;
         assert_eq!((patch.w, patch.h), BODY_TAG);
         assert_eq!(target.hit, patch.center());
@@ -643,17 +640,18 @@ mod tests {
         // Calc at 0,38 (2026-10-23): data in A1:E19 at the top left, the
         // rest of the sheet empty.
         let frame = pixels::tests::load(std::path::Path::new("tests/fixtures/calc.png"));
-        let picture = (Space::pixels(&frame), 1.0);
+        let cells = pixels::cell_space(&frame);
         let origin = Point::new(0, 38);
-        let ink = |r: Rect| picture.0.ink(r.offset(Point::new(0, -38)));
+        let ink = |r: Rect| cells.ink(r.offset(Point::new(0, -38)));
         let middle_patch = |body: Rect| {
             let c = body.center();
             Rect::new(c.x - 18, c.y - 12, 36, 24)
         };
         let data = Rect::new(45, 208, 220, 320);
-        for (body, reach) in [(Rect::new(45, 208, 2438, 1168), 100), (data, 400)] {
+        // Grid lines don't count: the empty middle is clear as it is.
+        for (body, reach) in [(Rect::new(45, 208, 2438, 1168), 8), (data, 400)] {
             let mut target = sheet(body);
-            focus_body(&mut target, origin, Some(&picture));
+            focus_body(&mut target, origin, Some((&cells, 1.0)));
             let patch = target.visible;
             assert_eq!(patch.intersect(body), Some(patch), "inside the sheet");
             assert!(
@@ -664,6 +662,7 @@ mod tests {
             let off = (target.hit.x - middle.x).abs() + (target.hit.y - middle.y).abs();
             assert!(off <= reach, "{off} px from the middle");
             if body != data {
+                assert_eq!(ink(patch), 0, "an empty cell");
                 assert!(patch.intersect(data).is_none(), "off the data");
             }
         }

@@ -209,6 +209,12 @@ or Writer page, also gets one hint instead of one per cell or paragraph. It
 sits on the empty spot nearest the middle of the visible sheet or page, and
 selecting it clicks there and exits, so typing goes to the document. Links,
 fields and other controls in and around the document keep their own hints.
+A window tagged from its pixels, such as Google Sheets in a browser without
+accessibility, gets the same single hint when it shows a spreadsheet grid:
+thin row lines a text line apart, crossed by column lines. Its cells, row
+numbers and column letters get no hints; the toolbar, formula bar and sheet
+tabs keep theirs. Grid lines don't count as clutter, so the hint goes to
+the empty cell nearest the middle.
 
 `pixels.terminal_processes` replaces the default terminal list. Add or remove
 executable names or window classes; matching ignores case. Executable names
@@ -273,8 +279,10 @@ the arrows are never command keys.
   trigger the running TUI's mouse behavior.
 - A window's rounded corners show up as small pixel tags at its corners.
 - A document's hint clicks a cell or a line of text, which moves the
-  active cell or the text cursor there. Web sheets such as Google Sheets
-  don't report a spreadsheet document, so they keep their usual tags.
+  active cell or the text cursor there.
+- A sheet is found from its pixels only when its grid lines show, are 1 px
+  thin, and rows are 12 to 40 px apart. A sheet with gridlines turned off,
+  or one zoomed far in, keeps a tag per cell. Links inside cells get no tag.
 
 ## License
 

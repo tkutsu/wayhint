@@ -1,5 +1,5 @@
 //! Clear space in a window: coarse ink cells and constant-time rectangle
-//! queries. Terminal and document focus hints and displaced labels use
+//! queries. Body hints (terminals, sheets, pages) and displaced labels use
 //! this map.
 
 // Frame coordinates fit i32; signed values are clipped before indexing.
@@ -9,7 +9,10 @@
     clippy::cast_sign_loss
 )]
 
-use crate::{geometry::Rect, pixels::Frame};
+use crate::{
+    geometry::{Point, Rect},
+    pixels::Frame,
+};
 
 const CELL: usize = 4;
 
@@ -124,16 +127,20 @@ impl Space {
         false
     }
 
-    /// The `w`x`h` patch with the least ink whose corner lies in `corners`
-    /// (edges included, every 4 px), the lowest `cost` among equals. Rows
-    /// go bottom to top, so an exact tie takes the lower patch.
-    pub fn clearest(
-        &self,
-        corners: Rect,
-        w: i32,
-        h: i32,
-        cost: impl Fn(Rect) -> i32,
-    ) -> Option<Rect> {
+    /// Where a body's one tag goes (a terminal, a sheet, a page): the
+    /// `w`x`h` patch inside `area` with the least ink, nearest `aim` among
+    /// equals, a step down counting `down` steps across. Corners every
+    /// 4 px; rows go bottom to top, so an exact tie takes the lower patch.
+    /// `None` when the patch doesn't fit.
+    pub fn spot(&self, area: Rect, (w, h): (i32, i32), aim: Point, down: i32) -> Option<Rect> {
+        let corners = Rect::new(area.x, area.y, area.w - w, area.h - h);
+        if corners.w < 0 || corners.h < 0 {
+            return None;
+        }
+        let cost = |r: Rect| {
+            let c = r.center();
+            (c.x - aim.x).abs() + down * (c.y - aim.y).abs()
+        };
         let mut best = None;
         for y in (corners.y..=corners.bottom()).rev().step_by(CELL) {
             for x in (corners.x..=corners.right()).step_by(CELL) {
