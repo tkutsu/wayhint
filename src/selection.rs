@@ -177,6 +177,14 @@ impl Selector {
         !self.typed.is_empty() || self.armed.is_some() || self.nudge != Point::default()
     }
 
+    /// The same command on `count` new targets: the verb, its Shift and the
+    /// arrows stay, the letters go. A block's tag opens into its lines this
+    /// way (`pick::pick`), and what was typed before it goes on to them.
+    pub fn reopen(&mut self, count: usize, alphabet_size: usize) {
+        self.labels = labels(count, alphabet_size);
+        self.typed.clear();
+    }
+
     /// Whether a label is still possible: it starts with what's typed.
     pub fn matches(&self, label: &[usize]) -> bool {
         label.starts_with(&self.typed)
@@ -495,6 +503,24 @@ mod tests {
             },
             "the next command starts clean"
         );
+    }
+
+    #[test]
+    fn a_reopened_command_keeps_its_verb_shift_and_arrows() {
+        // A shifted verb and an arrow, then the block's letter: what `pick`
+        // keeps from before that letter and reopens on the block's lines.
+        let mut s = five();
+        s.press(Input::Verb(Action::Double, SHIFT));
+        s.press(Input::Nudge(Point::new(14, 0)));
+        s.reopen(3, 5);
+        assert_eq!(s.typed(), [0usize; 0]);
+        assert_eq!(s.labels().len(), 3);
+        let Step::Picked { index: 1, act } = s.press(Input::Letter(1, SHIFT)) else {
+            panic!("the second line's letter picks it");
+        };
+        assert_eq!(act.action, Action::Double);
+        assert!(!act.mods.shift, "the verb's Shift is still no Shift-click");
+        assert_eq!(act.nudge, Point::new(14, 0));
     }
 
     #[test]
