@@ -53,6 +53,11 @@ impl Holds {
         self.0.len() != before
     }
 
+    /// Whether no arrow is down.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Forgets every arrow: new tags, or the keyboard handed back.
     pub fn clear(&mut self) {
         self.0.clear();

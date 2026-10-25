@@ -19,6 +19,10 @@ pub struct Cli {
     #[arg(long)]
     pub once: bool,
 
+    /// Scan once, keep the hints fixed, and exit after one action
+    #[arg(long = "static")]
+    pub static_mode: bool,
+
     /// Arm a verb for the first tag, as if its key were typed first
     #[arg(long, value_name = "ACTION")]
     pub verb: Option<Action>,

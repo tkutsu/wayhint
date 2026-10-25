@@ -46,15 +46,71 @@ struct FileScan {
     /// Ms from the end of one scan to the next while the tags are up, `0`
     /// for no rescans but the one after each click.
     refresh: Option<u32>,
+    /// Logical px between nearby hint centers, `0` to keep every hint.
+    merge_distance: Option<u16>,
 }
 
 /// How often the tags are brought up to date, in ms, unless the file says.
 const REFRESH: u32 = 500;
+const MERGE_DISTANCE: u16 = 0;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FilePixels {
     detector: Pixels,
+    terminal_processes: Vec<String>,
+}
+
+impl Default for FilePixels {
+    fn default() -> Self {
+        Self {
+            detector: Pixels::default(),
+            terminal_processes: [
+                "kitty",
+                "foot",
+                "footclient",
+                "alacritty",
+                "ghostty",
+                "com.mitchellh.ghostty",
+                "wezterm",
+                "wezterm-gui",
+                "org.wezfurlong.wezterm",
+                "xterm",
+            ]
+            .map(str::to_owned)
+            .into(),
+        }
+    }
+}
+
+impl FilePixels {
+    fn validate(&self) -> Result<()> {
+        if self
+            .terminal_processes
+            .iter()
+            .any(|name| name.trim().is_empty() || name.contains('/'))
+        {
+            bail!(
+                "[pixels] terminal_processes: use executable names or window classes, without paths or empty names"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Pixel dumps use the same terminal list without needing a keyboard keymap.
+pub fn terminal_processes(explicit: Option<&Path>) -> Result<Vec<String>> {
+    let path = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| default_path().filter(|p| p.exists()));
+    let Some(path) = path else {
+        return Ok(FilePixels::default().terminal_processes);
+    };
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    let file: File = toml::from_str(&text).with_context(|| format!("config {}", path.display()))?;
+    file.pixels.validate()?;
+    Ok(file.pixels.terminal_processes)
 }
 
 /// Tags for windows with no accessibility tree, found in their pixels:
@@ -177,9 +233,13 @@ pub struct Config {
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
+    /// Executable basenames or window classes read as terminal input areas.
+    pub terminal_processes: Vec<String>,
     /// How long the tags stay up before the windows are scanned again,
     /// `None` for only after a click: `[scan] refresh`.
     pub refresh: Option<Duration>,
+    /// Nearby hint centers share one tag: `[scan] merge_distance`.
+    pub merge_distance: u16,
 }
 
 /// One tag letter: the key to press and the character drawn for it.
@@ -551,6 +611,7 @@ impl Config {
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
+        file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
             bail!("[pointer] nudge = 0: an arrow press must move at least 1 px");
@@ -567,10 +628,12 @@ impl Config {
                 Pixels::Fast => Some(Detector::Fast),
                 Pixels::Off => None,
             },
+            terminal_processes: file.pixels.terminal_processes,
             refresh: match file.scan.refresh.unwrap_or(REFRESH) {
                 0 => None,
                 ms => Some(Duration::from_millis(ms.into())),
             },
+            merge_distance: file.scan.merge_distance.unwrap_or(MERGE_DISTANCE),
         })
     }
 
@@ -653,10 +716,24 @@ impl Config {
             out,
             "\n[pixels]\ndetector = \"{detector}\"   # windows with no accessibility tree: \"full\", \"fast\" for slower CPUs, or \"off\"\n"
         );
+        let _ = writeln!(
+            out,
+            "terminal_processes = [{}]   # replaces the default list; [] disables terminal detection",
+            self.terminal_processes
+                .iter()
+                .map(|name| quote(name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let refresh = self.refresh.map_or(0, |every| every.as_millis());
         let _ = write!(
             out,
             "\n[scan]\nrefresh = {refresh}   # ms the tags stay up before a rescan; 0 for only after a click\n"
+        );
+        let _ = writeln!(
+            out,
+            "merge_distance = {}   # logical px between nearby hint centers; 0 keeps every hint",
+            self.merge_distance
         );
         out
     }
@@ -849,6 +926,41 @@ mod tests {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
+        }
+    }
+
+    #[test]
+    fn terminal_process_lists_replace_defaults_and_round_trip() {
+        let default = Config::parse("", &us()).unwrap();
+        assert!(default.terminal_processes.iter().any(|s| s == "kitty"));
+        for list in ["[]", "[\"custom-term\", \"kitty\"]", "[\"foot\"]"] {
+            let config =
+                Config::parse(&format!("[pixels]\nterminal_processes = {list}"), &us()).unwrap();
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(config.terminal_processes, again.terminal_processes);
+        }
+        for list in ["[\"\"]", "[\"  \"]", "[\"/usr/bin/kitty\"]"] {
+            assert!(
+                Config::parse(&format!("[pixels]\nterminal_processes = {list}"), &us()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn nearby_hint_merging_is_disabled_unless_set() {
+        for (text, expected) in [
+            ("", 0),
+            ("[scan]\nmerge_distance = 5", 5),
+            ("[scan]\nmerge_distance = 12", 12),
+            ("[scan]\nmerge_distance = 0", 0),
+        ] {
+            let config = Config::parse(text, &us()).unwrap();
+            assert_eq!(config.merge_distance, expected);
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.merge_distance, expected);
+        }
+        for value in ["-1", "65536", "1.5"] {
+            assert!(Config::parse(&format!("[scan]\nmerge_distance = {value}"), &us()).is_err());
         }
     }
 

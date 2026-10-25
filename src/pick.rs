@@ -98,6 +98,8 @@ pub fn pick(
     cursor: &dyn Fn() -> Result<Point>,
     source: &mut dyn Source,
 ) -> Result<Pick> {
+    shown.merge_nearby(config.merge_distance);
+    overlay.set_layout(shown);
     let mut selector = Selector::new(
         shown.targets.len(),
         config.alphabet.len(),
@@ -121,13 +123,18 @@ pub fn pick(
     let mut due = next();
     loop {
         let Some(event) = overlay.next_event(due)? else {
+            // A scan holds up the keys for as long as it takes, so none
+            // while an arrow is held: the nudge would freeze mid-move.
+            if overlay.holding() {
+                due = next();
+                continue;
+            }
             due = None;
-            let Some(fresh) = source.rescan()? else {
+            let Some(mut fresh) = source.rescan()? else {
                 continue;
             };
-            // The new scan replaces the old even when its targets are the
-            // same: the re-check reads its windows too.
-            let changed = fresh.targets != shown.targets;
+            fresh.merge_nearby(config.merge_distance);
+            let changed = targets_changed(shown, &fresh);
             let kept: Vec<Option<&[usize]>> = fresh
                 .survivors(shown)
                 .into_iter()
@@ -137,8 +144,11 @@ pub fn pick(
             selector.relabel(labels);
             *shown = fresh;
             if changed {
+                overlay.set_layout(shown);
                 pointer = cursor().ok();
-                overlay.update(&frame(
+                // A label may name a different target now. Keys aimed at
+                // the previous scan must not pick from the new one.
+                overlay.show(&frame(
                     &selector,
                     config,
                     &Scene::new(&shown.targets, screen, pointer),
@@ -171,15 +181,19 @@ pub fn pick(
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
                 let mut opened = shown.open(index);
                 source.keep(&mut opened);
+                opened.merge_nearby(config.merge_distance);
                 selector = before;
                 // A block with no line left to show stays shut, as if its
                 // last letter missed.
-                if !opened.targets.is_empty() {
-                    *shown = opened;
-                    selector.reopen(shown.targets.len(), config.alphabet.len());
-                    due = None;
+                if opened.targets.is_empty() {
+                    continue;
                 }
-                overlay.update(&frame(
+                *shown = opened;
+                selector.reopen(shown.targets.len(), config.alphabet.len());
+                due = None;
+                // The lines have new labels: discard taps queued for the
+                // block before accepting keys for those lines.
+                overlay.show(&frame(
                     &selector,
                     config,
                     &Scene::new(&shown.targets, screen, pointer),
@@ -198,6 +212,16 @@ pub fn pick(
             Step::Exit => return Ok(Pick::Leave),
         }
     }
+}
+
+/// Pixel targets can have identical fields in a replacement window, so
+/// compare their owners too before deciding whether tags must be redrawn.
+fn targets_changed(before: &Snapshot, after: &Snapshot) -> bool {
+    after.obstacles != before.obstacles
+        || after.targets != before.targets
+        || after.targets.iter().zip(&before.targets).any(|(now, old)| {
+            after.windows[now.window].window.address != before.windows[old.window].window.address
+        })
 }
 
 /// What a key means: a built-in key, else a verb or repeat, else a tag
@@ -270,6 +294,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
         .iter()
         .map(|(label, target)| Tag {
             at: spot(target),
+            target: Some(target.hit),
             position: style.position,
             text: prefix
                 .chars()
@@ -283,6 +308,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             at: Point::new(scene.screen.center().x, scene.screen.bottom() - PILL_LIFT),
             position: Position::Center,
             text: action.name().into(),
+            target: None,
             typed: 0,
         });
     }
@@ -292,14 +318,18 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     } else {
         // Each line runs from the tag to where its click lands: from its
         // hit point, nudged.
-        let starts = open.iter().map(|(_, target)| (spot(target), target.hit));
+        let starts = open
+            .iter()
+            .enumerate()
+            .map(|(i, (_, target))| (spot(target), target.hit, Some(i)));
         // A pointer on another monitor draws nothing here, as it should:
         // `lands` keeps its dot on that monitor, off this overlay.
         starts
-            .chain(scene.pointer.map(|p| (p, p)))
-            .map(|(from, hit)| Dot {
+            .chain(scene.pointer.map(|p| (p, p, None)))
+            .map(|(from, hit, tag)| Dot {
                 from,
                 at: lands(hit, nudge, &[scene.screen]),
+                tag,
             })
             .collect()
     };
@@ -460,6 +490,7 @@ mod tests {
         let dot = |x| Dot {
             from: Point::new(x, 100),
             at: Point::new(x + 14, 100),
+            tag: None,
         };
         assert_eq!(frame(&selector, &config, &scene(100)).dots, [dot(100)]);
         assert_eq!(frame(&selector, &config, &scene(500)).dots, [dot(500)]);
@@ -509,6 +540,11 @@ mod tests {
         assert_eq!(froms(&selector), [220, 320], "b leaves ba and bb");
         selector.press(Input::Nudge(Point::new(14, 0)));
         let dots = frame(&selector, &config, &scene).dots;
+        assert_eq!(
+            dots.iter().map(|d| d.tag).collect::<Vec<_>>(),
+            [Some(0), Some(1)],
+            "the remaining dots stay attached to their filtered tags"
+        );
         assert_eq!(
             dots.iter().map(|d| d.at).collect::<Vec<_>>(),
             [Point::new(214, 114), Point::new(314, 114)],

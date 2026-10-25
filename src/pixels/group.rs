@@ -10,9 +10,8 @@
 //! from Rust's (banker's rounding, NumPy's medians) the port does it
 //! Python's way.
 //!
-//! A terminal's text is grouped by [`terminal`] instead: by lines, which
-//! the prototype never saw (its captures all have a tree), so it has no
-//! score to keep.
+//! A terminal gets one [`terminal`] focus target in clear space near its
+//! bottom, leaving its text and TUI controls to the keyboard.
 
 use std::collections::{HashMap, HashSet};
 
@@ -75,6 +74,8 @@ pub struct Found {
     pub blocks: Vec<Block>,
     /// Pictures and video big enough to be content.
     pub media: Vec<Corners>,
+    /// Direct targets focus a keyboard-driven input area and end the mode.
+    pub input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,138 +138,39 @@ pub fn group(frame: &Frame, words: &[Corners], policy: &Policy) -> Found {
         direct,
         blocks: found_blocks,
         media,
+        input: false,
     }
 }
 
-/// Groups a terminal's `words`. Its text sits in lines on a grid, in any
-/// colour, and none of it is a control: each line is one phrase, or one
-/// per column where three blank cells or more part them; lines stacked
-/// into a block get one tag, and a line alone is a tag, as is a cursor.
-/// Boxes that aren't text, such as rules and frames drawn in box
-/// characters, are dropped.
-pub fn terminal(frame: &Frame, words: &[Corners]) -> Found {
-    let bands = bands(words);
-    if bands.is_empty() {
-        return Found::default();
-    }
-    let h = median(bands.iter().map(|b| f64::from(height(b.0))).collect()) as i32;
-    // Every phrase a line tall, on its band's middle: lines of small
-    // letters stack with lines of capitals.
-    let mut phrases = Vec::new();
-    for (span, mut band) in bands {
-        band.sort_unstable();
-        let top = (span[1] + span[3] - h).div_euclid(2);
-        let mut cur = band[0];
-        for &b in &band[1..] {
-            if b[0] - cur[2] <= 2 * h {
-                cur[2] = cur[2].max(b[2]);
-            } else {
-                phrases.push([cur[0], top, cur[2], top + h]);
-                cur = b;
+/// One focus target in clear space near the terminal's bottom. Text and
+/// TUI widgets are keyboard driven, so they never become separate hints.
+/// If the lower half is completely occupied, use its least busy patch.
+pub fn terminal(frame: &Frame) -> Found {
+    let space = crate::space::Space::pixels(frame);
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    let (bw, bh) = (36.min(w), 24.min(h));
+    let mut best = None;
+    let baseline = (h - 18).max(bh);
+    let last_y = (h - bh - 4).max(0);
+    let last_x = (w - bw - 4).max(0);
+    for y in ((h / 2).min(last_y)..=last_y).rev().step_by(4) {
+        for x in (4.min(last_x)..=last_x).step_by(4) {
+            let r = crate::geometry::Rect::new(x, y, bw, bh);
+            let score = (
+                space.ink(r),
+                2 * (r.bottom() - baseline).abs() + (r.center().x - w / 2).abs(),
+            );
+            if best.as_ref().is_none_or(|(old, _)| score < *old) {
+                best = Some((score, r));
             }
         }
-        phrases.push([cur[0], top, cur[2], top + h]);
     }
-    let media = texture::media(frame);
-    phrases.retain(|&p| !media.iter().any(|&r| inside(centre(p), r)));
-    // The line holding a cursor is where you type: it leaves its block,
-    // and the cursor is its tag, so a click there leaves the cursor be.
-    let cursors = cursors(frame, h);
-    phrases.retain(|&p| !cursors.iter().any(|&c| inside(centre(c), p)));
-    let mut found = Found {
-        direct: cursors,
-        media,
+    let r = best.map_or(crate::geometry::Rect::new(0, 0, w, h), |(_, r)| r);
+    Found {
+        direct: vec![[r.x, r.y, r.right(), r.bottom()]],
+        input: true,
         ..Found::default()
-    };
-    for g in blocks(&phrases) {
-        match g[..] {
-            [p] => found.direct.push(p),
-            _ => found.blocks.push(Block {
-                rect: union(&g),
-                phrases: g,
-            }),
-        }
     }
-    found
-}
-
-/// Text boxes in lines, each line with the span of its tallest box: boxes
-/// go tallest first into the line their middle falls in, so a glyph's
-/// piece joins its line rather than starting one.
-fn bands(words: &[Corners]) -> Vec<(Corners, Vec<Corners>)> {
-    let mut text: Vec<Corners> = words.iter().copied().filter(|&b| is_text(b)).collect();
-    text.sort_by_key(|&b| (-height(b), b[1] + b[3], b[0]));
-    let mut out: Vec<(Corners, Vec<Corners>)> = Vec::new();
-    for b in text {
-        let middle = b[1] + b[3];
-        match out
-            .iter_mut()
-            .find(|(s, _)| 2 * s[1] <= middle && middle < 2 * s[3])
-        {
-            Some((_, band)) => band.push(b),
-            None => out.push((b, vec![b])),
-        }
-    }
-    out
-}
-
-/// A terminal's cursors: boxes one cell big in one colour, solid (the
-/// focused window's) or hollow (any other's), each side ending where the
-/// box does. A cell is a line `h` tall or taller, under twice that, and
-/// under three quarters as wide as it is tall. The gaps glyphs leave are
-/// boxes like that too, in the background's colour, which no cursor is.
-fn cursors(frame: &Frame, h: i32) -> Vec<Corners> {
-    let (w, ht) = (frame.width as i32, frame.height as i32);
-    let (pixels, _) = frame.rgb.as_chunks::<3>();
-    let at = |x: i32, y: i32| {
-        ((0..w).contains(&x) && (0..ht).contains(&y))
-            .then(|| pixels[y as usize * frame.width + x as usize])
-    };
-    let bg = background(pixels);
-    // How far `c` runs down from x, y, up to 2h.
-    let down = |x: i32, y: i32, c| {
-        (y..ht.min(y + 2 * h))
-            .take_while(|&y| at(x, y) == c)
-            .count()
-    };
-    let mut out = Vec::new();
-    for (y, row) in (0..).zip(pixels.chunks_exact(frame.width)) {
-        let mut x0 = 0;
-        for run in row.chunk_by(|a, b| a == b) {
-            let (c, x1) = (Some(run[0]), x0 + run.len() as i32);
-            if c != Some(bg)
-                && (3..2 * h).contains(&(x1 - x0))
-                && at(x0, y - 1) != c
-                && at(x1 - 1, y - 1) != c
-            {
-                let side = down(x0, y, c) as i32;
-                let bottom = y + side - 1;
-                if (h..2 * h).contains(&side)
-                    && 4 * (x1 - x0) < 3 * side
-                    && down(x1 - 1, y, c) as i32 == side
-                    && (x0..x1).all(|x| at(x, bottom) == c)
-                    && at(x0 - 1, bottom) != c
-                    && at(x1, bottom) != c
-                {
-                    out.push([x0, y, x1, y + side]);
-                }
-            }
-            x0 = x1;
-        }
-    }
-    out
-}
-
-/// The colour most of `pixels` are, from every 61st: a prime, so the
-/// sample doesn't keep to a few columns.
-fn background(pixels: &[[u8; 3]]) -> [u8; 3] {
-    let mut seen: HashMap<[u8; 3], usize> = HashMap::new();
-    for &p in pixels.iter().step_by(61) {
-        *seen.entry(p).or_default() += 1;
-    }
-    seen.into_iter()
-        .max_by_key(|&(c, n)| (n, c))
-        .map_or([0; 3], |(c, _)| c)
 }
 
 /// The words whose centres lie in `p`, in their order.
@@ -846,73 +748,5 @@ mod tests {
             let sorted = [0, 1, 2].map(|c| median(set.iter().map(|p| f64::from(p[c])).collect()));
             assert_eq!(counts.median(), sorted, "{set:?}");
         }
-    }
-
-    #[test]
-    fn a_terminal_is_tagged_by_its_lines() {
-        let words = [
-            // Two words, one with a descender, and a piece of a glyph.
-            [10, 10, 60, 23],
-            [68, 10, 120, 26],
-            [124, 14, 127, 20],
-            [10, 27, 90, 40],
-            [98, 27, 150, 40],
-            // A word, and another ten cells off: a second column.
-            [10, 44, 70, 57],
-            [200, 44, 240, 57],
-            // A rule, and a line alone further down.
-            [0, 62, 300, 63],
-            [10, 120, 80, 133],
-        ];
-        let frame = Frame {
-            width: 300,
-            height: 150,
-            rgb: vec![20; 300 * 150 * 3],
-        };
-        let found = terminal(&frame, &words);
-        assert_eq!(
-            found.blocks,
-            [Block {
-                rect: [10, 11, 150, 57],
-                phrases: vec![[10, 11, 127, 24], [10, 27, 150, 40], [10, 44, 70, 57]],
-            }]
-        );
-        assert_eq!(found.direct, [[200, 44, 240, 57], [10, 120, 80, 133]]);
-    }
-
-    #[test]
-    fn a_cursor_is_its_lines_tag() {
-        let (w, h) = (120, 60);
-        let mut rgb = vec![20; w * h * 3];
-        let mut paint = |r: Corners, hollow: bool| {
-            for y in r[1]..r[3] {
-                for x in r[0]..r[2] {
-                    let edge = x == r[0] || x == r[2] - 1 || y == r[1] || y == r[3] - 1;
-                    if edge || !hollow {
-                        let i = (y as usize * w + x as usize) * 3;
-                        rgb[i..i + 3].fill(200);
-                    }
-                }
-            }
-        };
-        // A hollow cursor after a word, and a solid one on the next line.
-        paint([30, 10, 37, 27], true);
-        paint([60, 30, 67, 47], false);
-        // Three cells wide, and shorter than a line: neither is a cursor.
-        paint([80, 30, 101, 47], false);
-        paint([10, 50, 17, 58], false);
-        let frame = Frame {
-            width: w,
-            height: h,
-            rgb,
-        };
-        let words = [[10, 12, 28, 25], [30, 10, 37, 27], [10, 31, 50, 44]];
-        let found = terminal(&frame, &words);
-        // The first line leaves the block it made with the second.
-        assert_eq!(
-            found.direct,
-            [[30, 10, 37, 27], [60, 30, 67, 47], [10, 30, 50, 45]]
-        );
-        assert_eq!(found.blocks, []);
     }
 }

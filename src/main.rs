@@ -30,11 +30,14 @@ mod keys;
 mod overlay;
 mod pick;
 mod pixels;
+mod placement;
 mod pointer;
 mod run;
 mod selection;
 mod snapshot;
+mod space;
 mod style;
+mod toggle;
 
 use std::{path::Path, process::ExitCode};
 
@@ -74,12 +77,15 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Config::load(cli.config.as_deref(), &layout)
     };
     match &cli.command {
-        None => run::run(&config()?, cli.once, cli.verb),
+        None => match toggle::start_or_stop()? {
+            Some(socket) => run::run(config()?, cli.once, cli.static_mode, cli.verb, socket),
+            None => Ok(()),
+        },
         Some(Command::Config) => {
             print!("{}", config()?.render());
             Ok(())
         }
-        Some(Command::Dump(args)) => dump::run(args),
+        Some(Command::Dump(args)) => dump::run(args, cli.config.as_deref()),
         Some(Command::Overlay { from }) => overlay_from(&config()?, from),
         Some(Command::Click { at, verb }) => run::click_at(*at, *verb),
     }
@@ -101,6 +107,7 @@ impl pick::Source for Saved {
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
     let mut snapshot = Snapshot::load(path)?;
+    snapshot.merge_nearby(config.merge_distance);
     let monitor = desktop::monitors()?
         .into_iter()
         .find(|m| m.id == snapshot.monitor)
