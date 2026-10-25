@@ -29,13 +29,14 @@ mod keyboard;
 mod keys;
 mod overlay;
 mod pick;
+mod pixels;
 mod pointer;
 mod run;
 mod selection;
 mod snapshot;
 mod style;
 
-use std::{io::IsTerminal as _, path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode};
 
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
@@ -58,13 +59,7 @@ fn main() -> ExitCode {
         Err(error) => {
             // `{:#}` prints the whole context chain on one line:
             // "config ~/.config/wayhint/config.toml: [keys] alphabet: ..."
-            let message = format!("wayhint: {error:#}");
-            eprintln!("{message}");
-            // Started from a keybind, stderr goes nowhere anyone looks, so
-            // the error goes on screen too. From a terminal, once is enough.
-            if !std::io::stderr().is_terminal() {
-                let _ = desktop::notify(&message);
-            }
+            desktop::warn(&format!("wayhint: {error:#}"));
             ExitCode::FAILURE
         }
     }
@@ -93,7 +88,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
-    let snapshot = Snapshot::load(path)?;
+    let mut snapshot = Snapshot::load(path)?;
     let monitor = desktop::monitors()?
         .into_iter()
         .find(|m| m.id == snapshot.monitor)
@@ -111,7 +106,9 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         overlay.keyboard_mode()
     );
     let cursor = || anyhow::bail!("no pointer when drawing from a file");
-    match pick::pick(&mut overlay, config, &snapshot.targets, None, &cursor)? {
+    // Opened blocks show all their lines: nothing to check them against.
+    let keep = |_: &mut Snapshot| {};
+    match pick::pick(&mut overlay, config, &mut snapshot, None, &cursor, &keep)? {
         Pick::Target { index, act } => {
             let (x, y) = (act.nudge.x, act.nudge.y);
             eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());

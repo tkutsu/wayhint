@@ -48,7 +48,7 @@ use self::{
 };
 use crate::{
     action::Mods,
-    desktop::Monitor,
+    desktop::{self, Monitor},
     geometry::Point,
     keyboard::{self, Keyboard, Locks},
     keys::Key,
@@ -287,7 +287,9 @@ impl Overlay {
         if self.state.input_methods.is_some() && self.state.passthrough.is_none() {
             match keyboard::seat_keymap().and_then(|keymap| Keyboard::new(&self.conn, &keymap)) {
                 Ok(passthrough) => self.state.passthrough = Some(passthrough),
-                Err(e) => eprintln!("wayhint: a key let go now may stay held in the app: {e:#}"),
+                Err(e) => desktop::warn(&format!(
+                    "wayhint: a key let go now may stay held in the app: {e:#}"
+                )),
             }
         }
         self.state.take_keys(&self.qh);

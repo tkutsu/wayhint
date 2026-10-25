@@ -11,7 +11,7 @@ use crate::{
     keys::{Key, KeyCode},
     overlay::{Dot, Event, Frame, Overlay, Tag},
     selection::{Input, Selector, Step},
-    snapshot::Target,
+    snapshot::{Snapshot, Target},
 };
 
 /// How far above the monitor's bottom edge the status pill sits, in px.
@@ -40,32 +40,52 @@ struct Scene<'a> {
     pointer: Option<Point>,
 }
 
-/// Shows tags for `targets` and reads keys until one is picked. `verb`
-/// (from `--verb`) is armed as if its key were the first one typed.
+impl<'a> Scene<'a> {
+    const fn new(targets: &'a [Target], screen: Rect, pointer: Option<Point>) -> Self {
+        Self {
+            targets,
+            screen,
+            pointer,
+        }
+    }
+}
+
+/// Shows tags for `shown`'s targets and reads keys until one is picked.
+/// `verb` (from `--verb`) is armed as if its key were the first one typed.
 /// `cursor` reads where the pointer is. The overlay never sees the mouse
 /// move, so it's read again at every key: a dot shows where a nudged
 /// `Space` lands from the pointer as of the last key.
+///
+/// A block's tag (a pixel target with lines in `opens`) opens it instead
+/// of picking: `shown` becomes the block opened, its lines filtered by
+/// `keep` (none under another window or off the monitor), and the command
+/// goes on there, with what was typed before the block's tag (a verb, its
+/// Shift, arrows). `shown` ends as the snapshot the pick was made in.
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
-    targets: &[Target],
+    shown: &mut Snapshot,
     verb: Option<Action>,
     cursor: &dyn Fn() -> Result<Point>,
+    keep: &dyn Fn(&mut Snapshot),
 ) -> Result<Pick> {
     let mut selector = Selector::new(
-        targets.len(),
+        shown.targets.len(),
         config.alphabet.len(),
         config.verbs.default_action(),
     );
     if let Some(action) = verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
-    let mut scene = Scene {
-        targets,
-        screen: overlay.monitor().rect,
-        pointer: cursor().ok(),
-    };
-    overlay.show(&frame(&selector, config, &scene))?;
+    let screen = overlay.monitor().rect;
+    let mut pointer = cursor().ok();
+    // A scene per drawing: `shown` changes when a block opens, so nothing
+    // may keep borrowing it in between.
+    overlay.show(&frame(
+        &selector,
+        config,
+        &Scene::new(&shown.targets, screen, pointer),
+    ))?;
     loop {
         let input = match overlay.next_event()? {
             Event::Key(key, mods) => match input_of(key, mods, config) {
@@ -75,14 +95,36 @@ pub fn pick(
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
         };
+        // The command as it stood before this key: what a block opens with.
+        let before = selector.clone();
         match selector.press(input) {
             Step::Typing => {
-                scene.pointer = cursor().ok();
-                overlay.update(&frame(&selector, config, &scene))?;
+                pointer = cursor().ok();
+                overlay.update(&frame(
+                    &selector,
+                    config,
+                    &Scene::new(&shown.targets, screen, pointer),
+                ))?;
+            }
+            Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
+                let mut opened = shown.open(index);
+                keep(&mut opened);
+                selector = before;
+                // A block with no line left to show stays shut, as if its
+                // last letter missed.
+                if !opened.targets.is_empty() {
+                    *shown = opened;
+                    selector.reopen(shown.targets.len(), config.alphabet.len());
+                }
+                overlay.update(&frame(
+                    &selector,
+                    config,
+                    &Scene::new(&shown.targets, screen, pointer),
+                ))?;
             }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
             Step::Here(act) => {
-                let from = match scene.pointer {
+                let from = match pointer {
                     Some(drawn) if act.nudge != Point::default() => drawn,
                     _ => cursor()?,
                 };
@@ -126,8 +168,9 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 /// where each would land if nudged.
 ///
 /// Each tag reads as the whole command: everything typed so far, dimmed,
-/// then the letters still to type. So an armed verb's key goes in front
-/// (`kEA` after `k`, with `k` and nothing else dimmed), where the eyes
+/// then the letters still to type. So an armed verb's key goes in front,
+/// wherever it was typed (`kEA` after `k`, with `k` and nothing else
+/// dimmed; `kEA` again after `e k`, with `kE` dimmed), where the eyes
 /// already are. Its name also shows as a pill at the bottom of the screen,
 /// for a verb that has no key (`--verb`) and for `Space`, which uses no
 /// tag. The pill is drawn as one more tag: same look, no new drawing code.
@@ -312,10 +355,10 @@ mod tests {
         )
         .unwrap();
         let target = |x| Target {
-            object: crate::desktop::tree::ObjectId {
+            object: Some(crate::desktop::tree::ObjectId {
                 bus: ":1.7".into(),
                 path: format!("/{x}"),
-            },
+            }),
             window: 0,
             rect: Rect::new(x - 20, 90, 40, 20),
             hit: Point::new(x, 100),
@@ -323,6 +366,7 @@ mod tests {
             name: String::new(),
             editable: false,
             clips: Vec::new(),
+            opens: Vec::new(),
         };
         let targets = [target(100), target(200), target(300)];
         let scene = Scene {

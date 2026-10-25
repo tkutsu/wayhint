@@ -45,6 +45,7 @@ use tiny_skia::Pixmap;
 
 use crate::{
     action::Mods,
+    desktop,
     keyboard::{Keyboard, Locks, held, read_keymap},
     keys::{Key, KeyCode},
     overlay::{
@@ -267,8 +268,8 @@ impl Dispatch2<ZwpInputMethodV2, State> for ImeEvents {
         // `unavailable`: another input method (fcitx, IBus) holds this seat.
         // Fall back to keyboard focus for the rest of the run.
         if let zwp_input_method_v2::Event::Unavailable = event {
-            eprintln!(
-                "wayhint: another input method holds the keyboard; taking focus instead (open menus will close)"
+            desktop::warn(
+                "wayhint: another input method holds the keyboard; taking focus instead (open menus will close)",
             );
             state.release_keys();
             state.input_methods = None;

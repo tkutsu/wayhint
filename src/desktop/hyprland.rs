@@ -1,6 +1,6 @@
 //! Hyprland over its IPC socket: which windows and layer surfaces a monitor
 //! shows and how they stack, where the monitors are, where the cursor is,
-//! and a notification when a run fails.
+//! and a notification when something goes wrong.
 //!
 //! The protocol is one request per connection: connect to
 //! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, write
@@ -14,7 +14,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    io::{Read, Write},
+    io::{IsTerminal as _, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     time::Duration,
@@ -257,10 +257,19 @@ fn request<T: DeserializeOwned>(command: &str) -> Result<T> {
         .with_context(|| format!("Hyprland {command}: unexpected reply {reply:?}"))
 }
 
-/// Shows `message` in Hyprland's own notification for a few seconds. A run
-/// started from a keybind has nowhere else to say why it stopped: nobody
-/// reads its stderr.
-pub fn notify(message: &str) -> Result<()> {
+/// Says `message` on stderr and, unless that's a terminal, in a
+/// notification too: a run started from a keybind has nowhere else to say
+/// what went wrong, since nobody reads its stderr. From a terminal, once is
+/// enough.
+pub fn warn(message: &str) {
+    eprintln!("{message}");
+    if !std::io::stderr().is_terminal() {
+        let _ = notify(message);
+    }
+}
+
+/// Shows `message` in Hyprland's own notification for a few seconds.
+fn notify(message: &str) -> Result<()> {
     // `notify ICON MS COLOR TEXT`: icon 0 is Hyprland's warning sign, color
     // 0 its default. The text runs to the end of the line, so it's one line.
     let text = message.replace('\n', " ");

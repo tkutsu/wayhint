@@ -8,21 +8,24 @@
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
-//! one, except where another window covers them.
+//! one, except where another window covers them. A window with no
+//! accessibility tree gets tags from its pixels; a block of text there
+//! gets one tag, which opens into tags on its lines.
 //!
-//! The keys pick a target and a verb (`[verb] tag`), or a verb and the
-//! spot under the pointer (`[verb] Space`), which skips the re-check.
+//! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
+//! before the tag's last letter), or a verb and the spot under the
+//! pointer (`[verb] Space`), which skips the re-check.
 //! Shift, Ctrl or Alt held on the last key are held through the click.
 //! Arrows typed before the last key move where that one command lands,
 //! so a tag near the spot can click anywhere.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
-//! where it was.
+//! where it was. A pixel target has none, so it can't be repeated.
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
 
-use std::{thread::sleep, time::Duration};
+use std::{collections::HashSet, thread::sleep, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use smithay_client_toolkit::reexports::client::Connection;
@@ -56,15 +59,18 @@ struct Session {
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
+    /// What the scans have warned about so far: each rescan finds the same
+    /// unreadable window again, and once a run is enough to say so.
+    warned: HashSet<String>,
 }
 
 /// A command on a target, as the repeat key does it again, nudge and all.
 /// The target is kept as its accessibility object, which stays the same
 /// across scans for as long as the control exists; its tag and position
-/// may not.
+/// may not. `None` for a target found in pixels.
 #[derive(Debug, Clone)]
 struct Command {
-    object: ObjectId,
+    object: Option<ObjectId>,
     act: Act,
 }
 
@@ -97,6 +103,7 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
         keyboard: None,
         screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
+        warned: HashSet::new(),
         conn,
     };
 
@@ -111,19 +118,23 @@ impl Session {
         loop {
             // No tags while scanning: nothing stale can be typed.
             self.overlay.clear()?;
-            let monitor = self.overlay.monitor();
+            // A copy: the overlay is lent to the pick while blocks open.
+            let monitor = &self.overlay.monitor().clone();
             let stack = self.desktop.stack(monitor.id)?;
-            let (snapshot, unread) = self.desktop.scan(&stack, monitor);
-            report(&snapshot, &unread)?;
+            let (scanned, unread) = self.desktop.scan(&stack, monitor, config.pixels);
+            report(&scanned, &unread, &mut self.warned)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
-            // later rounds start with the default action again.
+            // later rounds start with the default action again. `snapshot`
+            // is what the pick ends in: the scan, or a block opened in it.
+            let mut snapshot = scanned.clone();
             let picked = pick::pick(
                 &mut self.overlay,
                 config,
-                &snapshot.targets,
+                &mut snapshot,
                 verb.take(),
                 &desktop::cursor,
+                &|opened| desktop::keep_visible(opened, &stack, monitor),
             )?;
             let done = match picked {
                 Pick::Leave => return Ok(()),
@@ -146,21 +157,28 @@ impl Session {
                 Pick::Repeat => {
                     // `clone`: `self.command` needs all of `self`, so
                     // `self.last` can't stay borrowed through the call.
+                    // The search is in the whole scan, even from inside an
+                    // opened block.
                     let last = self.last.clone();
                     let found = last.as_ref().and_then(|last| {
-                        let mut targets = snapshot.targets.iter();
-                        targets.position(|t| t.object == last.object)
+                        let object = last.object.as_ref()?;
+                        let mut targets = scanned.targets.iter();
+                        targets.position(|t| t.object.as_ref() == Some(object))
                     });
                     match (last, found) {
-                        (Some(last), Some(index)) => {
-                            self.command(config, &snapshot, index, last)?
+                        (Some(last), Some(index)) => self.command(config, &scanned, index, last)?,
+                        (Some(last), None) if last.object.is_none() => {
+                            desktop::warn(
+                                "wayhint: not repeating: the target was found in pixels, which can't be found again",
+                            );
+                            Done::Refused
                         }
                         (Some(_), None) => {
-                            eprintln!("wayhint: not repeating: the target is gone");
+                            desktop::warn("wayhint: not repeating: the target is gone");
                             Done::Refused
                         }
                         (None, _) => {
-                            eprintln!("wayhint: nothing to repeat yet");
+                            desktop::warn("wayhint: nothing to repeat yet");
                             Done::Refused
                         }
                     }
@@ -206,14 +224,17 @@ impl Session {
                 // A click on a text field ends the mode, so typing goes to
                 // it. So does one nudged out of the target's box: wayhint
                 // doesn't know what's there, and a field next door would
-                // take the focus while the tags took the typing. Staying on
-                // is for clicks it can vouch for. A hover only looks.
-                let ends = action.clicks() && (editable || !target.rect.contains(at));
+                // take the focus while the tags took the typing. And one on
+                // a target found in pixels, which could be a field for all
+                // wayhint knows. Staying on is for clicks it can vouch for.
+                // A hover only looks.
+                let vouched = target.object.is_some() && target.rect.contains(at);
+                let ends = action.clicks() && (editable || !vouched);
                 self.last = Some(command);
                 Ok(Done::Acted { ends })
             }
             Verdict::Refuse(why) => {
-                eprintln!("wayhint: not clicking {:?}: {why}", target.name);
+                desktop::warn(&format!("wayhint: not clicking {:?}: {why}", target.name));
                 Ok(Done::Refused)
             }
         }
@@ -246,7 +267,7 @@ impl Session {
         if !mods.is_empty()
             && let Err(e) = self.hold(mods)
         {
-            eprintln!("wayhint: clicking without the modifiers: {e:#}");
+            desktop::warn(&format!("wayhint: clicking without the modifiers: {e:#}"));
         }
         let clicked = self.pointer.act(action, at);
         // Modifiers go before the cursor moves back: a Shift still held
@@ -292,26 +313,38 @@ impl Session {
 }
 
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans
-/// cut short. With nothing to click it's an error, not a quiet exit: from
-/// a keybind, that's the only way you learn why no tags came (`main` puts
-/// errors on screen), and a lone terminal says why there: it isn't on the
-/// bus.
-fn report(snapshot: &Snapshot, unread: &[anyhow::Error]) -> Result<()> {
+/// cut short, each once a run (`warned` holds what was said). With nothing
+/// to click it's an error, not a quiet exit, and `main` puts it on screen.
+/// Pixel tags are news only on stderr: they're how a window with no tree
+/// is meant to work.
+fn report(
+    snapshot: &Snapshot,
+    unread: &[anyhow::Error],
+    warned: &mut HashSet<String>,
+) -> Result<()> {
     if snapshot.targets.is_empty() {
         let mut why = vec!["nothing to click on this workspace".to_string()];
         why.extend(unread.iter().map(|e| format!("{e:#}")));
         bail!("{}", why.join("; "));
     }
-    for e in unread {
-        eprintln!("wayhint: no tags in {e:#}");
-    }
-    for scanned in &snapshot.windows {
-        if let Some(why) = &scanned.stats.incomplete {
-            eprintln!(
-                "wayhint: scan of {} incomplete ({why}); some targets may be missing",
-                scanned.window.class
-            );
+    let incomplete = snapshot.windows.iter().filter_map(|scanned| {
+        let why = scanned.stats.incomplete.as_ref()?;
+        let class = &scanned.window.class;
+        Some(format!(
+            "wayhint: scan of {class} incomplete ({why}); some targets may be missing"
+        ))
+    });
+    let unread = unread.iter().map(|e| format!("wayhint: no tags in {e:#}"));
+    for message in unread.chain(incomplete) {
+        if warned.insert(message.clone()) {
+            desktop::warn(&message);
         }
+    }
+    for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
+        eprintln!(
+            "wayhint: tags in {} come from its pixels ({:.0} ms): it has no accessibility tree",
+            scanned.window.class, scanned.stats.ms
+        );
     }
     Ok(())
 }

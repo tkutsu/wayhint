@@ -1,3 +1,3 @@
 # Names pedantic clippy would otherwise want in backticks, as if they were
 # code. ".." keeps clippy's own list.
-doc-valid-idents = ["YouTube", "IBus", "ScrollView", "..", ]
+doc-valid-idents = ["YouTube", "IBus", "ScrollView", "NumPy", "OpenCV", "..", ]
