@@ -25,7 +25,7 @@
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
 
-use std::{thread::sleep, time::Duration};
+use std::{collections::HashSet, thread::sleep, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use smithay_client_toolkit::reexports::client::Connection;
@@ -59,6 +59,9 @@ struct Session {
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
+    /// What the scans have warned about so far: each rescan finds the same
+    /// unreadable window again, and once a run is enough to say so.
+    warned: HashSet<String>,
 }
 
 /// A command on a target, as the repeat key does it again, nudge and all.
@@ -100,6 +103,7 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
         keyboard: None,
         screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
+        warned: HashSet::new(),
         conn,
     };
 
@@ -118,7 +122,7 @@ impl Session {
             let monitor = &self.overlay.monitor().clone();
             let stack = desktop::stack(monitor.id)?;
             let (scanned, unread) = self.desktop.scan(&stack, monitor, config.pixels);
-            report(&scanned, &unread)?;
+            report(&scanned, &unread, &mut self.warned)?;
 
             // `take` hands `--verb` to the first pick and leaves `None`, so
             // later rounds start with the default action again. `snapshot`
@@ -164,17 +168,17 @@ impl Session {
                     match (last, found) {
                         (Some(last), Some(index)) => self.command(config, &scanned, index, last)?,
                         (Some(last), None) if last.object.is_none() => {
-                            eprintln!(
-                                "wayhint: not repeating: the target was found in pixels, which can't be found again"
+                            desktop::warn(
+                                "wayhint: not repeating: the target was found in pixels, which can't be found again",
                             );
                             Done::Refused
                         }
                         (Some(_), None) => {
-                            eprintln!("wayhint: not repeating: the target is gone");
+                            desktop::warn("wayhint: not repeating: the target is gone");
                             Done::Refused
                         }
                         (None, _) => {
-                            eprintln!("wayhint: nothing to repeat yet");
+                            desktop::warn("wayhint: nothing to repeat yet");
                             Done::Refused
                         }
                     }
@@ -230,7 +234,7 @@ impl Session {
                 Ok(Done::Acted { ends })
             }
             Verdict::Refuse(why) => {
-                eprintln!("wayhint: not clicking {:?}: {why}", target.name);
+                desktop::warn(&format!("wayhint: not clicking {:?}: {why}", target.name));
                 Ok(Done::Refused)
             }
         }
@@ -263,7 +267,7 @@ impl Session {
         if !mods.is_empty()
             && let Err(e) = self.hold(mods)
         {
-            eprintln!("wayhint: clicking without the modifiers: {e:#}");
+            desktop::warn(&format!("wayhint: clicking without the modifiers: {e:#}"));
         }
         let clicked = self.pointer.act(action, at);
         // Modifiers go before the cursor moves back: a Shift still held
@@ -309,32 +313,38 @@ impl Session {
 }
 
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans
-/// cut short. With nothing to click it's an error, not a quiet exit: from
-/// a keybind, that's the only way you learn why no tags came (`main` puts
-/// errors on screen), and a lone terminal says why there: it isn't on the
-/// bus.
-fn report(snapshot: &Snapshot, unread: &[anyhow::Error]) -> Result<()> {
+/// cut short, each once a run (`warned` holds what was said). With nothing
+/// to click it's an error, not a quiet exit, and `main` puts it on screen.
+/// Pixel tags are news only on stderr: they're how a window with no tree
+/// is meant to work.
+fn report(
+    snapshot: &Snapshot,
+    unread: &[anyhow::Error],
+    warned: &mut HashSet<String>,
+) -> Result<()> {
     if snapshot.targets.is_empty() {
         let mut why = vec!["nothing to click on this workspace".to_string()];
         why.extend(unread.iter().map(|e| format!("{e:#}")));
         bail!("{}", why.join("; "));
     }
-    for e in unread {
-        eprintln!("wayhint: no tags in {e:#}");
+    let incomplete = snapshot.windows.iter().filter_map(|scanned| {
+        let why = scanned.stats.incomplete.as_ref()?;
+        let class = &scanned.window.class;
+        Some(format!(
+            "wayhint: scan of {class} incomplete ({why}); some targets may be missing"
+        ))
+    });
+    let unread = unread.iter().map(|e| format!("wayhint: no tags in {e:#}"));
+    for message in unread.chain(incomplete) {
+        if warned.insert(message.clone()) {
+            desktop::warn(&message);
+        }
     }
     for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
         eprintln!(
             "wayhint: tags in {} come from its pixels ({:.0} ms): it has no accessibility tree",
             scanned.window.class, scanned.stats.ms
         );
-    }
-    for scanned in &snapshot.windows {
-        if let Some(why) = &scanned.stats.incomplete {
-            eprintln!(
-                "wayhint: scan of {} incomplete ({why}); some targets may be missing",
-                scanned.window.class
-            );
-        }
     }
     Ok(())
 }
