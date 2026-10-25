@@ -1,6 +1,6 @@
 //! Hyprland over its IPC socket: which windows and layer surfaces a monitor
 //! shows and how they stack, where the monitors are, where the cursor is,
-//! and a notification when something goes wrong.
+//! and a notification when no notification server answers.
 //!
 //! The protocol is one request per connection: connect to
 //! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`, write
@@ -14,7 +14,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    io::{IsTerminal as _, Read, Write},
+    io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     time::Duration,
@@ -30,9 +30,6 @@ use crate::{
 
 /// External calls are bounded: a hung compositor must not hang wayhint.
 const TIMEOUT: Duration = Duration::from_secs(1);
-
-/// How long a notification stays: long enough to read one sentence.
-const NOTIFY_MS: u32 = 6000;
 
 /// Asks which layers are mapped. `j/layers` lists unmapped ones too (a
 /// hidden drop-down terminal, at full size), and only the Lua API tells them
@@ -258,23 +255,12 @@ fn request<T: DeserializeOwned>(command: &str) -> Result<T> {
         .with_context(|| format!("Hyprland {command}: unexpected reply {reply:?}"))
 }
 
-/// Says `message` on stderr and, unless that's a terminal, in a
-/// notification too: a run started from a keybind has nowhere else to say
-/// what went wrong, since nobody reads its stderr. From a terminal, once is
-/// enough.
-pub fn warn(message: &str) {
-    eprintln!("{message}");
-    if !std::io::stderr().is_terminal() {
-        let _ = notify(message);
-    }
-}
-
-/// Shows `message` in Hyprland's own notification for a few seconds.
-fn notify(message: &str) -> Result<()> {
+/// Shows `message` in Hyprland's own notification for `ms`.
+pub fn notify(message: &str, ms: i32) -> Result<()> {
     // `notify ICON MS COLOR TEXT`: icon 0 is Hyprland's warning sign, color
     // 0 its default. The text runs to the end of the line, so it's one line.
     let text = message.replace('\n', " ");
-    let reply = send(&format!("notify 0 {NOTIFY_MS} 0 {text}"))?;
+    let reply = send(&format!("notify 0 {ms} 0 {text}"))?;
     if reply.trim() != "ok" {
         bail!("Hyprland notify: {reply}");
     }
