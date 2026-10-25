@@ -85,6 +85,17 @@ pub const DOCUMENT_ROLES: [&str; 6] = [
     "document spreadsheet",
 ];
 
+/// Documents typed into as a whole: one tag for the sheet or page, which
+/// clicks it and ends the mode, never one per cell or paragraph. Calc's
+/// sheet lists no cells and isn't focusable; Writer's lists each visible
+/// paragraph as an editable target of its own (2026-10-25).
+const BODY_ROLES: [&str; 2] = ["document spreadsheet", "document text"];
+
+/// Whether an object with `role` is a document body, `editable` now.
+pub fn is_body(role: &str, editable: bool) -> bool {
+    editable && BODY_ROLES.contains(&role)
+}
+
 /// Why a node got no tag. `Serialize` with kebab-case names, for
 /// `dump --explain`: `"reason": "too-small"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -102,6 +113,8 @@ pub enum Reason {
     CellHoldsControl,
     EmptyCell,
     InsideControl,
+    /// Text inside a document body, which has the one tag.
+    InsideBody,
     Wrapper,
     /// Scrolled out of view: GTK and Qt still say "showing".
     ClippedByScrollArea,
@@ -137,7 +150,8 @@ pub fn is_candidate(node: &Node) -> bool {
     let s = node.states;
     let actionable = node.action
         || CONTROL_ROLES.contains(&node.role.as_str())
-        || (s.focusable && (s.editable || s.selectable));
+        || (s.focusable && (s.editable || s.selectable))
+        || is_body(&node.role, s.editable);
     s.showing && s.visible && node.component && actionable
 }
 
@@ -196,6 +210,10 @@ impl Candidate<'_> {
         MEDIA_ROLES.contains(&self.role())
     }
 
+    fn is_body(&self) -> bool {
+        is_body(self.role(), self.node.states.editable)
+    }
+
     /// Of two nested candidates with the same box, the higher rank stays:
     /// a control role beats a bare click action (YouTube's Create button
     /// inside an unnamed clickable section), which beats the rest; named
@@ -226,7 +244,7 @@ impl Candidate<'_> {
             Some(Reason::TheWindow)
         } else if !s.enabled && !s.sensitive {
             Some(Reason::Disabled)
-        } else if !self.is_control() && !editable_like {
+        } else if !self.is_control() && !editable_like && !self.is_body() {
             Some(Reason::NoAction)
         } else {
             None
@@ -303,6 +321,11 @@ pub fn filter(tree: &Tree) -> Filtered {
         .map(|(c, _)| c.index)
         .chain(disabled_controls)
         .collect();
+    let bodies: BTreeSet<usize> = kept
+        .iter()
+        .filter(|c| c.is_body())
+        .map(|c| c.index)
+        .collect();
     let scrollers = scroll_areas(tree);
     for ((c, is_duplicate), is_wrapper) in kept.iter().zip(duplicate).zip(wrapper) {
         let reason = if is_duplicate {
@@ -319,6 +342,9 @@ pub fn filter(tree: &Tree) -> Filtered {
         {
             // A closed popup's row inside a combo box, whatever the boxes.
             Some(Reason::InsideControl)
+        } else if !c.is_control() && tree.ancestors(c.index).any(|a| bodies.contains(&a)) {
+            // Writer's paragraphs; a link or field in the page keeps its tag.
+            Some(Reason::InsideBody)
         } else if is_wrapper {
             Some(Reason::Wrapper)
         } else {
@@ -715,6 +741,63 @@ mod tests {
         assert_eq!(reason(&tree, holder), Some(Reason::CellHoldsControl));
         assert_eq!(reason(&tree, empty), Some(Reason::EmptyCell));
         assert_eq!(kept(&tree), vec![button, file]);
+    }
+
+    #[test]
+    fn an_editable_document_is_one_tag_and_keeps_its_links() {
+        // As LibreOffice gave them (2026-10-25): Calc's sheet has no
+        // children and isn't focusable; Writer's paragraphs are editable
+        // targets of their own.
+        let mut b = Builder::new();
+        let name_box = b.add(Some(0), "text", "", &[], Rect::new(4, 70, 196, 36));
+        b.nodes[name_box].states.focusable = true;
+        b.nodes[name_box].states.editable = true;
+        let sheet = b.add(
+            Some(0),
+            "document spreadsheet",
+            "",
+            &[],
+            Rect::new(0, 140, 400, 400),
+        );
+        b.nodes[sheet].states.editable = true;
+        let page = b.add(
+            Some(0),
+            "document text",
+            "",
+            &[],
+            Rect::new(400, 140, 400, 400),
+        );
+        b.nodes[page].states.editable = true;
+        let paragraph = b.add(
+            Some(page),
+            "paragraph",
+            "",
+            &[],
+            Rect::new(420, 160, 360, 15),
+        );
+        b.nodes[paragraph].states.focusable = true;
+        b.nodes[paragraph].states.editable = true;
+        let link = b.add(
+            Some(paragraph),
+            "link",
+            "wayhint",
+            &["jump"],
+            Rect::new(440, 160, 60, 15),
+        );
+        let preview = b.add(
+            Some(0),
+            "document text",
+            "",
+            &[],
+            Rect::new(0, 540, 800, 60),
+        );
+        let tree = b.tree();
+        assert!(
+            !is_candidate(&tree.nodes[preview]),
+            "read-only stays as it was"
+        );
+        assert_eq!(reason(&tree, paragraph), Some(Reason::InsideBody));
+        assert_eq!(kept(&tree), vec![name_box, sheet, page, link]);
     }
 
     /// Kept names from a saved `dump --raw` of a fixture window, as a set:

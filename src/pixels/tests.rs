@@ -7,7 +7,7 @@ use super::*;
 
 /// A PNG as a [`Frame`]: RGB as it is, RGBA flattened on black (alpha
 /// dropped, as the captures are premultiplied).
-fn load(path: &Path) -> Frame {
+pub fn load(path: &Path) -> Frame {
     let mut decoder = png::Decoder::new(std::io::BufReader::new(File::open(path).unwrap()));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().unwrap();

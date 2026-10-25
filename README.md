@@ -204,6 +204,12 @@ status bars. Selecting it clicks there and exits, handing typing back to
 the terminal. Code, output, gutters, and TUI controls get no separate hints.
 The terminal's cursor shape and blink state do not affect this hint.
 
+An editable spreadsheet or text document, such as a LibreOffice Calc sheet
+or Writer page, also gets one hint instead of one per cell or paragraph. It
+sits on the empty spot nearest the middle of the visible sheet or page, and
+selecting it clicks there and exits, so typing goes to the document. Links,
+fields and other controls in and around the document keep their own hints.
+
 `pixels.terminal_processes` replaces the default terminal list. Add or remove
 executable names or window classes; matching ignores case. Executable names
 also cover terminals launched with a custom class. Set it to `[]` to use
@@ -266,6 +272,9 @@ the arrows are never command keys.
   patch there for its single focus hint. Clicking a terminal can still
   trigger the running TUI's mouse behavior.
 - A window's rounded corners show up as small pixel tags at its corners.
+- A document's hint clicks a cell or a line of text, which moves the
+  active cell or the text cursor there. Web sheets such as Google Sheets
+  don't report a spreadsheet document, so they keep their usual tags.
 
 ## License
 

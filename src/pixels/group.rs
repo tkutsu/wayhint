@@ -149,23 +149,15 @@ pub fn terminal(frame: &Frame) -> Found {
     let space = crate::space::Space::pixels(frame);
     let (w, h) = (frame.width as i32, frame.height as i32);
     let (bw, bh) = (36.min(w), 24.min(h));
-    let mut best = None;
     let baseline = (h - 18).max(bh);
-    let last_y = (h - bh - 4).max(0);
-    let last_x = (w - bw - 4).max(0);
-    for y in ((h / 2).min(last_y)..=last_y).rev().step_by(4) {
-        for x in (4.min(last_x)..=last_x).step_by(4) {
-            let r = crate::geometry::Rect::new(x, y, bw, bh);
-            let score = (
-                space.ink(r),
-                2 * (r.bottom() - baseline).abs() + (r.center().x - w / 2).abs(),
-            );
-            if best.as_ref().is_none_or(|(old, _)| score < *old) {
-                best = Some((score, r));
-            }
-        }
-    }
-    let r = best.map_or(crate::geometry::Rect::new(0, 0, w, h), |(_, r)| r);
+    let (last_x, last_y) = ((w - bw - 4).max(0), (h - bh - 4).max(0));
+    let (x, y) = (4.min(last_x), (h / 2).min(last_y));
+    let corners = crate::geometry::Rect::new(x, y, last_x - x, last_y - y);
+    let r = space
+        .clearest(corners, bw, bh, |r| {
+            2 * (r.bottom() - baseline).abs() + (r.center().x - w / 2).abs()
+        })
+        .unwrap_or(crate::geometry::Rect::new(0, 0, w, h));
     Found {
         direct: vec![[r.x, r.y, r.right(), r.bottom()]],
         input: true,
