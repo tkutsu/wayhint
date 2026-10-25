@@ -9,6 +9,8 @@ use std::fmt::{self, Write as _};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::geometry::{Point, Rect};
+
 /// A colour from `#RRGGBB` or `#RRGGBBAA`.
 ///
 /// `try_from = "String"` makes serde read a string and hand it to our
@@ -66,6 +68,66 @@ impl fmt::Display for Color {
     }
 }
 
+/// Where a tag sits on its target: `[style] position`. The tag's own
+/// matching point goes on the target's, so `BottomRight` puts the tag in
+/// the box's bottom-right corner, inside it if it fits.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Position {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    #[default]
+    BottomRight,
+}
+
+impl Position {
+    /// How far across and down a box this point is, in halves: 0 is the
+    /// left or top edge, 1 the middle, 2 the right or bottom edge.
+    pub const fn halves(self) -> (i32, i32) {
+        match self {
+            Self::TopLeft => (0, 0),
+            Self::Top => (1, 0),
+            Self::TopRight => (2, 0),
+            Self::Left => (0, 1),
+            Self::Center => (1, 1),
+            Self::Right => (2, 1),
+            Self::BottomLeft => (0, 2),
+            Self::Bottom => (1, 2),
+            Self::BottomRight => (2, 2),
+        }
+    }
+
+    /// This point on `rect`.
+    pub const fn on(self, rect: Rect) -> Point {
+        let (across, down) = self.halves();
+        Point::new(rect.x + rect.w * across / 2, rect.y + rect.h * down / 2)
+    }
+
+    /// As the config writes it: `"bottom-right"`.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::Top => "top",
+            Self::TopRight => "top-right",
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+            Self::BottomLeft => "bottom-left",
+            Self::Bottom => "bottom",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+}
+
+/// The farthest `[style] offset` moves a tag, either way, in px.
+const OFFSET: i32 = 500;
+
 /// The `[style]` table. `#[serde(default)]` fills every missing field from
 /// `Style::default()`, and `deny_unknown_fields` rejects `colour = ...`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +146,9 @@ pub struct Style {
     pub radius: f32,
     /// Vertical, then horizontal, in px.
     pub padding: [f32; 2],
+    pub position: Position,
+    /// Moves every tag from its position, right then down, in px.
+    pub offset: [i32; 2],
 }
 
 impl Default for Style {
@@ -98,6 +163,8 @@ impl Default for Style {
             border_width: 1.0,
             radius: 4.0,
             padding: [2.0, 5.0],
+            position: Position::default(),
+            offset: [0, 0],
         }
     }
 }
@@ -117,6 +184,11 @@ impl Style {
         for (name, value) in lengths {
             if !(0.0..=100.0).contains(&value) {
                 bail!("[style] {name}: {value} px is outside 0-100");
+            }
+        }
+        for value in self.offset {
+            if !(-OFFSET..=OFFSET).contains(&value) {
+                bail!("[style] offset: {value} px is outside -{OFFSET} to {OFFSET}");
             }
         }
         if self.font.trim().is_empty() {
@@ -148,6 +220,16 @@ impl Style {
             out,
             "padding = [{}, {}]   # vertical, horizontal",
             self.padding[0], self.padding[1]
+        );
+        let _ = writeln!(
+            out,
+            "position = \"{}\"   # on the target: center, top, bottom, left, right, or a corner as top-left",
+            self.position.name()
+        );
+        let _ = writeln!(
+            out,
+            "offset = [{}, {}]   # px from there, right and down",
+            self.offset[0], self.offset[1]
         );
         out
     }
@@ -184,6 +266,8 @@ mod tests {
         }
         let style = Style {
             size: 20.0,
+            position: Position::TopLeft,
+            offset: [-3, 4],
             ..Style::default()
         };
         let text = style.render();
@@ -208,6 +292,23 @@ mod tests {
             .validate()
             .is_err()
         );
+        assert!(
+            Style {
+                offset: [0, 501],
+                ..Style::default()
+            }
+            .validate()
+            .is_err()
+        );
         assert!(Style::default().validate().is_ok());
+    }
+
+    #[test]
+    fn positions_name_points_on_a_box() {
+        let rect = Rect::new(10, 20, 40, 30);
+        assert_eq!(Position::TopLeft.on(rect), Point::new(10, 20));
+        assert_eq!(Position::Center.on(rect), rect.center());
+        assert_eq!(Position::Right.on(rect), Point::new(50, 35));
+        assert_eq!(Position::BottomRight.on(rect), Point::new(50, 50));
     }
 }
