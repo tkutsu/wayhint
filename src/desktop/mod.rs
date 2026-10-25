@@ -18,6 +18,7 @@ mod atspi;
 mod capture;
 pub mod filter;
 mod hyprland;
+mod notify;
 pub mod recheck;
 pub mod surfaces;
 pub mod tree;
@@ -39,9 +40,10 @@ use self::{
 pub use self::{
     atspi::Stats,
     hyprland::{
-        Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors, warn,
+        Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors,
         window_by_address,
     },
+    notify::warn,
     recheck::Verdict,
     surfaces::Stack,
 };
