@@ -228,10 +228,10 @@ impl Selector {
     /// The same command on the targets of a new scan, where `survivors[i]`
     /// is the index target `i` had before, if it was there (from
     /// `Snapshot::survivors`): each keeps its label where it can (see
-    /// [`relabel`]), and everything typed stays while one of them still
-    /// goes on from it. Letters that only a new target goes on from go
-    /// (theirs all left), so they never finish on it; a verb typed after
-    /// them stays.
+    /// [`relabel`]), and everything typed stays while a label goes on from
+    /// it. The letters go if none does, or if one more letter would pick a
+    /// tag new under them: a key already on its way, typed for a tag that
+    /// left, must not land on another. A verb typed after them stays.
     pub fn relabel(&mut self, survivors: &[Option<usize>], alphabet_size: usize) {
         let kept: Vec<Option<&[usize]>> = survivors
             .iter()
@@ -240,13 +240,18 @@ impl Selector {
         let labels = relabel(&kept, alphabet_size);
         // Labels are prefix-free, so one equal to `typed` means none goes
         // on from it, and the next letter could pick nothing.
-        let leads = labels.iter().zip(&kept).any(|(label, was)| {
-            *was == Some(label.as_slice())
-                && label.len() > self.typed.len()
-                && label.starts_with(&self.typed)
-        });
+        let after = |label: &[usize]| {
+            label
+                .strip_prefix(self.typed.as_slice())
+                .map_or(0, <[usize]>::len)
+        };
+        let leads = labels.iter().any(|label| after(label) > 0);
+        let instant = labels
+            .iter()
+            .zip(&kept)
+            .any(|(label, was)| *was != Some(label.as_slice()) && after(label) == 1);
         self.labels = labels;
-        if !leads {
+        if !leads || instant {
             self.typed.clear();
             self.armed_at = 0;
         }
@@ -673,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rescan_drops_letters_only_new_targets_go_on_from() {
+    fn a_rescan_drops_letters_one_key_from_a_new_tag() {
         // a ba bb over two letters, `b` typed, and both `b…` targets left:
         // the two new ones take `ba` and `bb`, and must not be picked by
         // the letter that finishes what was typed for the old ones.
@@ -682,6 +687,24 @@ mod tests {
         s.relabel(&[Some(0), None, None], 2);
         assert_eq!(s.labels(), [vec![0], vec![1, 0], vec![1, 1]]);
         assert_eq!(s.typed(), [0usize; 0]);
+        // a s d fa fs, `f` typed: `fa` is still there, but a new target
+        // took `fs`, so one key could still land on it.
+        let mut s = five();
+        s.press(letter(3));
+        s.relabel(&[Some(0), Some(1), Some(2), Some(3), None], 4);
+        assert_eq!(s.typed(), [0usize; 0]);
+    }
+
+    #[test]
+    fn a_rescan_keeps_letters_new_tags_need_two_more_keys_for() {
+        // aa aba abb baa bab bba bbb, `b` typed, and every `b…` target
+        // left: the new ones under `b` are two keys away, so no key
+        // already typed can pick one.
+        let mut s = Selector::new(7, 2, Action::Left);
+        s.press(letter(1));
+        s.relabel(&[Some(0), Some(1), Some(2), None, None, None, None], 2);
+        assert_eq!(s.labels()[3], [1, 0, 0]);
+        assert_eq!(s.typed(), [1]);
     }
 
     #[test]
