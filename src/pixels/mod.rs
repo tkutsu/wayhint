@@ -110,15 +110,14 @@ impl Detector {
     }
 }
 
-/// Everything worth a tag in `frame`, in its pixels. A `terminal`'s text
-/// is read from the colour pass whatever the `detector`: it keeps a run of
-/// text whole, dim text too, where the edge pass finds pieces of glyphs.
+/// Everything worth a tag in `frame`. A terminal gets one focus hint in
+/// clear space near its bottom, whichever detector is selected.
 pub fn find(frame: &Frame, detector: Detector, terminal: bool) -> Found {
     if frame.width == 0 || frame.height == 0 {
         return Found::default();
     }
     if terminal {
-        return group::terminal(frame, &segment::boxes(frame));
+        return group::terminal(frame);
     }
     let policy = detector.policy();
     group::group(frame, &words(frame, &policy), &policy)

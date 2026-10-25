@@ -34,6 +34,9 @@ pub struct Snapshot {
     /// In reading order across all windows: top to bottom, then left to
     /// right.
     pub targets: Vec<Target>,
+    /// Captured ink and controls that displaced labels must not cover.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obstacles: Vec<Rect>,
 }
 
 /// One window, and what scanning it cost.
@@ -186,7 +189,86 @@ impl Snapshot {
             monitor,
             windows,
             targets,
+            obstacles: Vec::new(),
         }
+    }
+
+    /// Keeps the target nearest each group's average hit point. Centers
+    /// within `distance` logical px join the same group, including chains
+    /// of neighbors. Ties keep the earlier target; retained targets stay
+    /// in their original order, with their click behavior unchanged.
+    pub fn merge_nearby(&mut self, distance: u16) {
+        if distance == 0 || self.targets.len() < 2 {
+            return;
+        }
+        let distance = i64::from(distance);
+        let cell = |point: Point| {
+            (
+                i64::from(point.x).div_euclid(distance),
+                i64::from(point.y).div_euclid(distance),
+            )
+        };
+        let mut cells: HashMap<_, Vec<usize>> = HashMap::new();
+        for (i, target) in self.targets.iter().enumerate() {
+            cells.entry(cell(target.hit)).or_default().push(i);
+        }
+        let mut seen = vec![false; self.targets.len()];
+        let mut keep = vec![false; self.targets.len()];
+        for start in 0..self.targets.len() {
+            if seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let mut group = vec![start];
+            let mut at = 0;
+            // Remove grouped targets from the cells, so dense duplicates
+            // don't compare every pair of centers.
+            while at < group.len() {
+                let hit = self.targets[group[at]].hit;
+                let (cx, cy) = cell(hit);
+                for x in cx - 1..=cx + 1 {
+                    for y in cy - 1..=cy + 1 {
+                        let Some(nearby) = cells.get_mut(&(x, y)) else {
+                            continue;
+                        };
+                        nearby.retain(|&i| {
+                            if seen[i] {
+                                return false;
+                            }
+                            let other = self.targets[i].hit;
+                            let dx = i64::from(hit.x) - i64::from(other.x);
+                            let dy = i64::from(hit.y) - i64::from(other.y);
+                            if dx * dx + dy * dy <= distance * distance {
+                                seen[i] = true;
+                                group.push(i);
+                                return false;
+                            }
+                            true
+                        });
+                    }
+                }
+                at += 1;
+            }
+            let (sx, sy, count) = group.iter().fold((0.0, 0.0, 0.0), |(x, y, n), &i| {
+                let hit = self.targets[i].hit;
+                (x + f64::from(hit.x), y + f64::from(hit.y), n + 1.0)
+            });
+            let score = |i: usize| {
+                let hit = self.targets[i].hit;
+                (f64::from(hit.x) - sx / count).powi(2) + (f64::from(hit.y) - sy / count).powi(2)
+            };
+            let central = group
+                .into_iter()
+                .min_by(|&a, &b| score(a).total_cmp(&score(b)).then(a.cmp(&b)))
+                .expect("each group starts with one target");
+            keep[central] = true;
+        }
+        let mut at = 0;
+        self.targets.retain(|_| {
+            let kept = keep[at];
+            at += 1;
+            kept
+        });
     }
 
     /// The snapshot with the block at `index` opened: its lines are the
@@ -251,10 +333,10 @@ fn pixel_targets(window: usize, origin: Point, scale: f64, found: &Found) -> Vec
         let (x, y) = (at(b[0]), at(b[1]));
         Rect::new(x, y, at(b[2]) - x, at(b[3]) - y).offset(origin)
     };
-    let direct = found
-        .direct
-        .iter()
-        .map(|&b| pixel_target(window, rect(b), PIXELS));
+    let direct = found.direct.iter().map(|&b| Target {
+        editable: found.input,
+        ..pixel_target(window, rect(b), PIXELS)
+    });
     let blocks = found.blocks.iter().map(|block: &Block| Target {
         opens: block.phrases.iter().map(|&b| rect(b)).collect(),
         ..pixel_target(window, rect(block.rect), PIXEL_BLOCK)
@@ -301,6 +383,93 @@ mod tests {
         }
     }
 
+    fn hints(points: &[(i32, i32)]) -> Snapshot {
+        Snapshot {
+            scan: 1,
+            monitor: 0,
+            windows: Vec::new(),
+            obstacles: Vec::new(),
+            targets: points
+                .iter()
+                .map(|&(x, y)| pixel_target(0, Rect::new(x - 1, y - 1, 2, 2), PIXELS))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn terminal_focus_target_is_editable_and_never_opens_lines() {
+        let window = window();
+        let found = Found {
+            direct: vec![[320, 760, 356, 784]],
+            input: true,
+            ..Found::default()
+        };
+        let snapshot = Snapshot::build(
+            1,
+            window.monitor,
+            [Read::Pixels {
+                window: &window,
+                found: &found,
+                scale: 1.0,
+                stats: &Stats::default(),
+            }],
+        );
+        assert_eq!(snapshot.targets.len(), 1);
+        assert!(snapshot.targets[0].editable && snapshot.targets[0].opens.is_empty());
+        assert!(snapshot.targets[0].object.is_none());
+    }
+
+    #[test]
+    fn nearby_hints_keep_the_existing_target_nearest_the_average_center() {
+        let mut snapshot = hints(&[(0, 0), (4, 0), (3, 1), (20, 0)]);
+        let central = &mut snapshot.targets[2];
+        central.object = Some(ObjectId {
+            bus: ":1.7".into(),
+            path: "/central".into(),
+        });
+        central.editable = true;
+        central.opens = vec![Rect::new(1, 1, 2, 2)];
+        let expected = vec![central.clone(), snapshot.targets[3].clone()];
+        snapshot.merge_nearby(5);
+        assert_eq!(snapshot.targets, expected);
+        snapshot.merge_nearby(5);
+        assert_eq!(snapshot.targets, expected, "merging twice changes nothing");
+    }
+
+    #[test]
+    fn merging_uses_inclusive_euclidean_distance_and_can_be_disabled() {
+        for (points, distance, expected) in [
+            (vec![(0, 0), (3, 4)], 5, 1),
+            (vec![(0, 0), (4, 4)], 5, 2),
+            (vec![(0, 0), (6, 0)], 5, 2),
+            (vec![(0, 0), (6, 0)], 6, 1),
+            (vec![(0, 0), (0, 0)], 0, 2),
+            (vec![(0, 0), (0, 0)], 5, 1),
+            (vec![], 5, 0),
+            (vec![(0, 0)], 5, 1),
+        ] {
+            let mut snapshot = hints(&points);
+            snapshot.merge_nearby(distance);
+            assert_eq!(snapshot.targets.len(), expected, "{points:?}, {distance}");
+        }
+    }
+
+    #[test]
+    fn neighboring_chains_form_one_group_with_deterministic_ties() {
+        let mut snapshot = hints(&[(0, 0), (4, 0), (8, 0), (12, 0), (30, 0)]);
+        let expected = vec![snapshot.targets[1].clone(), snapshot.targets[4].clone()];
+        snapshot.merge_nearby(5);
+        assert_eq!(snapshot.targets, expected);
+    }
+
+    #[test]
+    fn merging_works_across_negative_coordinates_and_cell_boundaries() {
+        let mut snapshot = hints(&[(-6, -6), (-3, -2), (4, 0), (9, 0)]);
+        let expected = vec![snapshot.targets[0].clone(), snapshot.targets[2].clone()];
+        snapshot.merge_nearby(5);
+        assert_eq!(snapshot.targets, expected);
+    }
+
     #[test]
     fn pixel_boxes_land_in_global_logical_coordinates() {
         let found = Found {
@@ -310,6 +479,7 @@ mod tests {
                 phrases: vec![[0, 100, 300, 120], [0, 140, 200, 160]],
             }],
             media: vec![[400, 0, 800, 400]],
+            input: false,
         };
         let window = window();
         let stats = Stats::default();

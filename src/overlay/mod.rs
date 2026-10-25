@@ -25,6 +25,7 @@ mod wayland;
 use std::{
     collections::VecDeque,
     io::{ErrorKind, Read as _},
+    os::unix::net::UnixDatagram,
     time::{Duration, Instant},
 };
 
@@ -232,6 +233,22 @@ impl Overlay {
         &self.monitor
     }
 
+    /// A second launch wakes the loop and leaves through normal cleanup.
+    pub fn listen_for_toggle(&mut self, socket: UnixDatagram) -> Result<()> {
+        let source = Generic::new(socket, Interest::READ, Mode::Level);
+        self.event_loop
+            .handle()
+            .insert_source(source, |_, socket, state: &mut State| {
+                let mut message = [0; 16];
+                if socket.recv(&mut message).is_ok() {
+                    state.events.push_front(Event::Interrupted);
+                }
+                Ok(PostAction::Continue)
+            })
+            .map_err(|e| anyhow::anyhow!("listening for the toggle shortcut: {}", e.error))?;
+        Ok(())
+    }
+
     /// Listens to Hyprland for this monitor showing another workspace,
     /// which comes as [`Event::Workspace`]. Changes heard while one is
     /// still waiting to be taken make no second one.
@@ -296,6 +313,20 @@ impl Overlay {
         self.state.locks
     }
 
+    /// Placement uses the same captured scene until the next scan.
+    pub fn set_layout(&mut self, snapshot: &crate::snapshot::Snapshot) {
+        let origin = self.monitor.rect.origin();
+        let shift = Point::new(-origin.x, -origin.y);
+        let obstacles: Vec<_> = snapshot.obstacles.iter().map(|r| r.offset(shift)).collect();
+        let regions: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|w| w.window.rect.offset(shift))
+            .collect();
+        self.painter
+            .set_space(self.monitor.rect.offset(shift), &obstacles, regions);
+    }
+
     /// Draws a new set of tags (`frame` in global coordinates) and starts
     /// accepting keys for them once the compositor confirms the frame:
     /// every key pressed before that was aimed at something else.
@@ -318,6 +349,7 @@ impl Overlay {
                 .iter()
                 .map(|t| Tag {
                     at: to_local(t.at),
+                    target: t.target.map(to_local),
                     ..t.clone()
                 })
                 .collect(),
@@ -327,6 +359,7 @@ impl Overlay {
                 .map(|d| Dot {
                     from: to_local(d.from),
                     at: to_local(d.at),
+                    tag: d.tag,
                 })
                 .collect(),
         };
