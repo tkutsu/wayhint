@@ -36,7 +36,7 @@ impl Point {
 /// A width or height of zero or less is an empty rectangle. AT-SPI reports
 /// those for objects it has no box for, so they're legal values, and
 /// `is_empty` is how code asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

@@ -88,6 +88,11 @@ It is for that one click, and the repeat key does it again. With `Space`,
 the dot follows the pointer at each key you press, and the click lands on
 the dot.
 
+While the tags are up, wayhint scans the windows again every half second
+(`[scan] refresh`), so a page that finishes loading or a window that opens
+gets tags without a key. A control found again keeps its tag, and the
+letters you typed for it stay typed; only new controls take new tags.
+
 Clicking a text field exits, so your typing goes to the field. So does a
 click wayhint can't vouch for: one an arrow moved outside its control, or
 one made with `Space`, since a field there would take the focus while
@@ -139,6 +144,9 @@ nudge = 14              # px one arrow press moves a click
 
 [pixels]
 detector = "full"       # windows with no accessibility tree: "fast", or "off"
+
+[scan]
+refresh = 500           # ms the tags stay up before a rescan; 0 for only after a click
 
 [style]
 font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
@@ -217,8 +225,11 @@ the arrows are never command keys.
 - Pixel tags are guesses. A third of them sit on text or decoration, and a
   control drawn faintly, or packed against its neighbours, can be missed.
   Before a click, wayhint only checks that the window hasn't moved, been
-  resized or been covered; a page that scrolled under its tags gets the
-  click where the tag was.
+  resized or been covered; a page that scrolled under its tags since the
+  last refresh gets the click where the tag was.
+- A blinking cursor in a terminal can make its tag, and the tag of the
+  passage around it, come and go between refreshes, as each scan catches
+  it on or off.
 - A window's rounded corners show up as small pixel tags at its corners.
 
 ## License

@@ -7,7 +7,7 @@
 //! reads its targets. Plain data with `Serialize` and `Deserialize`, so
 //! every part can run alone from a saved file.
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,14 @@ impl Target {
             self.visible
         }
     }
+}
+
+/// A target as [`Snapshot::survivors`] recognises it across scans.
+#[derive(PartialEq, Eq, Hash)]
+enum Same<'a> {
+    Object(&'a ObjectId),
+    /// The window's address and the box within the window.
+    Pixels(&'a str, Rect),
 }
 
 /// What a scan learnt about one window, for [`Snapshot::build`].
@@ -195,6 +203,34 @@ impl Snapshot {
             targets,
             ..self.clone()
         }
+    }
+
+    /// For each target, where the same one is in `before`, if it was there:
+    /// the same accessible object, or, for a target found in pixels, the
+    /// same box in the same window, wherever the window moved. A rescan
+    /// gives these their old tags.
+    pub fn survivors(&self, before: &Self) -> Vec<Option<usize>> {
+        let old: HashMap<Same, usize> = before
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (before.same(t), i))
+            .collect();
+        self.targets
+            .iter()
+            .map(|t| old.get(&self.same(t)).copied())
+            .collect()
+    }
+
+    /// What makes `target` the same one in another scan.
+    fn same<'a>(&'a self, target: &'a Target) -> Same<'a> {
+        if let Some(object) = &target.object {
+            return Same::Object(object);
+        }
+        let window = &self.windows[target.window].window;
+        let origin = window.rect.origin();
+        let rect = target.rect.offset(Point::new(-origin.x, -origin.y));
+        Same::Pixels(&window.address, rect)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -308,6 +344,54 @@ mod tests {
                 .targets
                 .iter()
                 .all(|t| t.opens.is_empty() && t.window == 0)
+        );
+    }
+
+    #[test]
+    fn targets_survive_by_object_or_by_box_in_their_window() {
+        let found = |x| Found {
+            direct: vec![[x, 0, x + 20, 20]],
+            ..Found::default()
+        };
+        let stats = Stats::default();
+        let scan = |window: &Window, found: &Found| {
+            let mut snapshot = Snapshot::build(
+                1,
+                0,
+                [Read::Pixels {
+                    window,
+                    found,
+                    scale: 1.0,
+                    stats: &stats,
+                }],
+            );
+            // One target from a tree, at the end, in the same window.
+            let mut button = snapshot.targets[0].clone();
+            button.object = Some(ObjectId {
+                bus: ":1.7".into(),
+                path: "/ok".into(),
+            });
+            snapshot.targets.push(button);
+            snapshot
+        };
+        let before = scan(&window(), &found(0));
+        // The window moved; one box is new, one is the same within it.
+        let moved = Window {
+            rect: Rect::new(300, 300, 800, 600),
+            ..window()
+        };
+        let mut after = scan(&moved, &found(40));
+        after.targets.insert(0, before.targets[0].clone());
+        after.targets[0].rect = after.targets[0].rect.offset(Point::new(200, 250));
+        assert_eq!(after.survivors(&before), [Some(0), None, Some(1)]);
+        let elsewhere = Window {
+            address: "0x2".into(),
+            ..window()
+        };
+        assert_eq!(
+            scan(&elsewhere, &found(0)).survivors(&before),
+            [None, Some(1)],
+            "the same box in another window is another target"
         );
     }
 
