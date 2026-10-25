@@ -9,6 +9,11 @@
 //! scores what the prototype scored. Where Python's arithmetic differs
 //! from Rust's (banker's rounding, NumPy's medians) the port does it
 //! Python's way.
+//!
+//! Three changes since, for terminal text (kitty, 2026-10-25), each scored
+//! on the same captures: [`lines`] splits boxes the edge pass bridged
+//! across lines, a band of words is matched by its tallest word, and
+//! greys don't count as link colours.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +21,8 @@ use super::{Corners, Frame, Policy, buckets::Buckets, texture};
 
 /// Text is this tall, in px; anything else passes through as it is.
 const TEXT: std::ops::RangeInclusive<i32> = 3..=48;
+/// A box this tall may hold two or three lines of text, in px.
+const LINES: std::ops::RangeInclusive<i32> = 20..=48;
 /// A pixel is ink when a channel is this far from the background.
 const INK: f64 = 40.0;
 /// A block opens when this share of its rows starts with an icon.
@@ -136,6 +143,76 @@ pub fn group(frame: &Frame, words: &[Corners], policy: &Policy) -> Found {
     }
 }
 
+/// `words` with each box that holds two or three lines of text split into
+/// its lines. Tightly set text (a terminal's) leaves 0 or 1 px between
+/// lines, which the edge pass's dilation bridges.
+pub fn lines(frame: &Frame, words: &[Corners]) -> Vec<Corners> {
+    let mut out = Vec::with_capacity(words.len());
+    for &b in words {
+        split(frame, b, &mut out);
+    }
+    out
+}
+
+/// `b`, or its lines when a nearly blank row crosses its middle: inside a
+/// line of text the middle rows are the inkiest, between two lines they
+/// hold a few ascenders and descenders at most.
+fn split(frame: &Frame, b: Corners, out: &mut Vec<Corners>) {
+    let at = (LINES.contains(&height(b)) && width(b) >= height(b))
+        .then(|| Patch::around(frame, b))
+        .flatten()
+        .and_then(|patch| {
+            let bg = patch.ring_median();
+            let ink: Vec<usize> = (1..patch.h - 1)
+                .map(|y| {
+                    (1..patch.w - 1)
+                        .filter(|&x| far(patch.at(x, y), bg))
+                        .count()
+                })
+                .collect();
+            let peak = *ink.iter().max()?;
+            let n = ink.len();
+            let (y, &least) = ink
+                .iter()
+                .enumerate()
+                .take(n * 7 / 10)
+                .skip(n * 3 / 10)
+                .min_by_key(|&(_, &v)| v)?;
+            (least * 8 <= peak).then_some(patch.y0 as i32 + 1 + y as i32)
+        });
+    // Each half shrunk to its ink, both a line of text tall.
+    let halves = at.and_then(|y| {
+        let top = trim(frame, [b[0], b[1], b[2], y])?;
+        let bottom = trim(frame, [b[0], y + 1, b[2], b[3]])?;
+        (height(top).min(height(bottom)) >= 2 * TEXT.start()).then_some([top, bottom])
+    });
+    match halves {
+        Some(halves) => halves.into_iter().for_each(|h| split(frame, h, out)),
+        None => out.push(b),
+    }
+}
+
+/// `b` shrunk to the pixels in it far from its border's colour, if any.
+fn trim(frame: &Frame, b: Corners) -> Option<Corners> {
+    let bg = Patch::around(frame, b)?.ring_median();
+    let mut ink = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for y in b[1]..b[3] {
+        for x in b[0]..b[2] {
+            let i = (y as usize * frame.width + x as usize) * 3;
+            let p = [frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2]];
+            if far(p, bg) {
+                ink = [
+                    ink[0].min(x),
+                    ink[1].min(y),
+                    ink[2].max(x + 1),
+                    ink[3].max(y + 1),
+                ];
+            }
+        }
+    }
+    (ink[2] > ink[0]).then_some(ink)
+}
+
 /// The words whose centres lie in `p`, in their order.
 fn members(words: &[Corners], p: Corners) -> impl Iterator<Item = Corners> + '_ {
     words.iter().copied().filter(move |&w| inside(centre(w), p))
@@ -200,9 +277,19 @@ fn phrases(words: &[Corners], inks: &mut Inks, join: f64) -> Vec<Corners> {
             let lo = height(a).min(height(b));
             ((b[1] + b[3]) - (a[1] + a[3])).abs() <= lo && lo * 2 >= height(a).max(height(b))
         };
+        // A band is matched by its tallest word, kept first: a line's first
+        // word by centre can be a fragment (a colon's top) too short for
+        // the words with descenders, which would start a second band
+        // through the line.
         let start = bands.len().saturating_sub(12);
         match bands[start..].iter_mut().rev().find(|band| fits(band[0])) {
-            Some(band) => band.push(b),
+            Some(band) => {
+                band.push(b);
+                if height(b) > height(band[0]) {
+                    let last = band.len() - 1;
+                    band.swap(0, last);
+                }
+            }
             None => bands.push(vec![b]),
         }
     }
@@ -490,10 +577,13 @@ fn links(g: &[Corners], inks: &mut Inks) -> Vec<Corners> {
     if f64::from(body.width) < BODY_SHARE * f64::from(total) {
         return Vec::new();
     }
+    // Greys (bold, headings, a link run into plain words) aren't colours.
     let others: Vec<&Cluster> = cs[1..]
         .iter()
         .filter(|c| {
-            c.members.len() >= LINK_PHRASES || f64::from(c.width) >= 0.05 * f64::from(body.width)
+            let chroma: f64 = c.members.iter().map(|(_, ink)| ink.chroma).sum();
+            (c.members.len() >= LINK_PHRASES || f64::from(c.width) >= 0.05 * f64::from(body.width))
+                && chroma / c.members.len() as f64 >= LINK_CHROMA
         })
         .collect();
     if others.len() > LINK_COLOURS {
@@ -501,10 +591,7 @@ fn links(g: &[Corners], inks: &mut Inks) -> Vec<Corners> {
     }
     others
         .into_iter()
-        .filter(|c| {
-            let chroma: f64 = c.members.iter().map(|(_, ink)| ink.chroma).sum();
-            c.members.len() >= LINK_PHRASES && chroma / c.members.len() as f64 >= LINK_CHROMA
-        })
+        .filter(|c| c.members.len() >= LINK_PHRASES)
         .flat_map(|c| c.members.iter().map(|&(p, _)| p))
         .collect()
 }
@@ -711,5 +798,75 @@ mod tests {
             let sorted = [0, 1, 2].map(|c| median(set.iter().map(|p| f64::from(p[c])).collect()));
             assert_eq!(counts.median(), sorted, "{set:?}");
         }
+    }
+
+    /// A dark frame with `boxes` filled in their colours.
+    fn painted(width: usize, height: usize, boxes: &[(Corners, [u8; 3])]) -> Frame {
+        let mut rgb = [20; 3].repeat(width * height);
+        for &(b, colour) in boxes {
+            for y in b[1]..b[3] {
+                for x in b[0]..b[2] {
+                    let i = (y as usize * width + x as usize) * 3;
+                    rgb[i..i + 3].copy_from_slice(&colour);
+                }
+            }
+        }
+        Frame { width, height, rgb }
+    }
+
+    #[test]
+    fn a_short_first_word_keeps_its_line_whole() {
+        // A colon's top (8 px) centres highest, words with descenders (18
+        // px) are more than twice its height: once they started a second
+        // band through the line, splitting it into pieces.
+        let words = [
+            [0, 10, 40, 26],
+            [44, 10, 84, 28],
+            [88, 10, 120, 26],
+            [124, 10, 164, 28],
+            [168, 10, 178, 18],
+        ];
+        let frame = painted(200, 40, &[]);
+        assert_eq!(
+            phrases(&words, &mut Inks::new(&frame), 0.5),
+            [[0, 10, 178, 28]]
+        );
+    }
+
+    #[test]
+    fn touching_lines_split_and_one_line_doesnt() {
+        // Two 16 px lines of strokes, a blank row between them but for one
+        // descender: one box from the edge pass's dilation.
+        let strokes = |top: i32| {
+            (10..110)
+                .filter(|x| x % 4 != 0)
+                .map(move |x| ([x, top, x + 1, top + 16], [200; 3]))
+        };
+        let mut boxes: Vec<_> = strokes(10).chain(strokes(27)).collect();
+        boxes.push(([50, 26, 51, 27], [200; 3]));
+        let frame = painted(120, 60, &boxes);
+        assert_eq!(
+            lines(&frame, &[[10, 10, 110, 43]]),
+            [[10, 10, 110, 26], [10, 27, 110, 43]]
+        );
+        let tall = painted(120, 60, &strokes(10).chain(strokes(26)).collect::<Vec<_>>());
+        assert_eq!(lines(&tall, &[[10, 10, 110, 42]]), [[10, 10, 110, 42]]);
+    }
+
+    #[test]
+    fn greys_dont_count_against_link_colours() {
+        // Body text, links in blue, and two greys (bold, a link run into
+        // plain words): the greys once made it "three colours, code" and
+        // the links lost their tags.
+        let row = |i: i32, x: i32, w: i32| [x, 10 + 20 * i, x + w, 22 + 20 * i];
+        let mut boxes: Vec<(Corners, [u8; 3])> =
+            (0..6).map(|i| (row(i, 10, 300), [200; 3])).collect();
+        let links: Vec<Corners> = (0..3).map(|i| row(i, 320, 40)).collect();
+        boxes.extend(links.iter().map(|&b| (b, [60, 100, 220])));
+        boxes.extend((0..3).map(|i| (row(i, 370, 40), [100; 3])));
+        boxes.extend((3..6).map(|i| (row(i, 370, 40), [150; 3])));
+        let frame = painted(420, 140, &boxes);
+        let g: Vec<Corners> = boxes.iter().map(|&(b, _)| b).collect();
+        assert_eq!(super::links(&g, &mut Inks::new(&frame)), links);
     }
 }

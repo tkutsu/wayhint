@@ -11,7 +11,8 @@
 //! The rules and every number come from the prototype in
 //! `.plans/pixel-tags.md` ("Baseline (2026-10-24)"), calibrated against
 //! windows that do have a tree: their accessibility targets are the right
-//! answers. The port reproduces its scores on the same 30 captures.
+//! answers. The port reproduced its scores on the same 30 captures;
+//! the grouping has changed since (`group`).
 //!
 //! The edge and colour passes are ported from Neru
 //! (<https://github.com/y3owk1n/neru>), MIT licence, Copyright (c) 2024
@@ -55,13 +56,13 @@ pub struct Frame {
 /// cost (`.plans/pixel-tags.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Detector {
-    /// Both passes, on two threads: 84.4% of targets on the first screen,
-    /// 1,575 of 4,796 tags stray, on the 30 captures (px-blocks setting
-    /// 10061, link tags on).
+    /// Both passes, on two threads: 84.3% of targets on the first screen,
+    /// 1,492 of 4,648 tags stray, on the 30 captures (px-blocks setting
+    /// 10061, link tags on, then the grouping's changes for terminals).
     #[default]
     Full,
-    /// The colour pass alone, half the work: 82.4% of targets, 2,409 of
-    /// 5,542 tags stray (setting 8948).
+    /// The colour pass alone, half the work: 82.4% of targets, 2,404 of
+    /// 5,537 tags stray (setting 8948, then the same changes).
     Fast,
 }
 
@@ -180,7 +181,7 @@ fn words(frame: &Frame, policy: &Policy) -> Vec<Corners> {
         let edges = edges
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
-        group::fill(&edges, &colour)
+        group::fill(&group::lines(frame, &edges), &colour)
     })
 }
 
