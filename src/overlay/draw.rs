@@ -85,7 +85,10 @@ pub struct Painter {
     glyphs: HashMap<(char, bool), Glyph>,
     space: Option<Space>,
     regions: Vec<BoxRect>,
-    placed: HashMap<(String, i32, i32), BoxRect>,
+    /// How far each tag was moved off its own box, keyed by its anchor and
+    /// click point: a verb typed in front of the letters changes the text
+    /// and the box's size, never where the tag points.
+    placed: HashMap<(Point, Point), Point>,
 }
 
 impl Painter {
@@ -136,14 +139,14 @@ impl Painter {
             .iter()
             .zip(&originals)
             .map(|(tag, &rect)| {
-                let key = (tag.text.clone(), tag.at.x, tag.at.y);
+                let moved = tag.target.and_then(|hit| self.placed.get(&(tag.at, hit)));
                 let bounds = tag
                     .target
                     .and_then(|p| self.regions.iter().rev().find(|r| r.contains(p)))
                     .and_then(|r| r.intersect(screen))
                     .unwrap_or(screen);
                 Label {
-                    rect: self.placed.get(&key).copied().unwrap_or(rect),
+                    rect: moved.map_or(rect, |&by| rect.offset(by)),
                     target: tag.target,
                     bounds,
                 }
@@ -157,8 +160,13 @@ impl Painter {
         for (i, ((tag, &original), rect)) in
             frame.tags.iter().zip(&originals).zip(boxes).enumerate()
         {
-            self.placed
-                .insert((tag.text.clone(), tag.at.x, tag.at.y), rect);
+            // The first placement after a scan holds: two tags with one
+            // anchor and click point then start from the same spot each
+            // time, and resolve the same way.
+            if let Some(hit) = tag.target {
+                let by = Point::new(rect.x - original.x, rect.y - original.y);
+                self.placed.entry((tag.at, hit)).or_insert(by);
+            }
             result.tags[i].at = rect.origin();
             result.tags[i].position = Position::TopLeft;
             if rect != original
@@ -669,6 +677,21 @@ mod collision_tests {
             filtered.tags[0].at, arranged.tags[1].at,
             "typing must keep displaced labels stable"
         );
+        // A verb typed in front of the letters: the displaced tag stays off
+        // the row it would cover, and keeps its leader; the other gets none.
+        let with_verb = |tag: &Tag| Frame {
+            tags: vec![Tag {
+                text: format!("r{}", tag.text),
+                typed: 2,
+                ..tag.clone()
+            }],
+            dots: vec![],
+        };
+        let moved = painter.arrange(&with_verb(&frame.tags[1]), (300.0, 600.0));
+        assert_eq!(moved.tags[0].at.y, arranged.tags[1].at.y);
+        assert_eq!(moved.dots.len(), 1, "still pointing back at its target");
+        let kept = painter.arrange(&with_verb(&frame.tags[0]), (300.0, 600.0));
+        assert_eq!(kept.dots, [], "a tag never moved needs no leader");
         let nudged = Frame {
             dots: vec![Dot {
                 from: frame.tags[1].at,

@@ -375,15 +375,19 @@ impl Desktop {
         // Where the surface is now and how big, unless it's gone, something
         // came over the spot (a dialog opened, a popup closed), or the frame
         // its tags came from isn't clearly its own any more (a layer that
-        // reports the same box was mapped).
+        // reports the same box was mapped, or one gained controls).
         let scanned = &snapshot.windows[target.window].window;
         let stack = self.stack(snapshot.monitor)?;
-        let same_frames = stack
+        let resolve = |now: &Window| {
+            let read = self.runtime.block_on(self.read(now));
+            read.ok().map(|(tree, _)| tree.window.frames)
+        };
+        let owned = stack
             .windows
             .iter()
             .find(|w| w.address == scanned.address)
-            .is_some_and(|now| scanned.frames.iter().all(|f| now.frames.contains(f)));
-        let window = same_frames
+            .is_some_and(|now| same_frame(scanned, now, resolve));
+        let window = owned
             .then(|| uncovered(&stack, &scanned.address, target.hit))
             .flatten();
         let Some(object) = &target.object else {
@@ -392,6 +396,22 @@ impl Desktop {
         let read = self.scanner.read(object, &target.clips, RECHECK_TIMEOUT);
         let fresh = self.runtime.block_on(read).ok();
         Ok(recheck::verdict(target, fresh.as_ref(), window))
+    }
+}
+
+/// Whether the frame `scanned`'s tags came from is still clearly the
+/// surface's own, with `now` the surface as it stands. Of several frames
+/// that may be, `resolve` picks one again by the scan's rule
+/// ([`Desktop::read`]): one mapped since, or one that gained controls, can
+/// leave it ambiguous (`None`) or pick another.
+fn same_frame(
+    scanned: &Window,
+    now: &Window,
+    resolve: impl FnOnce(&Window) -> Option<Vec<tree::ObjectId>>,
+) -> bool {
+    match now.frames.len() {
+        0 | 1 => now.frames == scanned.frames,
+        _ => resolve(now).is_some_and(|picked| picked == scanned.frames),
     }
 }
 
@@ -550,6 +570,27 @@ mod tests {
         let name = executable.file_name().unwrap().to_str().unwrap().to_owned();
         assert!(is_terminal(&window, &[name]));
         assert!(!is_terminal(&window, &["different-terminal".into()]));
+    }
+
+    #[test]
+    fn a_frame_mapped_since_the_scan_is_resolved_again_before_a_click() {
+        let id = |path: &str| tree::ObjectId {
+            bus: ":1.9".into(),
+            path: path.into(),
+        };
+        let layer = |frames: &[&str]| Window {
+            kind: Kind::Layer { level: 3 },
+            frames: frames.iter().map(|&f| id(f)).collect(),
+            ..window("layer", Rect::new(0, 0, 1000, 1000))
+        };
+        let scanned = layer(&["/old"]);
+        let unasked = |_: &Window| -> Option<Vec<tree::ObjectId>> { panic!("one frame is plain") };
+        assert!(same_frame(&scanned, &layer(&["/old"]), unasked));
+        assert!(!same_frame(&scanned, &layer(&["/new"]), unasked));
+        let now = layer(&["/old", "/new"]);
+        assert!(!same_frame(&scanned, &now, |_| None), "both have controls");
+        assert!(!same_frame(&scanned, &now, |_| Some(vec![id("/new")])));
+        assert!(same_frame(&scanned, &now, |_| Some(vec![id("/old")])));
     }
 
     #[test]
