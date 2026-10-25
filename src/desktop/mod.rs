@@ -37,7 +37,10 @@ use self::{
 };
 pub use self::{
     atspi::Stats,
-    hyprland::{Kind, Monitor, Window, cursor, focused_window, monitors, warn, window_by_address},
+    hyprland::{
+        Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors, warn,
+        window_by_address,
+    },
     recheck::Verdict,
     surfaces::Stack,
 };

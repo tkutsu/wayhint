@@ -8,16 +8,21 @@
 //! - Clicks: the surface's input region is empty, so every pointer event
 //!   goes straight through to the app underneath.
 //!
-//! The event loop is `calloop`. Wayland events are one source in it and
+//! The event loop is `calloop`. Wayland events are one source in it,
 //! SIGINT/SIGTERM another, so Ctrl+C is an ordinary [`Event`] and every exit
-//! goes through the same cleanup.
+//! goes through the same cleanup, and Hyprland's events a third, for a run
+//! to follow workspace changes.
 
 mod draw;
 mod font;
 mod gate;
 mod wayland;
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    io::{ErrorKind, Read as _},
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result, bail};
 use smithay_client_toolkit::{
@@ -25,7 +30,8 @@ use smithay_client_toolkit::{
     output::OutputState,
     reexports::{
         calloop::{
-            EventLoop,
+            EventLoop, Interest, Mode, PostAction,
+            generic::Generic,
             signals::{Signal, Signals},
         },
         calloop_wayland_source::WaylandSource,
@@ -74,6 +80,10 @@ pub enum Event {
     Resized,
     /// Keyboard focus left the overlay in the Exclusive fallback.
     KeyboardLost,
+    /// The monitor shows another workspace (once
+    /// [`Overlay::follow_workspaces`] is on): the tags are for windows that
+    /// left.
+    Workspace,
 }
 
 pub struct Overlay {
@@ -181,6 +191,45 @@ impl Overlay {
         &self.monitor
     }
 
+    /// Listens to Hyprland for this monitor showing another workspace,
+    /// which comes as [`Event::Workspace`]. Changes heard while one is
+    /// still waiting to be taken make no second one.
+    pub fn follow_workspaces(&mut self) -> Result<()> {
+        let socket = desktop::events()?;
+        let monitor = self.monitor.name.clone();
+        // A read can end mid-line: the rest comes with the next one.
+        let mut pending = Vec::new();
+        let source = Generic::new(socket, Interest::READ, Mode::Level);
+        self.event_loop
+            .handle()
+            .insert_source(source, move |_, socket, state: &mut State| {
+                let mut buffer = [0; 4096];
+                loop {
+                    match (&**socket).read(&mut buffer) {
+                        Ok(n) if n > 0 => pending.extend_from_slice(&buffer[..n]),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                        // Hyprland hung up: the tags stop following, and
+                        // the run goes on.
+                        _ => return Ok(PostAction::Remove),
+                    }
+                }
+                while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=end).collect();
+                    let line = String::from_utf8_lossy(&line);
+                    if desktop::changes_workspace(line.trim_end(), &monitor)
+                        && !state.events.contains(&Event::Workspace)
+                    {
+                        state.events.push_back(Event::Workspace);
+                    }
+                }
+                Ok(PostAction::Continue)
+            })
+            .map_err(|e| {
+                anyhow::anyhow!("adding Hyprland's events to the event loop: {}", e.error)
+            })?;
+        Ok(())
+    }
+
     /// Which way keys come in, for messages.
     pub fn keyboard_mode(&self) -> &'static str {
         match self.state.grab {
@@ -246,8 +295,15 @@ impl Overlay {
         Ok(())
     }
 
-    /// Shows nothing. Keys are refused until the next `show`.
+    /// Shows nothing. Keys are refused until the next `show`, and a
+    /// workspace change heard by now is old news: the next scan sees it.
+    /// Without that, a click on a bar's workspace button would scan twice.
     pub fn clear(&mut self) -> Result<()> {
+        // Reads what came in, without waiting, so the change is heard here
+        // and not after the scan.
+        self.event_loop
+            .dispatch(Some(Duration::ZERO), &mut self.state)?;
+        self.state.events.retain(|e| *e != Event::Workspace);
         self.painter.paint(&mut self.pixmap, &Frame::default());
         self.state.present(&self.pixmap)?;
         self.new_tags();

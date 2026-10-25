@@ -223,19 +223,20 @@ struct WireCursor {
     y: f64,
 }
 
-fn socket_path() -> Result<PathBuf> {
+/// `.socket.sock` takes requests, `.socket2.sock` sends events.
+fn socket_path(socket: &str) -> Result<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is unset")?;
     let instance = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
         .context("HYPRLAND_INSTANCE_SIGNATURE is unset: is this running under Hyprland?")?;
     Ok(PathBuf::from(runtime)
         .join("hypr")
         .join(instance)
-        .join(".socket.sock"))
+        .join(socket))
 }
 
 /// Sends one command and returns the reply as Hyprland wrote it.
 fn send(command: &str) -> Result<String> {
-    let path = socket_path()?;
+    let path = socket_path(".socket.sock")?;
     let mut socket = UnixStream::connect(&path)
         .with_context(|| format!("Hyprland socket {}", path.display()))?;
     socket.set_read_timeout(Some(TIMEOUT))?;
@@ -511,6 +512,32 @@ pub fn cursor() -> Result<Point> {
     Ok(Point::new(c.x.round() as i32, c.y.round() as i32))
 }
 
+/// Hyprland's event socket: a line, `NAME>>DATA`, for each thing that
+/// happens, for as long as the connection stays open. Non-blocking, for an
+/// event loop to wait on.
+pub fn events() -> Result<UnixStream> {
+    let path = socket_path(".socket2.sock")?;
+    let socket = UnixStream::connect(&path)
+        .with_context(|| format!("Hyprland event socket {}", path.display()))?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
+/// Whether the event `line` means the monitor named `monitor` may now show
+/// another workspace.
+///
+/// `workspacev2>>ID,NAME` names no monitor: it's the focused one, which is
+/// where a run puts its tags. A special workspace opening or closing does,
+/// last: `activespecialv2>>ID,NAME,MONITOR`. Each change sends a v1 event
+/// too, so only the v2 one counts: one change, one rescan.
+pub fn changes_workspace(line: &str, monitor: &str) -> bool {
+    match line.split_once(">>") {
+        Some(("workspacev2", _)) => true,
+        Some(("activespecialv2", data)) => data.rsplit(',').next() == Some(monitor),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +551,22 @@ mod tests {
         let window: Window = serde_json::from_str::<WireWindow>(json).unwrap().into();
         assert_eq!(window.rect, Rect::new(8, 38, 1262, 1394));
         assert!(window.focused);
+    }
+
+    #[test]
+    fn a_new_workspace_counts_once_and_a_special_one_only_on_its_monitor() {
+        assert!(changes_workspace("workspacev2>>3,3", "DP-1"));
+        assert!(!changes_workspace("workspace>>3", "DP-1"));
+        assert!(changes_workspace(
+            "activespecialv2>>-98,special:term,DP-1",
+            "DP-1"
+        ));
+        assert!(changes_workspace("activespecialv2>>,,DP-1", "DP-1"));
+        assert!(!changes_workspace(
+            "activespecialv2>>-98,special:term,HDMI-A-1",
+            "DP-1"
+        ));
+        assert!(!changes_workspace("openwindow>>55,3,kitty,t", "DP-1"));
     }
 
     #[test]
