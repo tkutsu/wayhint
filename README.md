@@ -165,7 +165,12 @@ against 33% for `"full"`.
 
 Terminals (kitty, foot, Alacritty, Ghostty, WezTerm, XTerm) are read as
 lines of text with the one-pass reading, whichever detector is set: each
-passage gets one tag, and typing it shows a tag on each of its lines.
+passage gets one tag, and typing it shows a tag on each of its lines. The
+cursor gets a tag of its own, so a shell prompt or a TUI's input box is one
+tag away; clicking it leaves the cursor where it is. A cursor is found by
+its block shape, solid or hollow, so a bar or underline cursor in the
+focused terminal gets no tag, and neither does a blinking one caught
+while it's off.
 
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that
