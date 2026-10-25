@@ -49,7 +49,7 @@ pub use self::{
 };
 use crate::{
     geometry::{Point, Rect},
-    pixels::{self, Detector, Found},
+    pixels::{self, Detector, Found, Frame},
     snapshot::{Read, Snapshot, Target},
     space::Space,
     text::{Span, Text},
@@ -89,14 +89,16 @@ pub struct Desktop {
 /// One window as the scan saw it, until the snapshot is built from it.
 enum Seen {
     Tree(tree::Tree, filter::Filtered, Stats),
-    Pixels(Window, Found, f64, Stats),
+    /// With its picture, shrunk, and the picture's pixels per logical
+    /// pixel: `layout` reads the same one.
+    Pixels(Window, Found, (Frame, f64), Stats),
 }
 
 impl Seen {
     fn read(&self) -> Read<'_> {
         match self {
             Self::Tree(tree, filtered, stats) => Read::Tree(tree, filtered, stats),
-            Self::Pixels(window, found, scale, stats) => Read::Pixels {
+            Self::Pixels(window, found, (_, scale), stats) => Read::Pixels {
                 window,
                 found,
                 scale: *scale,
@@ -235,8 +237,8 @@ impl Desktop {
                 (Err(e), None) => failed.push(e),
                 (Err(no_tree), Some(detector)) => {
                     match look(&mut self.camera, window, detector, terminals) {
-                        Ok((found, scale, stats)) => {
-                            seen.push(Seen::Pixels(window.clone(), found, scale, stats));
+                        Ok((found, picture, stats)) => {
+                            seen.push(Seen::Pixels(window.clone(), found, picture, stats));
                         }
                         Err(e) => failed.push(anyhow!("{no_tree:#}, and {e:#}")),
                     }
@@ -246,7 +248,14 @@ impl Desktop {
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
         keep_visible(&mut snapshot, stack, monitor);
-        self.layout(&mut snapshot, monitor, stack);
+        let pictures: Vec<_> = seen
+            .iter()
+            .filter_map(|s| match s {
+                Seen::Pixels(window, _, picture, _) => Some((window.address.as_str(), picture)),
+                Seen::Tree(..) => None,
+            })
+            .collect();
+        self.layout(&mut snapshot, monitor, stack, &pictures);
         snapshot.obstacles.extend(
             stack
                 .windows
@@ -265,8 +274,15 @@ impl Desktop {
     /// Capture what labels may cover separately from target detection. An
     /// unreadable window stays fully protected instead of guessing it is blank.
     /// The same picture puts each document body's tag in its clearest spot
-    /// that no surface in `stack` may cover.
-    pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor, stack: &Stack) {
+    /// that no surface in `stack` may cover. A client in `pictures` (by
+    /// address, shrunk, with its scale) was taken this scan already.
+    pub fn layout(
+        &mut self,
+        snapshot: &mut Snapshot,
+        monitor: &Monitor,
+        stack: &Stack,
+        pictures: &[(&str, &(Frame, f64))],
+    ) {
         let mut obstacles = Vec::new();
         // Text sources kept: a button only where its picture shows letters.
         let mut keep: Vec<bool> = snapshot.texts.iter().map(|t| t.button.is_none()).collect();
@@ -281,14 +297,20 @@ impl Desktop {
                 if window.kind != Kind::Client {
                     bail!("only clients can be exported");
                 }
-                let until = Instant::now() + CAPTURE_TIMEOUT;
-                let camera = match &mut self.camera {
-                    Some(camera) => camera,
-                    empty => empty.insert(Camera::connect(until)?),
+                let taken = pictures.iter().find(|(a, _)| *a == window.address);
+                let shot;
+                let (frame, scale) = if let Some((_, (frame, scale))) = taken {
+                    (frame, *scale)
+                } else {
+                    let until = Instant::now() + CAPTURE_TIMEOUT;
+                    let camera = match &mut self.camera {
+                        Some(camera) => camera,
+                        empty => empty.insert(Camera::connect(until)?),
+                    };
+                    shot = pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
+                    (&shot.0, shot.1)
                 };
-                let (frame, scale) =
-                    pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
-                let cells = bodies.then(|| pixels::cell_space(&frame));
+                let cells = bodies.then(|| pixels::cell_space(frame));
                 for (i, text) in snapshot.texts.iter().enumerate() {
                     if let Some(button) = text.button.filter(|_| text.window == index) {
                         let r = button.rect;
@@ -296,10 +318,10 @@ impl Desktop {
                         let at = |v: i32, from: i32| (f64::from(v - from) * scale).round() as i32;
                         let (x, y) = (window.rect.x, window.rect.y);
                         let corners = [at(r.x, x), at(r.y, y), at(r.right(), x), at(r.bottom(), y)];
-                        keep[i] = pixels::shows_letters(&frame, corners, button.letters);
+                        keep[i] = pixels::shows_letters(frame, corners, button.letters);
                     }
                 }
-                Ok((Space::pixels(&frame), cells, scale))
+                Ok((Space::pixels(frame), cells, scale))
             })();
             let origin = window.rect.origin();
             match &captured {
@@ -612,7 +634,7 @@ fn is_terminal(window: &Window, terminals: &[String]) -> bool {
 
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
 pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) -> Result<Snapshot> {
-    let (found, scale, stats) = look(&mut None, window, detector, terminals)?;
+    let (found, (_, scale), stats) = look(&mut None, window, detector, terminals)?;
     let read = Read::Pixels {
         window,
         found: &found,
@@ -623,14 +645,14 @@ pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) ->
 }
 
 /// Takes a picture of `window` and finds its tags, with the `camera`
-/// made on first use. Also returns the picture's pixels per logical pixel
-/// and what it cost.
+/// made on first use. Also returns the picture, shrunk, with its pixels
+/// per logical pixel, and what it cost.
 fn look(
     camera: &mut Option<Camera>,
     window: &Window,
     detector: Detector,
     terminals: &[String],
-) -> Result<(Found, f64, Stats)> {
+) -> Result<(Found, (Frame, f64), Stats)> {
     let start = Instant::now();
     let until = start + CAPTURE_TIMEOUT;
     let camera = match camera {
@@ -645,7 +667,7 @@ fn look(
         ms: start.elapsed().as_secs_f64() * 1000.0,
         ..Stats::default()
     };
-    Ok((found, scale, stats))
+    Ok((found, (frame, scale), stats))
 }
 
 #[cfg(test)]
