@@ -156,8 +156,9 @@ each of its lines instead of clicking; a verb typed before it carries over
 to the line you pick. Pixel tags can't be repeated: there is nothing to
 find the same control by in the next scan.
 
-When a run started from a keybind fails, the reason shows as a Hyprland
-notification. From a terminal it's printed instead.
+When a run started from a keybind fails or warns, the reason shows as a
+desktop notification from your notification server (Hyprland's own
+notification if none answers). From a terminal it's printed instead.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON, and
 `wayhint dump --explain` adds every control it left out and why.
