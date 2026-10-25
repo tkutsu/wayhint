@@ -10,12 +10,17 @@
 //! from Rust's (banker's rounding, NumPy's medians) the port does it
 //! Python's way.
 //!
-//! A terminal gets one [`terminal`] focus target in clear space near its
-//! bottom, leaving its text and TUI controls to the keyboard.
+//! Places to type into are one body tag each: a whole [`terminal`], near
+//! its bottom, leaving its text and TUI controls to the keyboard; a
+//! [`sheet`], near its middle.
 
 use std::collections::{HashMap, HashSet};
 
 use super::{Corners, Frame, Policy, buckets::Buckets, texture};
+use crate::{
+    geometry::{Point, Rect},
+    space::Space,
+};
 
 /// Text is this tall, in px; anything else passes through as it is.
 const TEXT: std::ops::RangeInclusive<i32> = 3..=48;
@@ -74,8 +79,9 @@ pub struct Found {
     pub blocks: Vec<Block>,
     /// Pictures and video big enough to be content.
     pub media: Vec<Corners>,
-    /// Direct targets focus a keyboard-driven input area and end the mode.
-    pub input: bool,
+    /// One tag for a whole place to type into (a terminal, a sheet): a
+    /// click there focuses it and ends the mode.
+    pub bodies: Vec<Corners>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,31 +144,39 @@ pub fn group(frame: &Frame, words: &[Corners], policy: &Policy) -> Found {
         direct,
         blocks: found_blocks,
         media,
-        input: false,
+        bodies: Vec::new(),
     }
 }
 
-/// One focus target in clear space near the terminal's bottom. Text and
+/// A terminal's body: the clearest patch near its bottom middle. Text and
 /// TUI widgets are keyboard driven, so they never become separate hints.
-/// If the lower half is completely occupied, use its least busy patch.
-pub fn terminal(frame: &Frame) -> Found {
-    let space = crate::space::Space::pixels(frame);
+/// If the lower half is completely occupied, its least busy patch.
+pub fn terminal(frame: &Frame) -> Corners {
+    let space = Space::pixels(frame);
     let (w, h) = (frame.width as i32, frame.height as i32);
     let (bw, bh) = (36.min(w), 24.min(h));
     let baseline = (h - 18).max(bh);
     let (last_x, last_y) = ((w - bw - 4).max(0), (h - bh - 4).max(0));
     let (x, y) = (4.min(last_x), (h / 2).min(last_y));
-    let corners = crate::geometry::Rect::new(x, y, last_x - x, last_y - y);
+    let area = Rect::new(x, y, last_x - x + bw, last_y - y + bh);
+    // The tag's bottom on the baseline.
+    let aim = Point::new(w / 2, baseline - (bh - bh / 2));
     let r = space
-        .clearest(corners, bw, bh, |r| {
-            2 * (r.bottom() - baseline).abs() + (r.center().x - w / 2).abs()
-        })
-        .unwrap_or(crate::geometry::Rect::new(0, 0, w, h));
-    Found {
-        direct: vec![[r.x, r.y, r.right(), r.bottom()]],
-        input: true,
-        ..Found::default()
-    }
+        .spot(area, (bw, bh), aim, 2)
+        .unwrap_or(Rect::new(0, 0, w, h));
+    [r.x, r.y, r.right(), r.bottom()]
+}
+
+/// A sheet's body: the clearest patch nearest its middle, 4 px in from its
+/// edges, or its middle when the patch doesn't fit.
+pub fn sheet(space: &Space, grid: Corners) -> Corners {
+    let area = Rect::new(grid[0], grid[1], width(grid), height(grid));
+    let (bw, bh) = (36.min(area.w), 24.min(area.h));
+    let middle = area.center();
+    let r = space
+        .spot(area.inset(4), (bw, bh), middle, 1)
+        .unwrap_or(Rect::new(middle.x - bw / 2, middle.y - bh / 2, bw, bh));
+    [r.x, r.y, r.right(), r.bottom()]
 }
 
 /// The words whose centres lie in `p`, in their order.
