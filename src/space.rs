@@ -154,6 +154,12 @@ impl Space {
         best.map(|(_, r)| r)
     }
 
+    /// The same map with `rects`, in its coordinates, blocked too: where
+    /// another window covers this one, say.
+    pub fn block(&self, rects: &[Rect]) -> Self {
+        Self::rectangles(self.area, &[self.obstacles(), rects.to_vec()].concat())
+    }
+
     /// Horizontal occupied runs for snapshot replay, coalesced vertically.
     pub fn obstacles(&self) -> Vec<Rect> {
         let mut out: Vec<Rect> = Vec::new();

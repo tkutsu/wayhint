@@ -71,24 +71,30 @@ pub struct Placed {
 
 /// Where the surface at `address` is now, if nothing that may be above it
 /// covers `point`; `None` if it's gone, or covered there.
+pub fn uncovered(stack: &Stack, address: &str, point: Point) -> Option<Rect> {
+    let rect = stack.windows.iter().find(|w| w.address == address)?.rect;
+    (!above(stack, address).any(|w| w.rect.contains(point))).then_some(rect)
+}
+
+/// The surfaces that may be above the one at `address`; none if it's gone.
 ///
 /// Above a client or layer is whatever comes after it. Above a popup is
 /// anything from [`Stack::popup_floor`] up, other popups too: their order
 /// among themselves isn't known either.
-pub fn uncovered(stack: &Stack, address: &str, point: Point) -> Option<Rect> {
-    let at = stack.windows.iter().position(|w| w.address == address)?;
-    let from = if stack.windows[at].kind == Kind::Popup {
-        stack.popup_floor
-    } else {
-        at + 1
+pub fn above<'a>(stack: &'a Stack, address: &str) -> impl Iterator<Item = &'a Window> {
+    let at = stack.windows.iter().position(|w| w.address == address);
+    let from = match at {
+        Some(at) if stack.windows[at].kind == Kind::Popup => stack.popup_floor,
+        Some(at) => at + 1,
+        None => stack.windows.len(),
     };
-    let covered = stack
+    stack
         .windows
         .iter()
         .enumerate()
         .skip(from)
-        .any(|(i, w)| i != at && w.rect.contains(point));
-    (!covered).then_some(stack.windows[at].rect)
+        .filter(move |&(i, _)| Some(i) != at)
+        .map(|(_, w)| w)
 }
 
 /// Sorts one app's `frames` out against its mapped `layers` on every

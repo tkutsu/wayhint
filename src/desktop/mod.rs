@@ -34,7 +34,7 @@ use futures::future;
 use self::{
     atspi::Bounds,
     capture::Camera,
-    surfaces::{place, popup, uncovered, unknown},
+    surfaces::{above, place, popup, uncovered, unknown},
     tree::ObjectId,
 };
 pub use self::{
@@ -246,7 +246,7 @@ impl Desktop {
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
         keep_visible(&mut snapshot, stack, monitor);
-        self.layout(&mut snapshot, monitor);
+        self.layout(&mut snapshot, monitor, stack);
         snapshot.obstacles.extend(
             stack
                 .windows
@@ -264,8 +264,9 @@ impl Desktop {
 
     /// Capture what labels may cover separately from target detection. An
     /// unreadable window stays fully protected instead of guessing it is blank.
-    /// The same picture puts each document body's tag in its clearest spot.
-    pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor) {
+    /// The same picture puts each document body's tag in its clearest spot
+    /// that no surface in `stack` may cover.
+    pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor, stack: &Stack) {
         let mut obstacles = Vec::new();
         // Text sources kept: a button only where its picture shows letters.
         let mut keep: Vec<bool> = snapshot.texts.iter().map(|t| t.button.is_none()).collect();
@@ -316,8 +317,9 @@ impl Desktop {
                 .as_ref()
                 .ok()
                 .and_then(|(_, cells, scale)| Some((cells.as_ref()?, *scale)));
+            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
             for target in snapshot.targets.iter_mut().filter(|t| is_body(t)) {
-                focus_body(target, origin, cells);
+                focus_body(target, origin, cells, monitor.rect, &covers);
             }
         }
         // A body's click moved off its middle.
@@ -550,22 +552,44 @@ pub fn shows(stack: &Stack, monitor: &Monitor, address: &str, at: Point) -> bool
 /// its middle, and clicks there: an empty cell of a sheet, a blank stretch
 /// of a page. `picture` is the window's ink without grid lines
 /// ([`pixels::cell_space`]), at some pixels per logical pixel, whose
-/// corner is at `origin`; without one, the middle.
+/// corner is at `origin`. Only a patch on `screen` and clear of `covers`
+/// (the surfaces that may be above) will do; without one, or without a
+/// picture, the tag stays on the click `keep_visible` found showing.
 #[allow(clippy::cast_possible_truncation)]
-fn focus_body(target: &mut Target, origin: Point, picture: Option<(&Space, f64)>) {
+fn focus_body(
+    target: &mut Target,
+    origin: Point,
+    picture: Option<(&Space, f64)>,
+    screen: Rect,
+    covers: &[Rect],
+) {
     let body = target.visible;
     let (w, h) = (BODY_TAG.0.min(body.w), BODY_TAG.1.min(body.h));
-    let middle = body.center();
-    let mut patch = Rect::new(middle.x - w / 2, middle.y - h / 2, w, h);
-    if let Some((space, scale)) = picture {
+    let at = target.hit;
+    let mut patch = Rect::new(at.x - w / 2, at.y - h / 2, w, h);
+    if let Some((space, scale)) = picture
+        && let Some(area) = body.intersect(screen)
+    {
         let pixel = |v: i32| (f64::from(v) * scale).round() as i32;
-        let area = body.inset(4);
-        let (x, y) = (pixel(area.x - origin.x), pixel(area.y - origin.y));
-        let area = Rect::new(x, y, pixel(area.w), pixel(area.h));
+        let to_picture = |r: Rect| {
+            let (x, y) = (pixel(r.x - origin.x), pixel(r.y - origin.y));
+            Rect::new(x, y, pixel(r.w), pixel(r.h))
+        };
+        let blocked: Vec<Rect> = covers.iter().map(|&r| to_picture(r)).collect();
+        let middle = body.center();
         let aim = Point::new(pixel(middle.x - origin.x), pixel(middle.y - origin.y));
-        if let Some(r) = space.spot(area, (pixel(w), pixel(h)), aim, 1) {
+        let size = (pixel(w), pixel(h));
+        if let Some(r) = space
+            .block(&blocked)
+            .spot(to_picture(area.inset(4)), size, aim, 1)
+        {
             let logical = |v: i32| (f64::from(v) / scale).round() as i32;
-            patch = Rect::new(logical(r.x) + origin.x, logical(r.y) + origin.y, w, h);
+            let spot = Rect::new(logical(r.x) + origin.x, logical(r.y) + origin.y, w, h);
+            // Every patch may be busy or covered: a covered one is no use.
+            let c = spot.center();
+            if screen.contains(c) && !covers.iter().any(|r| r.contains(c)) {
+                patch = spot;
+            }
         }
     }
     target.visible = patch;
@@ -734,6 +758,8 @@ mod tests {
         assert_eq!(snapshot.targets, []);
     }
 
+    const SCREEN: Rect = Rect::new(0, 0, 3840, 2160);
+
     fn sheet(visible: Rect) -> Target {
         Target {
             object: None,
@@ -762,7 +788,13 @@ mod tests {
         let picture = (Space::rectangles(Rect::new(0, 0, 800, 600), &ink), 1.0);
 
         let mut target = sheet(body);
-        focus_body(&mut target, origin, Some((&picture.0, picture.1)));
+        focus_body(
+            &mut target,
+            origin,
+            Some((&picture.0, picture.1)),
+            SCREEN,
+            &[],
+        );
         let patch = target.visible;
         assert_eq!((patch.w, patch.h), BODY_TAG);
         assert_eq!(target.hit, patch.center());
@@ -790,7 +822,7 @@ mod tests {
         // Grid lines don't count: the empty middle is clear as it is.
         for (body, reach) in [(Rect::new(45, 208, 2438, 1168), 8), (data, 400)] {
             let mut target = sheet(body);
-            focus_body(&mut target, origin, Some((&cells, 1.0)));
+            focus_body(&mut target, origin, Some((&cells, 1.0)), SCREEN, &[]);
             let patch = target.visible;
             assert_eq!(patch.intersect(body), Some(patch), "inside the sheet");
             assert!(
@@ -810,8 +842,55 @@ mod tests {
     #[test]
     fn a_body_without_a_picture_is_tagged_and_clicked_in_its_middle() {
         let mut target = sheet(Rect::new(0, 0, 400, 300));
-        focus_body(&mut target, Point::new(0, 0), None);
+        focus_body(&mut target, Point::new(0, 0), None, SCREEN, &[]);
         assert_eq!(target.visible, Rect::new(182, 138, 36, 24));
         assert_eq!(target.hit, Point::new(200, 150));
+    }
+
+    #[test]
+    fn a_body_tag_stays_clear_of_a_window_above() {
+        // A busy page, blank only at its top left and bottom right. The
+        // top left is nearer the middle, but a window covers it.
+        let body = Rect::new(0, 0, 400, 300);
+        let cover = Rect::new(0, 0, 120, 120);
+        let ink = [Rect::new(120, 0, 280, 200), Rect::new(0, 120, 300, 180)];
+        let picture = Space::rectangles(body, &ink);
+        let mut target = sheet(body);
+        focus_body(
+            &mut target,
+            Point::new(0, 0),
+            Some((&picture, 1.0)),
+            SCREEN,
+            &[],
+        );
+        assert!(cover.contains(target.hit), "uncovered, the top left wins");
+        let mut target = sheet(body);
+        focus_body(
+            &mut target,
+            Point::new(0, 0),
+            Some((&picture, 1.0)),
+            SCREEN,
+            &[cover],
+        );
+        assert!(
+            target.visible.intersect(cover).is_none(),
+            "{:?}",
+            target.visible
+        );
+        assert_eq!(picture.ink(target.visible), 0, "on the blank bottom right");
+
+        // Blank only where it's covered (the audit's case): a busy patch
+        // that shows beats a blank one under the window.
+        let ink = [Rect::new(0, 120, 400, 180), Rect::new(120, 0, 280, 120)];
+        let picture = Space::rectangles(body, &ink);
+        let mut target = sheet(body);
+        focus_body(
+            &mut target,
+            Point::new(0, 0),
+            Some((&picture, 1.0)),
+            SCREEN,
+            &[cover],
+        );
+        assert!(!cover.contains(target.hit), "{:?}", target.hit);
     }
 }
