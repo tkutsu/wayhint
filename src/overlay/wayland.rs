@@ -38,6 +38,10 @@ use smithay_client_toolkit::{
         wlr_layer::{
             KeyboardInteractivity, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
         },
+        xdg::{
+            popup::{Popup, PopupConfigure, PopupHandler},
+            window::{Window, WindowConfigure, WindowHandler},
+        },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
@@ -79,6 +83,10 @@ pub struct State {
     pub layer: Option<LayerSurface>,
     /// The size the compositor gave the overlay, once it has.
     pub size: Option<(u32, u32)>,
+    /// The layer's popup, which the tags are drawn on, and whether the
+    /// compositor has placed it yet.
+    pub popup: Option<Popup>,
+    pub placed: bool,
     pub pool: Option<SlotPool>,
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub grab: Grab,
@@ -159,9 +167,22 @@ impl State {
         }
     }
 
-    /// Draws a finished pixmap on the overlay surface.
+    /// Maps the layer with one clear pixel. It draws nothing itself, but
+    /// its popup shows only while it's mapped.
+    pub fn map_layer(&mut self) -> anyhow::Result<()> {
+        let (Some(layer), Some(pool)) = (&self.layer, &mut self.pool) else {
+            anyhow::bail!("the overlay isn't configured yet");
+        };
+        let (buffer, canvas) = pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888)?;
+        canvas.fill(0);
+        buffer.attach_to(layer.wl_surface())?;
+        layer.commit();
+        Ok(())
+    }
+
+    /// Draws a finished pixmap on the overlay's popup.
     pub fn present(&mut self, pixmap: &Pixmap) -> anyhow::Result<()> {
-        let (Some(layer), Some((w, h)), Some(pool)) = (&self.layer, self.size, &mut self.pool)
+        let (Some(popup), Some((w, h)), Some(pool)) = (&self.popup, self.size, &mut self.pool)
         else {
             anyhow::bail!("the overlay isn't configured yet");
         };
@@ -175,10 +196,10 @@ impl State {
         // one or two frames.
         let (buffer, canvas) = pool.create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)?;
         draw::to_argb8888(pixmap, canvas);
-        let surface = layer.wl_surface();
+        let surface = popup.wl_surface();
         surface.damage_buffer(0, 0, w, h);
         buffer.attach_to(surface)?;
-        layer.commit();
+        surface.commit();
         Ok(())
     }
 
@@ -349,6 +370,33 @@ impl LayerShellHandler for State {
             let bytes = size.0 as usize * size.1 as usize * 4;
             self.pool = SlotPool::new(bytes, &self.shm).ok();
         }
+    }
+}
+
+impl PopupHandler for State {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup, _: PopupConfigure) {
+        self.placed = true;
+    }
+
+    /// Hyprland dismisses only popups that took a grab, and this one
+    /// doesn't; if it comes anyway, the tags are gone.
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup) {
+        self.events.push_back(Event::Closed);
+    }
+}
+
+/// There are no windows, but binding xdg-shell binds its decoration
+/// manager too, whose events SCTK hands to a window handler.
+impl WindowHandler for State {
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {}
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &Window,
+        _: WindowConfigure,
+        _: u32,
+    ) {
     }
 }
 

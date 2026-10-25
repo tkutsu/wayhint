@@ -1,7 +1,10 @@
 //! The overlay: a transparent layer-shell surface over the whole monitor
 //! that shows tags and reads keys, and never takes a click.
 //!
-//! - Drawing: software, into a pixmap the size of the monitor (`draw.rs`).
+//! - Drawing: software, into a pixmap the size of the monitor (`draw.rs`),
+//!   shown on a popup of the layer, not on the layer itself. Hyprland draws
+//!   every layer's popups after all the layers, so a bar's open menu would
+//!   cover tags on the layer.
 //! - Keys: an input-method keyboard grab, or keyboard focus as the
 //!   fallback (`wayland.rs`), filtered by the stale-key rule (`gate.rs`).
 //!   What the grab takes and wayhint doesn't use goes on to the app.
@@ -36,12 +39,14 @@ use smithay_client_toolkit::{
         },
         calloop_wayland_source::WaylandSource,
         client::{Connection, QueueHandle, globals::registry_queue_init},
+        protocols::xdg::shell::client::xdg_positioner,
     },
     registry::RegistryState,
     seat::SeatState,
     shell::{
         WaylandSurface,
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell},
+        xdg::{XdgPositioner, XdgShell, popup::Popup},
     },
     shm::Shm,
 };
@@ -72,7 +77,8 @@ pub enum Event {
     Key(Key, Mods),
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
-    /// The compositor closed the overlay (its monitor went away).
+    /// The compositor closed the overlay (its monitor went away) or
+    /// dismissed the popup the tags are on.
     Closed,
     /// The monitor changed size (a new mode or scale). The tags were placed
     /// for the old one and the drawing buffer has the old size, so the run
@@ -111,6 +117,7 @@ impl Overlay {
         let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor")?;
         let layer_shell =
             LayerShell::bind(&globals, &qh).context("the compositor has no layer-shell")?;
+        let xdg_shell = XdgShell::bind(&globals, &qh).context("the compositor has no xdg-shell")?;
         let mut state = State {
             registry: RegistryState::new(&globals),
             seats: SeatState::new(&globals, &qh),
@@ -119,6 +126,8 @@ impl Overlay {
             input_methods: globals.bind(&qh, 1..=1, NoEvents).ok(),
             layer: None,
             size: None,
+            popup: None,
+            placed: false,
             pool: None,
             keyboard: None,
             grab: Grab::Released,
@@ -160,6 +169,32 @@ impl Overlay {
         }
         let (w, h) = state.size.unwrap_or_default();
         let pixmap = Pixmap::new(w, h).with_context(|| format!("overlay size {w}x{h}"))?;
+
+        // The popup the tags are drawn on: the layer's size, at its corner.
+        // It takes no grab, so the compositor never dismisses it, and an
+        // open menu of another app keeps its own.
+        state.map_layer()?;
+        let positioner = XdgPositioner::new(&xdg_shell)?;
+        positioner.set_size(i32::try_from(w)?, i32::try_from(h)?);
+        positioner.set_anchor_rect(0, 0, 1, 1);
+        positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+        positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+        let popup = Popup::from_surface(
+            None,
+            &positioner,
+            &qh,
+            compositor.create_surface(&qh),
+            &xdg_shell,
+        )?;
+        if let Some(layer) = &state.layer {
+            layer.get_popup(popup.xdg_popup());
+        }
+        popup.wl_surface().set_input_region(Some(empty.wl_region()));
+        popup.wl_surface().commit();
+        state.popup = Some(popup);
+        while !state.placed {
+            queue.blocking_dispatch(&mut state)?;
+        }
 
         let event_loop = EventLoop::try_new()?;
         WaylandSource::new(conn.clone(), queue)
@@ -381,7 +416,9 @@ impl Drop for Overlay {
     /// overlay. Errors can't be returned from `drop`, so they're ignored.
     fn drop(&mut self) {
         self.state.release_keys();
-        self.state.layer = None; // dropping the LayerSurface destroys it
+        // The popup before its parent; dropping each destroys it.
+        self.state.popup = None;
+        self.state.layer = None;
         let _ = self.conn.flush();
     }
 }
