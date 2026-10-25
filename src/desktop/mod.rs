@@ -29,9 +29,7 @@ use futures::future;
 use self::{atspi::Bounds, capture::Camera, hyprland::uncovered};
 pub use self::{
     atspi::Stats,
-    hyprland::{
-        Monitor, Window, cursor, focused_window, monitors, notify, stack, window_by_address,
-    },
+    hyprland::{Monitor, Window, cursor, focused_window, monitors, stack, warn, window_by_address},
     recheck::Verdict,
 };
 use crate::{

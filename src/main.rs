@@ -36,7 +36,7 @@ mod selection;
 mod snapshot;
 mod style;
 
-use std::{io::IsTerminal as _, path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode};
 
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
@@ -59,13 +59,7 @@ fn main() -> ExitCode {
         Err(error) => {
             // `{:#}` prints the whole context chain on one line:
             // "config ~/.config/wayhint/config.toml: [keys] alphabet: ..."
-            let message = format!("wayhint: {error:#}");
-            eprintln!("{message}");
-            // Started from a keybind, stderr goes nowhere anyone looks, so
-            // the error goes on screen too. From a terminal, once is enough.
-            if !std::io::stderr().is_terminal() {
-                let _ = desktop::notify(&message);
-            }
+            desktop::warn(&format!("wayhint: {error:#}"));
             ExitCode::FAILURE
         }
     }
