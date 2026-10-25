@@ -2,15 +2,18 @@
 //!
 //! ```text
 //! windows shown -> scan -> tags -> keys -> re-check -> act -> settle --+
-//!      ^                                                               |
+//!      ^                         |                                     |
+//!      +---- another workspace --+                                     |
 //!      +---------------------------------------------------------------+
 //! Esc, Ctrl+C, --once or a click that may take typing -> clean up -> exit
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
-//! one, except where another window covers them. A window with no
-//! accessibility tree gets tags from its pixels; a block of text there
-//! gets one tag, which opens into tags on its lines.
+//! one, except where another window covers them. When the monitor switches
+//! to another workspace (a Super bind still reaches Hyprland while wayhint
+//! holds the keys), the tags follow it. A window with no accessibility
+//! tree gets tags from its pixels; a block of text there gets one tag,
+//! which opens into tags on its lines.
 //!
 //! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
 //! before the tag's last letter), or a verb and the spot under the
@@ -95,7 +98,12 @@ pub fn run(config: &Config, once: bool, verb: Option<Action>) -> Result<()> {
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
     // The overlay comes first: it blocks SIGINT and SIGTERM for this thread
     // (they become events), and the threads started after it inherit that.
-    let overlay = Overlay::new(&conn, &config.style, monitor)?;
+    let mut overlay = Overlay::new(&conn, &config.style, monitor)?;
+    if let Err(e) = overlay.follow_workspaces() {
+        desktop::warn(&format!(
+            "wayhint: the tags won't follow workspace changes: {e:#}"
+        ));
+    }
     let mut session = Session {
         overlay,
         desktop: Desktop::connect()?,
@@ -138,6 +146,9 @@ impl Session {
             )?;
             let done = match picked {
                 Pick::Leave => return Ok(()),
+                // Nothing was done, so `--once` goes on too, and the letters
+                // typed so far go with the old tags.
+                Pick::Rescan => continue,
                 // `Space`: the cursor is already there, give or take the
                 // nudge, and there's no target to re-check, or to repeat on.
                 // Nor any telling what's under it, so a click there ends

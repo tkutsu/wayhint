@@ -30,6 +30,9 @@ pub enum Pick {
     Repeat,
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
     Leave,
+    /// The monitor shows another workspace: nothing chosen, and the tags
+    /// are for windows that left.
+    Rescan,
 }
 
 /// What the screen holds while a pick runs: the targets, the monitor they
@@ -94,6 +97,7 @@ pub fn pick(
             },
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
+            Event::Workspace => return Ok(Pick::Rescan),
         };
         // The command as it stood before this key: what a block opens with.
         let before = selector.clone();
