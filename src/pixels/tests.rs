@@ -112,6 +112,7 @@ fn found_json(found: &Found) -> serde_json::Value {
         "direct": found.direct,
         "blocks": found.blocks.iter().map(|b| json!({"rect": b.rect, "phrases": b.phrases})).collect::<Vec<_>>(),
         "media": found.media,
+        "input": found.input,
     })
 }
 
@@ -193,4 +194,73 @@ fn a_scaled_frame_is_read_at_logical_size() {
     assert!((left - 1.5).abs() < 1e-9, "3 px for 2 logical px");
     let (same, one) = shrink(frame(10, 4, |_, _| [9; 3]), 10);
     assert_eq!((same.width, one), (10, 1.0));
+}
+
+#[test]
+fn terminal_nvim_gets_one_focus_hint_on_clear_lower_pixels() {
+    let frame = load(Path::new("tests/fixtures/terminal-nvim.png"));
+    for detector in [Detector::Fast, Detector::Full] {
+        let found = find(&frame, detector, true);
+        assert!(found.blocks.is_empty() && found.media.is_empty() && found.input);
+        assert_eq!(found.direct.len(), 1);
+        let [x, y, r, b] = found.direct[0];
+        assert!(y > frame.height as i32 / 2);
+        assert_eq!(
+            crate::space::Space::pixels(&frame).ink(crate::geometry::Rect::new(x, y, r - x, b - y)),
+            0
+        );
+    }
+}
+
+#[test]
+fn terminal_focus_is_near_the_lower_center_and_always_one_hint() {
+    for (width, height) in [(900, 650), (80, 40), (8, 8)] {
+        let frame = frame(width, height, |_, _| [20; 3]);
+        let found = find(&frame, Detector::Fast, true);
+        assert!(found.input && found.blocks.is_empty() && found.media.is_empty());
+        assert_eq!(found.direct.len(), 1);
+        let [x, y, r, b] = found.direct[0];
+        assert!(x >= 0 && y >= 0 && r <= width as i32 && b <= height as i32);
+        if width > 80 {
+            assert!((i32::midpoint(x, r) - width as i32 / 2).abs() <= 4);
+            assert!((height as i32 - b - 18).abs() <= 4);
+        }
+    }
+}
+
+#[test]
+#[ignore = "live TUI captures supplied by WAYHINT_PIXEL_CORPUS"]
+fn terminal_tui_corpus() {
+    let path = std::env::var("WAYHINT_PIXEL_CORPUS").unwrap();
+    let cases: Vec<Case> = serde_json::from_reader(File::open(path).unwrap()).unwrap();
+    for case in cases {
+        let frame = load(Path::new(&case.png));
+        let start = Instant::now();
+        let found = find(&frame, Detector::Fast, true);
+        assert!(
+            found.input && found.blocks.is_empty() && found.media.is_empty(),
+            "{}",
+            case.name
+        );
+        assert_eq!(found.direct.len(), 1, "{}", case.name);
+        let [x, y, r, b] = found.direct[0];
+        assert!(y >= frame.height as i32 / 2, "{}", case.name);
+        assert!(
+            (i32::midpoint(x, r) - frame.width as i32 / 2).abs() < frame.width as i32 / 4,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            crate::space::Space::pixels(&frame).ink(crate::geometry::Rect::new(x, y, r - x, b - y)),
+            0,
+            "{}",
+            case.name
+        );
+        eprintln!(
+            "{}: target={:?}, {:.2}ms",
+            case.name,
+            found.direct,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }

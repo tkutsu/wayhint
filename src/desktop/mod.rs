@@ -60,17 +60,6 @@ const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 /// spike's took 6 to 12 ms.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Terminals by class: their pictures are read as lines of text.
-const TERMINALS: [&str; 7] = [
-    "kitty",
-    "foot",
-    "footclient",
-    "Alacritty",
-    "com.mitchellh.ghostty",
-    "org.wezfurlong.wezterm",
-    "XTerm",
-];
-
 /// A connection to the accessibility bus plus the runtime its calls run on.
 pub struct Desktop {
     runtime: tokio::runtime::Runtime,
@@ -199,6 +188,7 @@ impl Desktop {
         stack: &Stack,
         monitor: &Monitor,
         pixels: Option<Detector>,
+        terminals: &[String],
     ) -> (Snapshot, Vec<anyhow::Error>) {
         // A layer with no frame only covers.
         let readable: Vec<&Window> = stack
@@ -209,7 +199,12 @@ impl Desktop {
         // `join_all` runs the scans side by side on the one thread: each
         // waits on its own app, so three windows take as long as the
         // slowest, not the sum.
-        let reads = readable.iter().map(|w| self.read(w));
+        let reads = readable.iter().map(|w| async {
+            if is_terminal(w, terminals) {
+                bail!("{}: terminal focus is read from pixels", w.class);
+            }
+            self.read(w).await
+        });
         let reads = self.runtime.block_on(future::join_all(reads));
         let mut seen = Vec::new();
         // `anyhow!` copies the text into the error: `Error::msg` takes it
@@ -223,18 +218,98 @@ impl Desktop {
                     seen.push(Seen::Tree(tree, filtered, stats));
                 }
                 (Err(e), None) => failed.push(e),
-                (Err(no_tree), Some(detector)) => match look(&mut self.camera, window, detector) {
-                    Ok((found, scale, stats)) => {
-                        seen.push(Seen::Pixels(window.clone(), found, scale, stats));
+                (Err(no_tree), Some(detector)) => {
+                    match look(&mut self.camera, window, detector, terminals) {
+                        Ok((found, scale, stats)) => {
+                            seen.push(Seen::Pixels(window.clone(), found, scale, stats));
+                        }
+                        Err(e) => failed.push(anyhow!("{no_tree:#}, and {e:#}")),
                     }
-                    Err(e) => failed.push(anyhow!("{no_tree:#}, and {e:#}")),
-                },
+                }
             }
         }
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
         keep_visible(&mut snapshot, stack, monitor);
+        self.layout(&mut snapshot, monitor);
+        snapshot.obstacles.extend(
+            stack
+                .windows
+                .iter()
+                .filter(|w| {
+                    !snapshot
+                        .windows
+                        .iter()
+                        .any(|s| s.window.address == w.address)
+                })
+                .map(|w| w.rect),
+        );
         (snapshot, failed)
+    }
+
+    /// Capture what labels may cover separately from target detection. An
+    /// unreadable window stays fully protected instead of guessing it is blank.
+    pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor) {
+        let mut obstacles = Vec::new();
+        for scanned in &snapshot.windows {
+            let window = &scanned.window;
+            if window.rect.intersect(monitor.rect).is_none() {
+                continue;
+            }
+            let captured = (|| -> Result<_> {
+                if window.kind != Kind::Client {
+                    bail!("only clients can be exported");
+                }
+                let until = Instant::now() + CAPTURE_TIMEOUT;
+                let camera = match &mut self.camera {
+                    Some(camera) => camera,
+                    empty => empty.insert(Camera::connect(until)?),
+                };
+                let (frame, scale) =
+                    pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
+                #[allow(clippy::cast_possible_truncation)]
+                let rects = crate::space::Space::pixels(&frame)
+                    .obstacles()
+                    .into_iter()
+                    .map(|r| {
+                        let x = (f64::from(r.x) / scale).floor() as i32;
+                        let y = (f64::from(r.y) / scale).floor() as i32;
+                        let right = (f64::from(r.right()) / scale).ceil() as i32;
+                        let bottom = (f64::from(r.bottom()) / scale).ceil() as i32;
+                        crate::geometry::Rect::new(x, y, right - x, bottom - y)
+                            .offset(window.rect.origin())
+                    })
+                    .collect::<Vec<_>>();
+                Ok(rects)
+            })();
+            match captured {
+                Ok(rects) => obstacles.extend(rects),
+                Err(_) => obstacles.push(window.rect),
+            }
+        }
+        // Complete small controls, including flat interiors. Large parent
+        // containers (tab rows, panes) leave their blank body available.
+        obstacles.extend(
+            snapshot
+                .targets
+                .iter()
+                .filter(|t| {
+                    (t.object.is_some()
+                        && (t.editable
+                            || matches!(
+                                t.role.as_str(),
+                                "push button"
+                                    | "button"
+                                    | "check box"
+                                    | "radio button"
+                                    | "combo box"
+                                    | "slider"
+                            )))
+                        || (!t.editable && t.shown().w <= 160 && t.shown().h <= 80)
+                })
+                .map(Target::shown),
+        );
+        snapshot.obstacles = obstacles;
     }
 
     /// One surface's tree: a client's from the frame with its title, a
@@ -340,9 +415,23 @@ pub fn keep_visible(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
     snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
 }
 
+/// Match executable basenames as well as classes; terminal profiles often
+/// replace the class. No process-tree guessing: a child TUI is not an app ID.
+fn is_terminal(window: &Window, terminals: &[String]) -> bool {
+    let executable = std::fs::read_link(format!("/proc/{}/exe", window.pid)).ok();
+    terminals.iter().any(|name| {
+        name.eq_ignore_ascii_case(&window.class)
+            || executable
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .is_some_and(|exe| name.eq_ignore_ascii_case(exe))
+    })
+}
+
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
-pub fn read_pixels(window: &Window, detector: Detector) -> Result<Snapshot> {
-    let (found, scale, stats) = look(&mut None, window, detector)?;
+pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) -> Result<Snapshot> {
+    let (found, scale, stats) = look(&mut None, window, detector, terminals)?;
     let read = Read::Pixels {
         window,
         found: &found,
@@ -359,6 +448,7 @@ fn look(
     camera: &mut Option<Camera>,
     window: &Window,
     detector: Detector,
+    terminals: &[String],
 ) -> Result<(Found, f64, Stats)> {
     let start = Instant::now();
     let until = start + CAPTURE_TIMEOUT;
@@ -368,7 +458,7 @@ fn look(
     };
     let picture = camera.shoot(&window.address, until)?;
     let (frame, scale) = pixels::shrink(picture, window.rect.w);
-    let terminal = TERMINALS.contains(&window.class.as_str());
+    let terminal = is_terminal(window, terminals);
     let found = pixels::find(&frame, detector, terminal);
     let stats = Stats {
         ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -405,6 +495,19 @@ mod tests {
             windows,
             ..Stack::default()
         }
+    }
+
+    #[test]
+    fn configured_terminals_match_class_or_executable() {
+        let mut window = window("test", Rect::new(0, 0, 100, 100));
+        window.class = "CustomProfile".into();
+        assert!(is_terminal(&window, &["customprofile".into()]));
+        assert!(!is_terminal(&window, &[]));
+        window.pid = std::process::id();
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(is_terminal(&window, &[name]));
+        assert!(!is_terminal(&window, &["different-terminal".into()]));
     }
 
     #[test]

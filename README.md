@@ -94,6 +94,16 @@ While the tags are up, wayhint scans the windows again every half second
 (`[scan] refresh`), so a page that finishes loading or a window that opens
 gets tags without a key. A control found again keeps its tag, and the
 letters you typed for it stay typed; only new controls take new tags.
+Moved controls get their tags at the new position; hidden controls lose
+theirs. If a control changes just as you pick it, wayhint skips that click
+and refreshes the tags.
+
+A key held across a change to the targets is ignored. Press it again
+after the new tags appear. The same rule applies when a paragraph opens
+into tags on its lines.
+
+Press the keybind again to close wayhint. On an empty workspace it keeps
+listening for controls to appear, and the keybind still closes it.
 
 Clicking a text field exits, so your typing goes to the field. So does a
 click wayhint can't vouch for: one an arrow moved outside its control, or
@@ -102,15 +112,21 @@ wayhint kept your keys. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
 go straight to right-clicking.
 
+`wayhint --static` scans once and keeps those hints until you act or exit.
+It closes after one action or a workspace switch. To bind it to Super+Alt+W:
+
+```
+bind = SUPER ALT, W, exec, wayhint --static
+```
+
 In a window tagged from its pixels, a click always exits, since nothing
 says whether it landed in a text field. A paragraph's tag shows a tag on
 each of its lines instead of clicking; a verb typed before it carries over
 to the line you pick. Pixel tags can't be repeated: there is nothing to
 find the same control by in the next scan.
 
-When a run started from a keybind fails, or finds nothing to click, the
-reason shows as a Hyprland notification. From a terminal it's printed
-instead.
+When a run started from a keybind fails, the reason shows as a Hyprland
+notification. From a terminal it's printed instead.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON, and
 `wayhint dump --explain` adds every control it left out and why.
@@ -126,6 +142,11 @@ or not it has a tree.
 `~/.config/wayhint/config.toml`. Every key is optional; `wayhint config`
 prints the settings in effect, as a file you can save and edit to start
 one.
+
+Hints whose click centers are within `scan.merge_distance` logical pixels
+form a group, including chains of nearby centers. Each group keeps the
+existing hint nearest its average center. Ties keep the first hint in
+reading order. The default distance is `0`, which shows every hint.
 
 ```toml
 [keys]
@@ -146,9 +167,11 @@ nudge = 10              # px one arrow press moves a click
 
 [pixels]
 detector = "full"       # windows with no accessibility tree: "fast", or "off"
+terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]
 
 [scan]
 refresh = 500           # ms the tags stay up before a rescan; 0 for only after a click
+merge_distance = 0      # logical px between nearby hint centers; 0 keeps every hint
 
 [style]
 font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
@@ -175,14 +198,24 @@ half the work. It finds nearly as many controls (82% one tag away) but
 gives about 15% more tags, and 43% of its tags land on nothing clickable,
 against 33% for `"full"`.
 
-Terminals (kitty, foot, Alacritty, Ghostty, WezTerm, XTerm) are read as
-lines of text with the one-pass reading, whichever detector is set: each
-passage gets one tag, and typing it shows a tag on each of its lines. The
-cursor gets a tag of its own, so a shell prompt or a TUI's input box is one
-tag away; clicking it leaves the cursor where it is. A cursor is found by
-its block shape, solid or hollow, so a bar or underline cursor in the
-focused terminal gets no tag, and neither does a blinking one caught
-while it's off.
+Terminals get one focus hint near the bottom center, about one character
+height above the edge. It shifts to nearby empty pixels to avoid text and
+status bars. Selecting it clicks there and exits, handing typing back to
+the terminal. Code, output, gutters, and TUI controls get no separate hints.
+The terminal's cursor shape and blink state do not affect this hint.
+
+`pixels.terminal_processes` replaces the default terminal list. Add or remove
+executable names or window classes; matching ignores case. Executable names
+also cover terminals launched with a custom class. Set it to `[]` to use
+the ordinary detector for all windows. `detector = "off"` disables pixel
+hints, including terminal focus hints.
+
+When labels overlap, one moves into nearby clear space and gains a line
+and dot pointing to its click target. Displaced labels avoid captured ink,
+small controls, and other labels. Their positions stay fixed while you
+type a tag. Placement searches up to 256 pixels within the target's window;
+if no clear slot fits, the label keeps its original position. Failed
+captures protect the whole window rather than treating it as empty.
 
 A key is a tag letter or a command (a verb, or repeat), never both. A
 command key you write is taken out of the alphabet. A default verb key that
@@ -229,9 +262,9 @@ the arrows are never command keys.
   Before a click, wayhint only checks that the window hasn't moved, been
   resized or been covered; a page that scrolled under its tags since the
   last refresh gets the click where the tag was.
-- A blinking cursor in a terminal can make its tag, and the tag of the
-  passage around it, come and go between refreshes, as each scan catches
-  it on or off.
+- A terminal with no empty patch in its lower half uses the least busy
+  patch there for its single focus hint. Clicking a terminal can still
+  trigger the running TUI's mouse behavior.
 - A window's rounded corners show up as small pixel tags at its corners.
 
 ## License
