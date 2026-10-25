@@ -219,8 +219,9 @@ impl State {
     ///
     /// An arrow acts as it goes down, and again while held (`hold.rs`):
     /// it never ends the pick, so acting early leaves no release behind
-    /// for the app. Every other key acts as it's let go, except while
-    /// typing (see [`Event::Typed`]).
+    /// for the app. Every other key acts as it's let go, in the order the
+    /// keys went down (`gate.rs`), except while typing (see
+    /// [`Event::Typed`]).
     fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
         if pressed {
@@ -236,10 +237,10 @@ impl State {
                 && code != KeyCode::ENTER
             {
                 let typed = typist.press(code, self.pressed, self.locks);
-                // Taken now: its release finds nothing in the gate.
-                self.gate.release(code);
+                self.gate.forget(code);
                 self.events.push_back(Event::Typed(key, self.held, typed));
             } else if code.is_arrow() {
+                self.gate.forget(code);
                 self.events.push_back(Event::Key(key, self.held));
                 self.holds.press(key, self.held, Instant::now());
             }
@@ -250,22 +251,32 @@ impl State {
         {
             passthrough.release(code);
         }
-        let held = self.holds.release(code);
-        if let Some((key, mods)) = self.gate.release(code)
-            && !held
-        {
-            // Acting on release: press and release were both swallowed, so
-            // nothing reaches the app once the grab ends. While typing, a
-            // key found here went down before typing started (a typed key
-            // leaves the gate at its press), and is read as text now.
+        self.holds.release(code);
+        // Acting on release: press and release were both swallowed, so
+        // nothing reaches the app once the grab ends. While typing, a key
+        // found here went down before typing started (a typed key leaves
+        // the gate at its press), and is read as text now.
+        for (key, mods) in self.gate.release(code) {
             let event = match &mut self.typist {
-                Some(typist) if code != KeyCode::ENTER => {
-                    Event::Typed(key, mods, typist.press_late(code, mods, self.locks))
+                Some(typist) if key.code != KeyCode::ENTER => {
+                    Event::Typed(key, mods, typist.press_late(key.code, mods, self.locks))
                 }
                 _ => Event::Key(key, mods),
             };
             self.events.push_back(event);
         }
+    }
+
+    /// The compositor's word on the modifiers held (depressed and latched)
+    /// and the locks. It comes right after the key that changed them, so a
+    /// modifier newly down was the last key pressed.
+    fn modifiers(&mut self, pressed: u32, locks: Locks) {
+        if pressed & !self.pressed != 0 {
+            self.gate.modifier();
+        }
+        self.pressed = pressed;
+        self.held = held(pressed);
+        self.locks = locks;
     }
 }
 
@@ -368,12 +379,13 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
                 group,
                 ..
             } => {
-                state.pressed = mods_depressed | mods_latched;
-                state.held = held(state.pressed);
-                state.locks = Locks {
-                    locked: mods_locked,
-                    group,
-                };
+                state.modifiers(
+                    mods_depressed | mods_latched,
+                    Locks {
+                        locked: mods_locked,
+                        group,
+                    },
+                );
                 // The app hears them as it would without the grab, so a
                 // Super let go here is let go there too.
                 if let Some(passthrough) = &state.passthrough {
@@ -518,12 +530,13 @@ impl KeyboardHandler for State {
         raw: RawModifiers,
         layout: u32,
     ) {
-        self.pressed = raw.depressed | raw.latched;
-        self.held = held(self.pressed);
-        self.locks = Locks {
-            locked: raw.locked,
-            group: layout,
-        };
+        self.modifiers(
+            raw.depressed | raw.latched,
+            Locks {
+                locked: raw.locked,
+                group: layout,
+            },
+        );
     }
 }
 
