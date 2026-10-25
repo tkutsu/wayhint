@@ -8,7 +8,10 @@
 //! `--pixels`, windows without a tree are tagged from their pixels too.
 //! `--pixels` alone skips the tree and prints the tags the window's picture
 //! gives, whether or not it has a tree: the pixel detector, on windows
-//! whose tree says what the right answers are.
+//! whose tree says what the right answers are. `--text QUERY` stops after
+//! text mode's reading: the window's text, and where the query is in it.
+
+use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use serde::Serialize;
@@ -19,6 +22,7 @@ use crate::{
     geometry::Rect,
     pixels::Detector,
     snapshot::{Read, Snapshot},
+    text::{Search, Text},
 };
 
 pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
@@ -57,6 +61,9 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
         .find(|m| m.id == window.monitor)
     {
         desktop.layout(&mut snapshot, &monitor);
+    }
+    if let Some(query) = &args.text {
+        return text(&desktop, &snapshot, query);
     }
     if !args.explain {
         return print(&snapshot);
@@ -169,6 +176,82 @@ fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Resul
             })
             .collect(),
         unread: unread.iter().map(|e| format!("{e:#}")).collect(),
+    })
+}
+
+#[derive(Serialize)]
+struct TextDump<'a> {
+    read_ms: f64,
+    locate_ms: f64,
+    /// Why the reading stopped early, if it did.
+    incomplete: Option<String>,
+    texts: Vec<TextRow<'a>>,
+    matches: Vec<MatchRow<'a>>,
+}
+
+#[derive(Serialize)]
+struct TextRow<'a> {
+    role: &'a str,
+    name: &'a str,
+    rect: Rect,
+    /// The character `text` starts at: more than 0 for a long text read
+    /// from where it shows.
+    start: u32,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct MatchRow<'a> {
+    text: String,
+    role: &'a str,
+    /// A box per line, cut to where the text can show.
+    parts: &'a [Rect],
+}
+
+/// `dump --text`: the text text mode would search in the scanned window,
+/// and where `query` is in it, in the order text mode goes through them.
+/// Nothing over the window is checked: that's a run's job.
+fn text(desktop: &Desktop, snapshot: &Snapshot, query: &str) -> Result<()> {
+    let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
+    let started = Instant::now();
+    let (texts, incomplete) = desktop.read_text(snapshot);
+    let read_ms = ms(started);
+    let mut search = Search::new(texts);
+    query.chars().for_each(|c| search.push(c));
+    let wanted = search.wanted();
+    let started = Instant::now();
+    let boxes = desktop.locate(snapshot, search.texts(), &wanted);
+    let locate_ms = ms(started);
+    search.located(&wanted, boxes);
+    search.update(&|_, _| true);
+    let role = |text: &Text| snapshot.texts[text.source].role.as_str();
+    print(&TextDump {
+        read_ms,
+        locate_ms,
+        incomplete,
+        texts: search
+            .texts()
+            .iter()
+            .map(|t| TextRow {
+                role: role(t),
+                name: &t.name,
+                rect: t.rect,
+                start: t.start,
+                text: &t.content,
+            })
+            .collect(),
+        matches: search
+            .matches()
+            .iter()
+            .map(|m| {
+                let text = &search.texts()[m.span.text];
+                MatchRow {
+                    text: text.chars(m.span.start, m.span.end),
+                    role: role(text),
+                    parts: &m.parts,
+                }
+            })
+            .collect(),
     })
 }
 

@@ -33,6 +33,8 @@ impl KeyCode {
     pub const DOWN: Self = Self(108);
     pub const LEFT: Self = Self(105);
     pub const RIGHT: Self = Self(106);
+    pub const HOME: Self = Self(102);
+    pub const END: Self = Self(107);
     // The keys a modifier click presses on the virtual keyboard. Which
     // modifiers the user holds comes from the compositor instead (see
     // `keyboard::held`): the keymap can put Ctrl on any key.
@@ -55,7 +57,7 @@ impl KeyCode {
         self.0
     }
 
-    fn to_xkb(self) -> xkb::Keycode {
+    pub fn to_xkb(self) -> xkb::Keycode {
         xkb::Keycode::new(self.0 + 8)
     }
 }
@@ -69,8 +71,8 @@ const NAMED: [(&str, KeyCode); 14] = [
     ("Right", KeyCode::RIGHT),
     ("PgUp", KeyCode(104)),
     ("PgDn", KeyCode(109)),
-    ("Home", KeyCode(102)),
-    ("End", KeyCode(107)),
+    ("Home", KeyCode::HOME),
+    ("End", KeyCode::END),
     ("Delete", KeyCode(111)),
     ("Tab", KeyCode::TAB),
     ("Space", KeyCode::SPACE),

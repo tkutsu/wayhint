@@ -25,6 +25,7 @@ smithay-client-toolkit = "0.21"
 tiny-skia = "0.11"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 toml = "1.1.8"
+unicode-normalization = "0.1.26"  # text mode: splits é into e and its accent, so the accent can be dropped
 wayland-scanner = "0.31"  # already in the tree through wayland: writes the client code for Hyprland's window export from its XML
 xkbcommon = { version = "0.8", default-features = false }
 zbus = { version = "5", default-features = false, features = ["tokio"] }

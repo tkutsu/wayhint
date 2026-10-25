@@ -172,6 +172,59 @@ pub fn scroll_areas(tree: &Tree) -> BTreeSet<usize> {
     by_role.map(|(i, _)| i).chain(scrollbar_parents).collect()
 }
 
+/// Roles that show their name as their text. Qt gives its labels and list
+/// items no Text interface, only a name (Dolphin, 2026-10-25: 6 of 2,193
+/// nodes had one, all hidden editors), so one of these without it is
+/// searched by its name. Buttons aren't here: an icon button's name is a
+/// word nobody can see.
+const NAMED_ROLES: [&str; 15] = [
+    "label",
+    "static",
+    "heading",
+    "link",
+    "list item",
+    "table cell",
+    "tree item",
+    "column header",
+    "row header",
+    "page tab",
+    "menu item",
+    "check menu item",
+    "radio menu item",
+    "check box",
+    "radio button",
+];
+
+/// Whether text mode reads a node's text: it has text, or a name that is
+/// its text, and shows. Never a password field's.
+pub fn has_text(node: &Node) -> bool {
+    let s = node.states;
+    let text = node.text || NAMED_ROLES.contains(&node.role.as_str());
+    text && node.component && s.showing && s.visible && node.role != "password text"
+}
+
+/// The nodes whose text text mode reads, each with the part of the window
+/// it can show in: inside every scroll area above it, by `clip`'s rule
+/// without its size limit. One under a scroll area whose box didn't come
+/// is left out, as a candidate is.
+pub fn text_sources(tree: &Tree) -> Vec<(usize, Rect)> {
+    let scrollers = scroll_areas(tree);
+    let window = Rect::new(0, 0, tree.window.rect.w, tree.window.rect.h);
+    let area = |index: usize| {
+        tree.ancestors(index)
+            .filter(|a| scrollers.contains(a))
+            .try_fold(window, |area, a| match tree.nodes[a].bounds {
+                None => None,
+                Some(b) if b.is_empty() => Some(area),
+                Some(b) => area.intersect(b),
+            })
+    };
+    (0..tree.nodes.len())
+        .filter(|&i| has_text(&tree.nodes[i]))
+        .filter_map(|i| Some((i, area(i)?)))
+        .collect()
+}
+
 /// A candidate with everything the rules read, borrowed from the tree. The
 /// lifetime `'t` ties every reference to the tree: a `Candidate` can't
 /// outlive the `Tree` it points into, and the compiler checks that.
@@ -493,6 +546,7 @@ mod tests {
                 states: SHOWN,
                 action: !actions.is_empty(),
                 component: true,
+                text: false,
                 bounds: Some(bounds),
                 details: Some(Details {
                     name: name.into(),

@@ -30,6 +30,10 @@
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
 //!
+//! The text key hides the tags and searches the windows' text instead
+//! (`search.rs`); `Enter` acts on the current match as on a tag, after
+//! its text is read again and found unchanged.
+//!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
 
@@ -51,7 +55,9 @@ use crate::{
     overlay::Overlay,
     pick::{self, Pick, lands},
     pointer::Pointer,
-    snapshot::Snapshot,
+    search::Chosen,
+    snapshot::{Snapshot, Target},
+    text::{Span, Text},
 };
 
 /// How long the app gets to react to a click before the rescan. A fixed
@@ -116,7 +122,7 @@ pub fn run(
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
     // The overlay comes first: it blocks SIGINT and SIGTERM for this thread
     // (they become events), and the threads started after it inherit that.
-    let mut overlay = Overlay::new(&conn, &config.style, monitor)?;
+    let mut overlay = Overlay::new(&conn, &config.style, &config.marks, monitor)?;
     overlay.listen_for_toggle(toggle)?;
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(
@@ -190,9 +196,11 @@ impl Session {
                     }
                 }
                 Pick::Target { index, act } => {
-                    let object = snapshot.targets[index].object.clone();
-                    self.command(config, &snapshot, index, Command { object, act })?
+                    let target = &snapshot.targets[index];
+                    let object = target.object.clone();
+                    self.command(config, &snapshot, target, Command { object, act })?
                 }
+                Pick::Text(chosen) => self.text(config, &snapshot, *chosen)?,
                 Pick::Repeat => {
                     // `clone`: `self.command` needs all of `self`, so
                     // `self.last` can't stay borrowed through the call.
@@ -205,7 +213,9 @@ impl Session {
                         targets.position(|t| t.object.as_ref() == Some(object))
                     });
                     match (last, found) {
-                        (Some(last), Some(index)) => self.command(config, &scanned, index, last)?,
+                        (Some(last), Some(index)) => {
+                            self.command(config, &scanned, &scanned.targets[index], last)?
+                        }
                         (Some(last), None) if last.object.is_none() => {
                             desktop::warn(
                                 "wayhint: not repeating: the target was found in pixels, which can't be found again",
@@ -237,8 +247,26 @@ impl Session {
         }
     }
 
-    /// Re-checks the target at `index` and, if it's still the same, does
-    /// `command` on it and keeps it for the repeat key.
+    /// Does a match chosen in text mode, if its text still reads the same
+    /// and its object passes a target's re-check. Not kept for the repeat
+    /// key: that finds targets by their object, and a text's object is
+    /// rarely one.
+    fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
+        let Chosen { target, act, check } = chosen;
+        if let (Some(object), Some((start, end, text))) = (&target.object, &check) {
+            let now = self.desktop.read_range(object, *start, *end).ok();
+            if now.as_ref() != Some(text) {
+                eprintln!("wayhint: refreshing {text:?}: the text changed");
+                return Ok(Done::Refused);
+            }
+        }
+        let done = self.command(config, snapshot, &target, Command { object: None, act });
+        self.last = None;
+        done
+    }
+
+    /// Re-checks `target` and, if it's still the same, does `command` on it
+    /// and keeps it for the repeat key.
     ///
     /// The re-check is of the target, not of where a nudge takes the click:
     /// that spot is anywhere you chose, and has nothing to check it against.
@@ -246,10 +274,9 @@ impl Session {
         &mut self,
         config: &Config,
         snapshot: &Snapshot,
-        index: usize,
+        target: &Target,
         command: Command,
     ) -> Result<Done> {
-        let target = &snapshot.targets[index];
         match self.desktop.recheck(snapshot, target)? {
             Verdict::Click { editable } => {
                 let restore = config.after == After::Restore;
@@ -394,6 +421,23 @@ impl pick::Source for Scans<'_> {
     fn keep(&self, opened: &mut Snapshot) {
         desktop::keep_visible(opened, &self.stack, self.monitor);
     }
+
+    fn read_text(&mut self, shown: &Snapshot) -> Vec<Text> {
+        let (texts, incomplete) = self.desktop.read_text(shown);
+        if let Some(why) = incomplete {
+            eprintln!("wayhint: reading the text stopped early ({why}); some may be missing");
+        }
+        texts
+    }
+
+    fn locate(&mut self, shown: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
+        self.desktop.locate(shown, texts, spans)
+    }
+
+    fn shows(&self, shown: &Snapshot, window: usize, at: Point) -> bool {
+        let address = &shown.windows[window].window.address;
+        desktop::shows(&self.stack, self.monitor, address, at)
+    }
 }
 
 /// One scan of the windows `monitor` shows, and what they are, bottom to
@@ -481,6 +525,7 @@ mod tests {
             windows: Vec::new(),
             targets: Vec::new(),
             obstacles: Vec::new(),
+            texts: Vec::new(),
         };
         let mut warned = HashSet::new();
         report(&snapshot, &[], &mut warned);
