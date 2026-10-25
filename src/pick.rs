@@ -108,8 +108,7 @@ pub fn pick(
     if let Some(action) = verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
-    let screen = overlay.monitor().rect;
-    let mut pointer = cursor().ok();
+    let (screen, mut pointer) = (overlay.monitor().rect, cursor().ok());
     // A scene per drawing: `shown` changes when a block opens, so nothing
     // may keep borrowing it in between.
     overlay.show(&frame(
