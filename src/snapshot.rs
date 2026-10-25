@@ -16,7 +16,7 @@ use crate::{
     desktop::{
         Stats, Window,
         filter::{self, Filtered},
-        tree::{ObjectId, Tree},
+        tree::{Node, ObjectId, Tree},
     },
     geometry::{Point, Rect},
     pixels::{Block, Corners, Found},
@@ -61,6 +61,31 @@ pub struct TextSource {
     /// The scroll areas above it, nearest first, as a target's `clips`.
     #[serde(default)]
     pub clips: Vec<ObjectId>,
+    /// A button's name may be letters or an icon: `Desktop::layout` keeps
+    /// it only where its picture shows letters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<Button>,
+}
+
+/// What `Desktop::layout` checks a button's picture by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Button {
+    pub rect: Rect,
+    /// Its name's length in characters.
+    pub letters: usize,
+}
+
+impl Button {
+    /// A button's, for a node `filter::is_button` says may be one.
+    fn of(node: &Node, origin: Point) -> Option<Self> {
+        if !filter::is_button(node) {
+            return None;
+        }
+        Some(Self {
+            rect: node.bounds?.offset(origin),
+            letters: node.details.as_ref()?.name.trim().chars().count(),
+        })
+    }
 }
 
 /// One window, and what scanning it cost.
@@ -216,6 +241,7 @@ impl Snapshot {
                         .filter(|a| scrollers.contains(a))
                         .map(|a| tree.nodes[a].object.clone())
                         .collect(),
+                    button: Button::of(read, origin),
                 }
             }));
             windows.push(Scanned {

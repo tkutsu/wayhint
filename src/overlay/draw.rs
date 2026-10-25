@@ -579,7 +579,7 @@ mod tests {
             radius: 6.0,
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::from_tags(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style)).unwrap();
         let mut pixmap = Pixmap::new(240, 200).unwrap();
         let mut frame = Frame {
             tags: vec![Tag {
@@ -666,7 +666,7 @@ mod collision_tests {
             offset: [3, 3],
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::from_tags(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style)).unwrap();
         let mut pixmap = Pixmap::new(300, 600).unwrap();
         painter.set_space(
             BoxRect::new(0, 0, 300, 600),

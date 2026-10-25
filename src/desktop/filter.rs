@@ -175,8 +175,7 @@ pub fn scroll_areas(tree: &Tree) -> BTreeSet<usize> {
 /// Roles that show their name as their text. Qt gives its labels and list
 /// items no Text interface, only a name (Dolphin, 2026-10-25: 6 of 2,193
 /// nodes had one, all hidden editors), so one of these without it is
-/// searched by its name. Buttons aren't here: an icon button's name is a
-/// word nobody can see.
+/// searched by its name. Buttons are in [`LETTERS_OR_ICON`].
 const NAMED_ROLES: [&str; 15] = [
     "label",
     "static",
@@ -195,19 +194,53 @@ const NAMED_ROLES: [&str; 15] = [
     "radio button",
 ];
 
+/// Roles that show their name as letters or as an icon, which the tree
+/// can't tell apart: Dolphin's `home` crumb and its `Split` button read
+/// the same (2026-10-25). One is searched by its name when nothing inside
+/// it has text (GTK's and browsers' buttons have a label inside) and its
+/// picture shows letters (`pixels::shows_letters`, in `Desktop::layout`).
+const LETTERS_OR_ICON: [&str; 5] = [
+    "button",
+    "push button",
+    "toggle button",
+    "push button menu",
+    "menu",
+];
+
 /// Whether text mode reads a node's text: it has text, or a name that is
-/// its text, and shows. Never a password field's.
+/// or may be its text, and shows. Never a password field's.
 pub fn has_text(node: &Node) -> bool {
     let s = node.states;
-    let text = node.text || NAMED_ROLES.contains(&node.role.as_str());
+    let text = node.text || NAMED_ROLES.contains(&node.role.as_str()) || is_button(node);
     text && node.component && s.showing && s.visible && node.role != "password text"
+}
+
+/// Whether a node's name may be letters or an icon: see [`LETTERS_OR_ICON`].
+pub fn is_button(node: &Node) -> bool {
+    !node.text && LETTERS_OR_ICON.contains(&node.role.as_str())
 }
 
 /// The nodes whose text text mode reads, each with the part of the window
 /// it can show in: inside every scroll area above it, by `clip`'s rule
 /// without its size limit. One under a scroll area whose box didn't come
-/// is left out, as a candidate is.
+/// is left out, as a candidate is. So is a button with text inside it, or
+/// with no name or box to check its picture by.
 pub fn text_sources(tree: &Tree) -> Vec<(usize, Rect)> {
+    let holds_text: BTreeSet<usize> = (0..tree.nodes.len())
+        .filter(|&i| has_text(&tree.nodes[i]) && !is_button(&tree.nodes[i]))
+        .flat_map(|i| tree.ancestors(i))
+        .collect();
+    let checkable = |node: &Node| {
+        let named = node
+            .details
+            .as_ref()
+            .is_some_and(|d| !d.name.trim().is_empty());
+        named && node.bounds.is_some()
+    };
+    let searched = |i: usize| {
+        let node = &tree.nodes[i];
+        has_text(node) && !(is_button(node) && (holds_text.contains(&i) || !checkable(node)))
+    };
     let scrollers = scroll_areas(tree);
     let window = Rect::new(0, 0, tree.window.rect.w, tree.window.rect.h);
     let area = |index: usize| {
@@ -220,7 +253,7 @@ pub fn text_sources(tree: &Tree) -> Vec<(usize, Rect)> {
             })
     };
     (0..tree.nodes.len())
-        .filter(|&i| has_text(&tree.nodes[i]))
+        .filter(|&i| searched(i))
         .filter_map(|i| Some((i, area(i)?)))
         .collect()
 }

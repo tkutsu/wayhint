@@ -265,6 +265,8 @@ impl Desktop {
     /// The same picture puts each document body's tag in its clearest spot.
     pub fn layout(&mut self, snapshot: &mut Snapshot, monitor: &Monitor) {
         let mut obstacles = Vec::new();
+        // Text sources kept: a button only where its picture shows letters.
+        let mut keep: Vec<bool> = snapshot.texts.iter().map(|t| t.button.is_none()).collect();
         for (index, scanned) in snapshot.windows.iter().enumerate() {
             let window = &scanned.window;
             if window.rect.intersect(monitor.rect).is_none() {
@@ -284,6 +286,16 @@ impl Desktop {
                 let (frame, scale) =
                     pixels::shrink(camera.shoot(&window.address, until)?, window.rect.w);
                 let cells = bodies.then(|| pixels::cell_space(&frame));
+                for (i, text) in snapshot.texts.iter().enumerate() {
+                    if let Some(button) = text.button.filter(|_| text.window == index) {
+                        let r = button.rect;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let at = |v: i32, from: i32| (f64::from(v - from) * scale).round() as i32;
+                        let (x, y) = (window.rect.x, window.rect.y);
+                        let corners = [at(r.x, x), at(r.y, y), at(r.right(), x), at(r.bottom(), y)];
+                        keep[i] = pixels::shows_letters(&frame, corners, button.letters);
+                    }
+                }
                 Ok((Space::pixels(&frame), cells, scale))
             })();
             let origin = window.rect.origin();
@@ -331,6 +343,8 @@ impl Desktop {
                 .map(Target::shown),
         );
         snapshot.obstacles = obstacles;
+        let mut keep = keep.into_iter();
+        snapshot.texts.retain(|_| keep.next().unwrap_or(true));
     }
 
     /// One surface's tree: a client's from the frame with its title, a

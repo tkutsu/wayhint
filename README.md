@@ -76,7 +76,7 @@ bind = SUPER, slash, exec, wayhint
 | `Space` | Does the default action, or the verb typed before it, where the pointer is |
 | arrows, before the tag's last letter or `Space` | Move where that one click lands, 10 px per press; held, they keep going, faster |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
-| `q` | Text mode: the tags go, and what you type finds text on screen |
+| `/` | Text mode: the tags go, and what you type finds text on screen |
 | `Backspace` | Removes the last letter or verb typed |
 | `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
 
@@ -106,12 +106,13 @@ and refreshes the tags.
 
 In text mode every key you type goes into the query, spaces and verb keys
 included, in whatever layout is active, so Greek text is searched with the
-Greek layout. Each visible match gets a translucent box, and the first one
-in reading order is the current one, with a stronger box. The arrows, `Tab`
+Greek layout. A verb therefore goes before `/`, not after it. Each visible
+match gets a yellow box, and the first one in reading order is the current
+one, in orange. The arrows, `Tab`
 and `Shift+Tab` move to the next or previous match and wrap around; `Home`
 and `End` go to the first and last. `Enter` clicks the middle of the
-current match's first line, with the verb typed before `q` if there was
-one (`t q save Enter` double-clicks "save"), and `Shift`, `Ctrl` or `Alt`
+current match's first line, with the verb typed before `/` if there was
+one (`t/save Enter` double-clicks "save"), and `Shift`, `Ctrl` or `Alt`
 held on `Enter` hold that key through the click. Nothing is clicked until
 `Enter`. `Backspace` takes back the last character and `Esc` clears the
 query; with nothing typed, either one goes back to the tags. The bottom of
@@ -188,7 +189,7 @@ left = "."              # every other verb gets a key: one character or a name
 hover = "_"             # Shift works: _ is Shift and -
 back = "Home"           # names: PgUp PgDn Home End Delete
 repeat = "r"            # the last command again; no key unless you set one
-text = "/"              # text mode (default q); "" for none
+text = "/"              # text mode (the default); "" for none
 
 [keys.aliases]
 ";" = "c"               # another key that types the same letter
@@ -216,23 +217,19 @@ position = "bottom-right"  # on the target: center, top, bottom, left, right, or
 offset = [0, 0]         # px from there, right and down
 
 [text.style]            # text mode's boxes over matches
-background = "#1e1e2e40"
+background = "#ffff0080"
 border = "#d0d0d0ff"
-border_width = 1
+border_width = 0
 radius = 4
 padding = [2, 5]        # vertical, horizontal
 
 [text.style.current]    # the current match; unset fields come from [text.style]
-background = "#1e1e2e70"
-border_width = 2
+background = "#ff963280"
 ```
 
-Text mode's boxes take their colours, radius and padding from the tags
-unless you set them: the tags' background at a quarter of full opacity,
-and a border at least 1 px wide even when the tags have none, since a faint
-dark box disappears on a dark window and only its border shows. The
-current match's box is 1.75 times as opaque, with a solid border 1 px
-wider. Set `border_width = 0` in `[text.style]` for no borders.
+Text mode's boxes are neon yellow at half opacity with no border, and the
+current match's is orange, as in a browser's find bar. Their radius and
+padding come from the tags unless you set them.
 
 Keys are read with your keyboard's own keymap, the one the compositor
 gives every app, so a custom layout or a keymap file (Hyprland's
@@ -337,7 +334,9 @@ the arrows are never command keys.
   tags. Qt gives most labels and list items only a name, so text mode
   searches the names of labels, list items, cells, tabs, menu items,
   links and headings, and boxes the whole item, not the matched letters.
-  Buttons' names are left out, since an icon button's name isn't on screen.
+  A button's name is searched only when its picture shows letters (about
+  one separate stroke group per two letters), since an icon button's name
+  isn't on screen. A button whose window couldn't be captured is left out.
 - Text mode reads the text once, when it starts; text that changes while
   you type isn't found until you leave text mode and come back.
 - A sheet is found from its pixels only when its grid lines show, are 1 px

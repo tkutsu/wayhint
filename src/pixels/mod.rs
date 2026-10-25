@@ -209,6 +209,58 @@ fn average(frame: &Frame, factor: usize) -> Frame {
     }
 }
 
+/// How far apart a channel is from a button's fill to count as ink.
+const INK: u8 = 48;
+
+/// Whether a button's box in `frame` shows its name, `letters` long, as
+/// letters rather than an icon. Letters leave a gap between most of them,
+/// so a name's ink falls in about one run of columns per letter, where an
+/// icon's falls in one or two: two runs or more, and one per two letters,
+/// are letters. A one-letter name passes, as letter or icon alike (Dolphin's
+/// `/` crumb is a button).
+pub fn shows_letters(frame: &Frame, [l, t, r, b]: Corners, letters: usize) -> bool {
+    if letters < 2 {
+        return true;
+    }
+    // Inside the edge, which may be a border or a rounded hover fill.
+    let (l, t) = ((l + 3).max(0) as usize, (t + 3).max(0) as usize);
+    let r = (r - 3).clamp(0, frame.width as i32) as usize;
+    let b = (b - 3).clamp(0, frame.height as i32) as usize;
+    if l >= r || t >= b {
+        return false;
+    }
+    let pixel = |x: usize, y: usize| {
+        let i = (y * frame.width + x) * 3;
+        [frame.rgb[i], frame.rgb[i + 1], frame.rgb[i + 2]]
+    };
+    // The fill: the commonest colour of the top and bottom rows.
+    let mut counts = std::collections::HashMap::new();
+    for x in l..r {
+        for y in [t, b - 1] {
+            *counts.entry(pixel(x, y)).or_insert(0) += 1;
+        }
+    }
+    let Some((fill, _)) = counts.into_iter().max_by_key(|&(c, n)| (n, c)) else {
+        return false;
+    };
+    let inked = |x: usize| {
+        (t..b).any(|y| {
+            pixel(x, y)
+                .iter()
+                .zip(fill)
+                .any(|(&p, f)| p.abs_diff(f) >= INK)
+        })
+    };
+    let mut runs = 0;
+    let mut was = false;
+    for x in l..r {
+        let is = inked(x);
+        runs += usize::from(is && !was);
+        was = is;
+    }
+    runs >= 2 && runs * 2 >= letters
+}
+
 /// The detector boxes the grouping starts from.
 fn words(frame: &Frame, policy: &Policy) -> Vec<Corners> {
     if !policy.edges {
