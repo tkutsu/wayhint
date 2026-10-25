@@ -49,9 +49,9 @@ struct FileText {
 }
 
 /// `[text.style]`, every match's mark, with `[text.style.current]` inside
-/// it for the selected match's. Unset fields come from the tags' style
-/// (see [`Mark::from_tags`]); unset current ones from every match's mark,
-/// made stronger ([`Mark::emphasized`]).
+/// it for the selected match's. Unset fields take the defaults (see
+/// [`Mark::new`]); unset current ones come from every match's mark, in
+/// orange ([`Mark::for_current`]).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileMarks {
@@ -74,25 +74,25 @@ struct FileMark {
 }
 
 impl FileMarks {
-    /// The marks, with whatever the file leaves out filled in from the
-    /// tags' `style`.
+    /// The marks, with whatever the file leaves out filled in: radius and
+    /// padding from the tags' `style`.
     fn resolve(&self, style: &Style) -> Result<Marks> {
-        let tags = Mark::from_tags(style);
+        let base = Mark::new(style);
         let all = Mark {
-            background: self.background.unwrap_or(tags.background),
-            border: self.border.unwrap_or(tags.border),
-            border_width: self.border_width.unwrap_or(tags.border_width),
-            radius: self.radius.unwrap_or(tags.radius),
-            padding: self.padding.unwrap_or(tags.padding),
+            background: self.background.unwrap_or(base.background),
+            border: self.border.unwrap_or(base.border),
+            border_width: self.border_width.unwrap_or(base.border_width),
+            radius: self.radius.unwrap_or(base.radius),
+            padding: self.padding.unwrap_or(base.padding),
         };
-        let stronger = all.emphasized();
+        let orange = all.for_current();
         let c = &self.current;
         let current = Mark {
-            background: c.background.unwrap_or(stronger.background),
-            border: c.border.unwrap_or(stronger.border),
-            border_width: c.border_width.unwrap_or(stronger.border_width),
-            radius: c.radius.unwrap_or(stronger.radius),
-            padding: c.padding.unwrap_or(stronger.padding),
+            background: c.background.unwrap_or(orange.background),
+            border: c.border.unwrap_or(orange.border),
+            border_width: c.border_width.unwrap_or(orange.border_width),
+            radius: c.radius.unwrap_or(orange.radius),
+            padding: c.padding.unwrap_or(orange.padding),
         };
         all.validate("text.style")?;
         current.validate("text.style.current")?;
@@ -266,8 +266,8 @@ const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
     (Action::Forward, Some(KeyCode::from_evdev(49))),
 ];
 
-/// The text key's default, as a position, as the verbs' are: `q` on US.
-const TEXT_KEY: KeyCode = KeyCode::from_evdev(16);
+/// The text key's default, as a position, as the verbs' are: `/` on US.
+const TEXT_KEY: KeyCode = KeyCode::from_evdev(53);
 
 /// Keys every mode reads itself, so no verb may take them, and how the
 /// message that says so lists them.
@@ -1156,30 +1156,25 @@ mod tests {
     }
 
     #[test]
-    fn the_text_key_is_q_unless_a_tag_or_a_command_has_it() {
-        let q = key(16, false);
-        assert!(Config::parse("", &us()).unwrap().verbs.is_text(q));
-        // Your file: q is a tag letter, so text has no key until it's given one.
-        let tagged = Config::parse("[keys]\nalphabet = \"ehatincsulodypmgfxwbvq\"", &us()).unwrap();
-        assert!(!tagged.verbs.is_text(q));
-        assert!(labels(&tagged).ends_with('q'), "the letter stays");
+    fn the_text_key_is_slash_unless_a_tag_or_a_command_has_it() {
+        let slash = key(53, false);
+        assert!(Config::parse("", &us()).unwrap().verbs.is_text(slash));
+        let tagged = Config::parse("[keys]\nalphabet = \"asdf/\"", &us()).unwrap();
+        assert!(!tagged.verbs.is_text(slash));
+        assert!(labels(&tagged).ends_with('/'), "the letter stays");
         let rendered = tagged.render();
         assert!(
-            rendered.contains("# text has no key: its default, \"q\""),
+            rendered.contains("# text has no key: its default, \"/\""),
             "{rendered}"
         );
         assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, tagged.verbs);
-        let repeat = Config::parse("[keys]\nrepeat = \"q\"", &us()).unwrap();
-        assert!(repeat.verbs.is_repeat(q) && !repeat.verbs.is_text(q));
-        let slash = Config::parse("[keys]\nalphabet = \"asdf/\"\ntext = \"/\"", &us()).unwrap();
-        assert!(slash.verbs.is_text(key(53, false)));
-        assert_eq!(
-            labels(&slash),
-            "asdf",
-            "a written text key leaves the alphabet"
-        );
+        let repeat = Config::parse("[keys]\nrepeat = \"/\"", &us()).unwrap();
+        assert!(repeat.verbs.is_repeat(slash) && !repeat.verbs.is_text(slash));
+        let q = Config::parse("[keys]\nalphabet = \"asdfq\"\ntext = \"q\"", &us()).unwrap();
+        assert!(q.verbs.is_text(key(16, false)));
+        assert_eq!(labels(&q), "asdf", "a written text key leaves the alphabet");
         let off = Config::parse("[keys]\ntext = \"\"", &us()).unwrap();
-        assert!(!off.verbs.is_text(q));
+        assert!(!off.verbs.is_text(slash));
         assert_eq!(
             Config::parse(&off.render(), &us()).unwrap().verbs,
             off.verbs
@@ -1191,19 +1186,18 @@ mod tests {
     }
 
     #[test]
-    fn text_marks_come_from_the_tags_unless_set() {
-        let config = Config::parse("[style]\nborder_width = 0\nradius = 3", &us()).unwrap();
-        let tags = Mark::from_tags(&config.style);
-        assert_eq!(config.marks.all, tags);
-        assert_eq!(config.marks.current, tags.emphasized());
-        let widths = (
-            config.marks.all.border_width,
-            config.marks.current.border_width,
+    fn text_marks_are_yellow_and_orange_unless_set() {
+        let config = Config::parse("[style]\nborder_width = 2\nradius = 3", &us()).unwrap();
+        let base = Mark::new(&config.style);
+        assert_eq!(config.marks.all, base);
+        assert_eq!(config.marks.current, base.for_current());
+        assert!(
+            (config.marks.all.radius - 3.0).abs() < f32::EPSILON,
+            "the tags' radius"
         );
-        assert_eq!(
-            widths,
-            (1.0, 2.0),
-            "tags with no border: marks get one anyway"
+        assert!(
+            config.marks.all.border_width.abs() < f32::EPSILON,
+            "but no border"
         );
         let set = Config::parse(
             "[text.style]\nbackground = \"#e8dcc440\"\npadding = [1, 2]\n\
@@ -1216,8 +1210,9 @@ mod tests {
             Color::rgba(0xe8, 0xdc, 0xc4, 0x40)
         );
         assert_eq!(
-            set.marks.current.background.a, 0x70,
-            "stronger than the set one"
+            set.marks.current.background,
+            Color::rgba(0xff, 0x96, 0x32, 0x80),
+            "orange, whatever every match's is"
         );
         assert_eq!(
             set.marks.current.padding,

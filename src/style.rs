@@ -258,11 +258,11 @@ pub struct Marks {
 impl Marks {
     /// The marks a file with no `[text.style]` gets.
     #[cfg(test)]
-    pub fn from_tags(style: &Style) -> Self {
-        let all = Mark::from_tags(style);
+    pub const fn new(style: &Style) -> Self {
+        let all = Mark::new(style);
         Self {
             all,
-            current: all.emphasized(),
+            current: all.for_current(),
         }
     }
 
@@ -277,38 +277,23 @@ impl Marks {
 }
 
 impl Mark {
-    /// The default for every match: the tags' background colour, faint,
-    /// and the tags' border, radius and padding, with a border of at least
-    /// a pixel. A tag needs no border to show, being opaque; a faint mark
-    /// does: on a dark window its dark fill all but vanishes, and only the
-    /// light border shows (rendered on a terminal and on Calc, 2026-10-25).
-    pub const fn from_tags(style: &Style) -> Self {
+    /// The default for every match: neon yellow, half see-through, with no
+    /// border, and the tags' radius and padding.
+    pub const fn new(style: &Style) -> Self {
         Self {
-            background: Color {
-                a: 0x40,
-                ..style.background
-            },
+            background: Color::rgba(0xff, 0xff, 0x00, 0x80),
             border: style.border,
-            border_width: style.border_width.max(1.0),
+            border_width: 0.0,
             radius: style.radius,
             padding: style.padding,
         }
     }
 
-    /// The default for the current match, from every match's: a fill
-    /// 1.75 times as strong, and a border, solid and a pixel wider.
-    pub fn emphasized(self) -> Self {
-        let stronger = (u16::from(self.background.a) * 7 / 4).min(255);
+    /// The default for the current match, from every match's: the same in
+    /// orange, as browsers mark the current match of a search.
+    pub const fn for_current(self) -> Self {
         Self {
-            background: Color {
-                a: u8::try_from(stronger).unwrap_or(u8::MAX),
-                ..self.background
-            },
-            border: Color {
-                a: 0xff,
-                ..self.border
-            },
-            border_width: self.border_width + 1.0,
+            background: Color::rgba(0xff, 0x96, 0x32, 0x80),
             ..self
         }
     }
@@ -351,19 +336,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_current_mark_is_stronger_than_the_others_by_default() {
-        let all = Mark::from_tags(&Style::default());
-        assert_eq!(all.background, Color::rgba(0x1e, 0x1e, 0x2e, 0x40));
-        let current = all.emphasized();
-        assert_eq!(current.background.a, 0x70);
-        assert_eq!(current.border.a, 0xff);
-        assert!((current.border_width - 2.0).abs() < f32::EPSILON);
-        assert_eq!(current.padding, all.padding);
-        let opaque = Mark {
-            background: Color::rgba(0, 0, 0, 0xff),
-            ..all
-        };
-        assert_eq!(opaque.emphasized().background.a, 0xff, "capped at opaque");
+    fn matches_are_yellow_and_the_current_one_orange_by_default() {
+        let all = Mark::new(&Style::default());
+        assert_eq!(all.background, Color::rgba(0xff, 0xff, 0x00, 0x80));
+        assert!(all.border_width.abs() < f32::EPSILON, "no border");
+        let current = all.for_current();
+        assert_eq!(current.background, Color::rgba(0xff, 0x96, 0x32, 0x80));
+        assert_eq!(
+            current,
+            Mark {
+                background: current.background,
+                ..all
+            }
+        );
     }
 
     #[test]

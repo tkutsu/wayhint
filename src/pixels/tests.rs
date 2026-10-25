@@ -39,6 +39,35 @@ fn frame(width: usize, height: usize, paint: impl Fn(usize, usize) -> [u8; 3]) -
 }
 
 #[test]
+fn a_button_shows_letters_or_an_icon() {
+    // A 60x30 button with a grey border, dark ink inside it.
+    let button = |ink: &dyn Fn(usize, usize) -> bool| {
+        frame(60, 30, |x, y| {
+            if x == 0 || y == 0 || x == 59 || y == 29 {
+                [150, 150, 150]
+            } else if ink(x, y) {
+                [30, 30, 30]
+            } else {
+                [240, 240, 240]
+            }
+        })
+    };
+    let corners = [0, 0, 60, 30];
+    // Four letters, 3 px strokes with 3 px gaps.
+    let word = button(&|x, y| (10..32).contains(&x) && (x - 10) % 6 < 3 && (10..20).contains(&y));
+    assert!(shows_letters(&word, corners, 4));
+    assert!(
+        !shows_letters(&word, corners, 9),
+        "too few for nine letters"
+    );
+    let icon = button(&|x, y| (24..36).contains(&x) && (9..21).contains(&y));
+    assert!(!shows_letters(&icon, corners, 5));
+    assert!(shows_letters(&icon, corners, 1), "a one-letter name passes");
+    let blank = button(&|_, _| false);
+    assert!(!shows_letters(&blank, corners, 4), "the border isn't ink");
+}
+
+#[test]
 fn a_dense_grid_gets_a_tag_per_square() {
     // The audit's dense frame (2026-10-24), smaller: 9 px dark squares every
     // 16 px. Thousands of boxes, each a target; the all-pairs searches it
