@@ -16,6 +16,12 @@
 //! and `Shift+-` still meant `_`; Ctrl let go a moment early still meant a
 //! Ctrl-click.
 //!
+//! Keys act in the order they went down. Fast typing overlaps keys: `ba`
+//! typed as b down, a down, a up, b up must not act on `a` first. A
+//! release waits for the keys pressed before it, and goes with them when
+//! the earliest comes up. A held modifier waits for nothing and holds
+//! nothing back: Shift held over several letters is the usual case.
+//!
 //! [`Seen`] answers the other side: which releases belong to the app.
 
 use crate::{
@@ -29,8 +35,18 @@ pub struct KeyGate {
     generation: u32,
     /// The round trip for `generation` has come back.
     armed: bool,
-    /// Keys pressed while armed, not yet released, with their modifiers.
-    live: Vec<(Key, Mods)>,
+    /// Keys pressed while armed, in press order, until they act.
+    live: Vec<Press>,
+}
+
+#[derive(Debug)]
+struct Press {
+    key: Key,
+    mods: Mods,
+    /// Let go, and waiting for an earlier key.
+    up: bool,
+    /// Set a modifier: waits for nothing while held.
+    modifier: bool,
 }
 
 impl KeyGate {
@@ -53,18 +69,53 @@ impl KeyGate {
     /// Whether the press counts: it came after the round trip, and its key
     /// isn't already down.
     pub fn press(&mut self, key: Key, mods: Mods) -> bool {
-        let counts = self.armed && !self.live.iter().any(|(k, _)| k.code == key.code);
+        let counts = self.armed && !self.live.iter().any(|p| p.key.code == key.code);
         if counts {
-            self.live.push((key, mods));
+            self.live.push(Press {
+                key,
+                mods,
+                up: false,
+                modifier: false,
+            });
         }
         counts
     }
 
-    /// The key and modifiers as they were at the press, if this release
-    /// acts: only if its press counted.
-    pub fn release(&mut self, code: KeyCode) -> Option<(Key, Mods)> {
-        let index = self.live.iter().position(|(k, _)| k.code == code)?;
-        Some(self.live.remove(index))
+    /// The last key pressed set a modifier (the compositor says so right
+    /// after the press): it holds no other key back.
+    pub fn modifier(&mut self) {
+        if let Some(press) = self.live.last_mut() {
+            press.modifier = true;
+        }
+    }
+
+    /// A key that acted as it went down (an arrow, a typed key): its
+    /// release brings nothing, and keys pressed after it don't wait for it.
+    pub fn forget(&mut self, code: KeyCode) {
+        self.live.retain(|p| p.key.code != code);
+    }
+
+    /// The keys that act now, each with the modifiers as they were at its
+    /// press, oldest first: this one, if its press counted, once every
+    /// earlier key is up too, with the keys that were waiting for it.
+    pub fn release(&mut self, code: KeyCode) -> Vec<(Key, Mods)> {
+        let Some(press) = self.live.iter_mut().find(|p| p.key.code == code) else {
+            return Vec::new();
+        };
+        press.up = true;
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while let Some(press) = self.live.get(i) {
+            if press.up {
+                let press = self.live.remove(i);
+                ready.push((press.key, press.mods));
+            } else if press.modifier {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        ready
     }
 }
 
@@ -110,8 +161,8 @@ mod tests {
         let generation = gate.redrawn();
         gate.synced(generation);
         gate.press(A, Mods::NONE);
-        assert_eq!(gate.release(A.code), Some((A, Mods::NONE)));
-        assert_eq!(gate.release(A.code), None, "one release per press");
+        assert_eq!(gate.release(A.code), [(A, Mods::NONE)]);
+        assert_eq!(gate.release(A.code), [], "one release per press");
     }
 
     #[test]
@@ -126,7 +177,7 @@ mod tests {
             alt: false,
         };
         gate.press(shifted, mods);
-        assert_eq!(gate.release(A.code), Some((shifted, mods)));
+        assert_eq!(gate.release(A.code), [(shifted, mods)]);
     }
 
     #[test]
@@ -136,7 +187,7 @@ mod tests {
         let generation = gate.redrawn();
         gate.press(A, Mods::NONE);
         gate.synced(generation);
-        assert_eq!(gate.release(A.code), None);
+        assert_eq!(gate.release(A.code), []);
     }
 
     #[test]
@@ -149,7 +200,7 @@ mod tests {
         gate.synced(second);
         assert_eq!(
             gate.release(A.code),
-            None,
+            [],
             "its press was aimed at the old tags"
         );
     }
@@ -172,6 +223,57 @@ mod tests {
         let _second = gate.redrawn();
         gate.synced(first);
         gate.press(A, Mods::NONE);
-        assert_eq!(gate.release(A.code), None);
+        assert_eq!(gate.release(A.code), []);
+    }
+
+    const B: Key = Key {
+        code: KeyCode::from_evdev(48),
+        shift: false,
+    };
+    const SHIFT: Key = Key {
+        code: KeyCode::from_evdev(42),
+        shift: false,
+    };
+
+    fn armed() -> KeyGate {
+        let mut gate = KeyGate::default();
+        let generation = gate.redrawn();
+        gate.synced(generation);
+        gate
+    }
+
+    #[test]
+    fn overlapping_keys_act_in_the_order_they_went_down() {
+        // `ba` typed fast: a comes up before b. Acting on a first would
+        // pick a one-letter tag `a` instead of typing `ba`.
+        let mut gate = armed();
+        gate.press(B, Mods::NONE);
+        gate.press(A, Mods::NONE);
+        assert_eq!(gate.release(A.code), [], "a waits for b");
+        assert_eq!(gate.release(B.code), [(B, Mods::NONE), (A, Mods::NONE)]);
+    }
+
+    #[test]
+    fn a_held_modifier_holds_no_key_back() {
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let mut gate = armed();
+        gate.press(SHIFT, Mods::NONE);
+        gate.modifier();
+        gate.press(Key { shift: true, ..A }, shift);
+        assert_eq!(gate.release(A.code), [(Key { shift: true, ..A }, shift)]);
+        assert_eq!(gate.release(SHIFT.code), [(SHIFT, Mods::NONE)]);
+    }
+
+    #[test]
+    fn a_key_that_acted_on_its_press_holds_no_key_back() {
+        let mut gate = armed();
+        gate.press(B, Mods::NONE);
+        gate.forget(B.code);
+        gate.press(A, Mods::NONE);
+        assert_eq!(gate.release(A.code), [(A, Mods::NONE)]);
+        assert_eq!(gate.release(B.code), [], "its release brings nothing");
     }
 }
