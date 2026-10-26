@@ -8,6 +8,7 @@
 //!                 Backspace with nothing typed: back to the tags
 //!                 Esc: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
+//!                 one match left (with [text] pick_unique): as Enter
 //! ```
 //!
 //! The text is read once, as text mode starts. Where a match is, the app is
@@ -18,8 +19,8 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    action::{Act, Action},
-    config::TextCursor,
+    action::{Act, Action, Mods},
+    config::{Config, TextCursor},
     desktop,
     geometry::Point,
     keys::KeyCode,
@@ -30,6 +31,10 @@ use crate::{
     style::Input,
     text::{Check, Place, Search},
 };
+
+/// How many characters `[text] pick_unique` waits for before acting on
+/// the only match: fewer match too much by chance.
+pub const UNIQUE: usize = 3;
 
 /// A match chosen with Enter: what to do, the target it makes, and what its
 /// text must still read for the run to act on it.
@@ -55,14 +60,13 @@ pub fn search(
     shown: &Snapshot,
     selector: &Selector,
     source: &mut dyn Source,
-    input: &Input,
-    cursor: TextCursor,
+    config: &Config,
 ) -> Result<Option<Pick>> {
     if let Err(e) = overlay.start_typing() {
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
         return Ok(None);
     }
-    let result = keys(overlay, shown, selector, source, input, cursor);
+    let result = keys(overlay, shown, selector, source, config);
     overlay.stop_typing();
     result
 }
@@ -73,9 +77,9 @@ fn keys(
     shown: &Snapshot,
     selector: &Selector,
     source: &mut dyn Source,
-    input: &Input,
-    cursor: TextCursor,
+    config: &Config,
 ) -> Result<Option<Pick>> {
+    let (input, cursor) = (&config.input, config.text_cursor);
     let verb = selector.armed().map(Action::name);
     // The tags go before the text is read: none is left to be typed.
     overlay.update(&frame(None, false, verb, input))?;
@@ -131,6 +135,14 @@ fn keys(
         if stale && (!edit || !overlay.has_events()?) {
             find(&mut search, shown, source);
             stale = false;
+            // Typed into one match, not backed into it.
+            if config.pick_unique
+                && key.code != KeyCode::BACKSPACE
+                && unique(&search)
+                && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
+            {
+                return Ok(Some(Pick::Text(Box::new(chosen))));
+            }
         }
         match key.code {
             KeyCode::ENTER => {
@@ -147,6 +159,12 @@ fn keys(
         }
         overlay.update(&frame(Some(&search), stale, verb, input))?;
     }
+}
+
+/// Whether the query is long enough, `UNIQUE` characters, and has just one
+/// match.
+fn unique(search: &Search) -> bool {
+    search.query().chars().count() >= UNIQUE && search.matches().len() == 1
 }
 
 /// Finds the query's matches: asks the apps where the new ones are, then
@@ -312,6 +330,22 @@ mod tests {
 
     fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>) -> Frame {
         super::frame(search, stale, verb, &Input::new(&Style::default()))
+    }
+
+    #[test]
+    fn one_match_is_unique_once_the_query_is_long_enough() {
+        let texts = ["contact", "falcon", "context"];
+        let mut found = search(&texts);
+        typed(&mut found, "fa");
+        assert_eq!(found.matches().len(), 1);
+        assert!(!unique(&found), "two characters match too much by chance");
+        typed(&mut found, "l");
+        assert!(unique(&found), "falcon, after three");
+        let mut found = search(&texts);
+        typed(&mut found, "con");
+        assert!(!unique(&found), "three matches");
+        typed(&mut found, "ta");
+        assert!(unique(&found), "contact alone");
     }
 
     #[test]

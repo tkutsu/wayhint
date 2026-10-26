@@ -173,14 +173,7 @@ pub fn pick(
     if start.text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-        if let Some(pick) = search::search(
-            overlay,
-            shown,
-            &selector,
-            source,
-            &config.input,
-            config.text_cursor,
-        )? {
+        if let Some(pick) = search::search(overlay, shown, &selector, source, config)? {
             return Ok(pick);
         }
     }
@@ -262,14 +255,7 @@ pub fn pick(
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
             Step::Text => {
-                if let Some(pick) = search::search(
-                    overlay,
-                    shown,
-                    &selector,
-                    source,
-                    &config.input,
-                    config.text_cursor,
-                )? {
+                if let Some(pick) = search::search(overlay, shown, &selector, source, config)? {
                     return Ok(pick);
                 }
                 // Back to the tags of the same scan, as they were left.
@@ -357,7 +343,7 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
     }
 }
 
-/// The tags still possible after what's been typed, drawn upper case, and
+/// The tags still possible after what's been typed, in `[style] case`, and
 /// where each would land if nudged.
 ///
 /// Each tag reads as the whole command: everything typed so far, dimmed,
@@ -403,9 +389,10 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             position: style.position,
             text: prefix
                 .chars()
-                .chain(label.iter().map(|&i| upper(letters[i].label)))
+                .chain(label.iter().map(|&i| style.case.of(letters[i].label)))
                 .collect(),
             typed,
+            pixels: target.in_pixels(),
         })
         .collect();
     // A held button's drop beats a verb: whatever comes next lets go.
@@ -455,6 +442,7 @@ pub fn pill(screen: Rect, text: String, typed: usize) -> Tag {
         text,
         target: None,
         typed,
+        pixels: false,
     }
 }
 
@@ -478,16 +466,6 @@ pub fn lands(at: Point, nudge: Point, screens: &[Rect]) -> Point {
     match screens.iter().find(|s| s.contains(at)) {
         Some(screen) => screen.inset(EDGE).clamp(moved),
         None => moved,
-    }
-}
-
-/// A letter in upper case when that's one character (`ß` would be `SS`,
-/// which would make the tag longer than the keys that type it).
-fn upper(letter: char) -> char {
-    let mut upper = letter.to_uppercase();
-    match (upper.next(), upper.next()) {
-        (Some(u), None) => u,
-        _ => letter,
     }
 }
 
@@ -673,14 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn upper_keeps_one_character() {
-        assert_eq!(upper('a'), 'A');
-        assert_eq!(upper('α'), 'Α');
-        assert_eq!(upper(';'), ';');
-        assert_eq!(upper('ß'), 'ß');
-    }
-
-    #[test]
     fn keys_decode_built_ins_then_verbs_then_letters() {
         let config = Config::parse(
             "[keys]\nhover = \"_\"",
@@ -851,5 +821,52 @@ mod tests {
             [Point::new(214, 114), Point::new(314, 114)],
             "nudged after a letter: both arrows count, on the open tags only"
         );
+    }
+
+    #[test]
+    fn tags_take_the_case_and_say_which_came_in_pixels() {
+        let tree = Target {
+            object: Some(crate::desktop::tree::ObjectId {
+                bus: ":1.7".into(),
+                path: "/ok".into(),
+            }),
+            window: 0,
+            rect: Rect::new(80, 90, 40, 20),
+            visible: Rect::new(80, 90, 40, 20),
+            hit: Point::new(100, 100),
+            role: "button".into(),
+            name: String::new(),
+            editable: false,
+            clips: Vec::new(),
+            opens: Vec::new(),
+        };
+        let guessed = Target {
+            object: None,
+            role: "pixels".into(),
+            ..tree.clone()
+        };
+        let targets = [tree, guessed];
+        let scene = Scene {
+            targets: &targets,
+            screen: Rect::new(0, 0, 1920, 1080),
+            pointer: None,
+            holding: false,
+        };
+        let selector = Selector::new(2, 2, Action::Left);
+        let tags = |extra: &str| {
+            let config = Config::parse(
+                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\n{extra}"),
+                &crate::keys::Layout::named("us", ""),
+            )
+            .unwrap();
+            frame(&selector, &config, &scene)
+                .tags
+                .into_iter()
+                .map(|t| (t.text, t.pixels))
+                .collect::<Vec<_>>()
+        };
+        let pair = |a: &str, b: &str| [(a.to_owned(), false), (b.to_owned(), true)];
+        assert_eq!(tags(""), pair("A", "B"));
+        assert_eq!(tags("[style]\ncase = \"lower\""), pair("a", "b"));
     }
 }

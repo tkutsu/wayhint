@@ -53,6 +53,8 @@ struct File {
 #[serde(default, deny_unknown_fields)]
 struct FileText {
     cursor: TextCursor,
+    /// Act on the only match left, without Enter.
+    pick_unique: bool,
     /// Tesseract's languages for windows read from pixels, `""` for none.
     ocr: Option<String>,
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
@@ -125,7 +127,7 @@ impl FileInput {
             padding: self.padding.unwrap_or(base.style.padding),
             position: self.position.unwrap_or(base.style.position),
             offset: self.offset.unwrap_or(base.style.offset),
-            leader: base.style.leader,
+            ..base.style
         };
         style.validate_table(table)?;
         let placeholder = self.placeholder.unwrap_or(base.placeholder);
@@ -527,6 +529,9 @@ pub struct Config {
     pub info: Info,
     /// Where an action lands within a text match: `[text] cursor`.
     pub text_cursor: TextCursor,
+    /// Act on the only match left once the query is long enough, without
+    /// Enter: `[text] pick_unique`.
+    pub pick_unique: bool,
     /// Tesseract's languages for text mode in windows read from pixels,
     /// `None` for no OCR: `[text] ocr`.
     pub ocr: Option<String>,
@@ -1096,6 +1101,7 @@ impl Config {
             input,
             info,
             text_cursor: file.text.cursor,
+            pick_unique: file.text.pick_unique,
             ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
@@ -1123,7 +1129,9 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\npick_unique = {}   # act on the only match left, once {} characters are typed, without Enter\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
+            self.pick_unique,
+            crate::search::UNIQUE,
             quote(self.ocr.as_deref().unwrap_or(""))
         )
     }
@@ -1955,6 +1963,32 @@ offset = [-13, 17]
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[info]\nduration = 0").contains("[info] duration"));
         assert!(err("[info]\nposition = \"top\"").contains("unknown field"));
+    }
+
+    #[test]
+    fn case_pixel_looks_and_pick_unique_read_back_the_same() {
+        let plain = Config::parse("", &us()).unwrap();
+        assert_eq!(plain.style.case, crate::style::Case::Upper);
+        assert!(!plain.pick_unique, "Enter is needed unless told");
+        let mine = Config::parse(
+            "[style]\ncase = \"lower\"\n[style.pixels]\nborder = \"#f00\"\nsize = 11\n[text]\npick_unique = true",
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(mine.style.case, crate::style::Case::Lower);
+        assert_eq!(
+            mine.style.pixels.border,
+            Some(Color::rgba(0xff, 0, 0, 0xff))
+        );
+        assert_eq!(mine.style.for_pixels().size, 11.0);
+        assert!(mine.pick_unique);
+        let again = Config::parse(&mine.render(), &us()).unwrap();
+        assert_eq!(again.style, mine.style);
+        assert!(again.pick_unique);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[style]\ncase = \"title\"").contains("case"));
+        assert!(err("[style.pixels]\nsize = 0").contains("[style.pixels] size"));
+        assert!(err("[style.pixels]\nposition = \"top\"").contains("unknown field"));
     }
 
     #[test]
