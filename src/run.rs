@@ -44,7 +44,8 @@
 
 use std::{
     collections::HashSet,
-    thread::sleep,
+    sync::mpsc::{self, RecvTimeoutError},
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 
@@ -57,7 +58,7 @@ use crate::{
     desktop::{self, Desktop, Monitor, Stack, Unread, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
-    overlay::Overlay,
+    overlay::{Frame, Overlay},
     pick::{self, Pick, Start, lands},
     pointer::Pointer,
     search::Chosen,
@@ -65,9 +66,9 @@ use crate::{
     text::{Span, Text},
 };
 
-/// How long the app gets to react to a click before the rescan. A fixed
-/// pause: what the app changes after it, the next refresh picks up.
-const SETTLE: Duration = Duration::from_millis(150);
+/// How long a scan goes on before the input box says `scanning`: a quick
+/// one would only blink it.
+const SLOW: Duration = Duration::from_millis(500);
 
 /// Everything one run holds on to. Owning it all in one struct makes the
 /// cleanup one function, whichever way the run ends.
@@ -190,7 +191,15 @@ impl Session {
             self.overlay.clear()?;
             // A copy: the overlay is lent to the pick while blocks open.
             let monitor = &self.overlay.monitor().clone();
-            let mut scans = Scans::new(&mut self.desktop, &mut self.warned, monitor, config)?;
+            let overlay = &mut self.overlay;
+            let mut slow = || say_scanning(overlay, config);
+            let mut scans = Scans::new(
+                &mut self.desktop,
+                &mut self.warned,
+                monitor,
+                config,
+                &mut slow,
+            )?;
 
             // `take` hands `--verb` and `--text` to the first pick and
             // leaves the defaults, so later rounds start with the tags and
@@ -301,7 +310,9 @@ impl Session {
             // Takes the keyboard back if `act` let go of it; a no-op with
             // the grab still held.
             self.overlay.grab_keyboard()?;
-            sleep(SETTLE);
+            // A fixed pause for the app to react to the click: what it
+            // changes after that, the next refresh picks up.
+            sleep(config.settle);
         }
     }
 
@@ -484,14 +495,16 @@ struct Scans<'a> {
 }
 
 impl<'a> Scans<'a> {
-    /// Scans the windows `monitor` shows.
+    /// Scans the windows `monitor` shows, calling `slow` if that takes a
+    /// while.
     fn new(
         desktop: &'a mut Desktop,
         warned: &'a mut HashSet<String>,
         monitor: &'a Monitor,
         config: &'a Config,
+        slow: &mut dyn FnMut(),
     ) -> Result<Self> {
-        let (stack, latest) = scan(desktop, warned, monitor, config)?;
+        let (stack, latest) = scan(desktop, warned, monitor, config, slow)?;
         Ok(Self {
             desktop,
             warned,
@@ -504,8 +517,9 @@ impl<'a> Scans<'a> {
 }
 
 impl pick::Source for Scans<'_> {
-    fn rescan(&mut self) -> Result<Option<Snapshot>> {
-        (self.stack, self.latest) = scan(self.desktop, self.warned, self.monitor, self.config)?;
+    fn rescan(&mut self, slow: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
+        (self.stack, self.latest) =
+            scan(self.desktop, self.warned, self.monitor, self.config, slow)?;
         Ok(Some(self.latest.clone()))
     }
 
@@ -541,23 +555,31 @@ impl pick::Source for Scans<'_> {
 }
 
 /// One scan of the windows `monitor` shows, and what they are, bottom to
-/// top. A scan slower than `[scan] refresh` is logged once a run:
-/// the tags then lag behind the screen by more than the setting says.
+/// top, with `slow` called once it has taken `SLOW`. A scan slower than
+/// `[scan] refresh` is logged once a run: the tags then lag behind the
+/// screen by more than the setting says.
 fn scan(
     desktop: &mut Desktop,
     warned: &mut HashSet<String>,
     monitor: &Monitor,
     config: &Config,
+    slow: &mut dyn FnMut(),
 ) -> Result<(Stack, Snapshot)> {
     let started = Instant::now();
-    let stack = desktop.stack(monitor.id)?;
-    let (scanned, unread) = desktop.scan(
-        &stack,
-        monitor,
-        config.pixels,
-        config.terminal_hint,
-        &config.terminal_processes,
-    );
+    let (stack, (scanned, unread)) = noticed(
+        || {
+            let stack = desktop.stack(monitor.id)?;
+            let scan = desktop.scan(
+                &stack,
+                monitor,
+                config.pixels,
+                config.terminal_hint,
+                &config.terminal_processes,
+            );
+            anyhow::Ok((stack, scan))
+        },
+        slow,
+    )?;
     for message in report(&scanned, &unread, warned) {
         desktop::log(&message);
     }
@@ -573,6 +595,38 @@ fn scan(
         ));
     }
     Ok((stack, scanned))
+}
+
+/// Shows `scanning` alone, in the input box, if `[info] scanning` says to:
+/// a round's first scan is slow, with no tags up yet.
+fn say_scanning(overlay: &mut Overlay, config: &Config) {
+    if config.info.scanning {
+        let busy = Frame {
+            info: Some(pick::scanning()),
+            ..Frame::default()
+        };
+        let _ = overlay.update(&busy);
+    }
+}
+
+/// Does `work` on a thread of its own and hands back what it made, calling
+/// `slow` if it's still at it after `SLOW`: the thread that draws is free
+/// to say so meanwhile. A panic in `work` goes on here.
+fn noticed<T: Send>(work: impl FnOnce() -> T + Send, slow: &mut dyn FnMut()) -> T {
+    thread::scope(|scope| {
+        let (done, finished) = mpsc::channel();
+        let worker = scope.spawn(move || {
+            let made = work();
+            let _ = done.send(());
+            made
+        });
+        if finished.recv_timeout(SLOW) == Err(RecvTimeoutError::Timeout) {
+            slow();
+        }
+        worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans

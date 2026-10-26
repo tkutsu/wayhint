@@ -11,16 +11,14 @@ use crate::{
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Dot, Event, Frame, Overlay, Tag},
+    overlay::{Dot, Event, Frame, Note, Overlay, Tag},
     search::{self, Chosen},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
-    style::Position,
+    style::Notice,
     text::{Span, Text},
 };
 
-/// How far above the monitor's bottom edge the status pill sits, in px.
-const PILL_LIFT: i32 = 48;
 /// How far inside its monitor's edge a nudge stops, in px: far enough for
 /// the whole dot to show.
 const EDGE: i32 = 5;
@@ -51,6 +49,33 @@ pub enum Pick {
     /// The monitor shows another workspace: nothing chosen, and the tags
     /// are for windows that left.
     Rescan,
+}
+
+/// What the input box's second line says, besides `no targets` while
+/// nothing has a tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Said {
+    #[default]
+    Nothing,
+    /// A letter that no tag goes on with, named until the time given.
+    Missed(String, Instant),
+    /// Every key and what it does, until the next key that means something.
+    Help,
+}
+
+impl Said {
+    /// When a passing message goes.
+    const fn until(&self) -> Option<Instant> {
+        match self {
+            Self::Missed(_, until) => Some(*until),
+            _ => None,
+        }
+    }
+}
+
+/// The message the second line shows while a scan is slow.
+pub fn scanning() -> (Notice, String) {
+    (Notice::Scanning, "scanning".into())
 }
 
 /// A refresh can move tags without changing which targets their keys name.
@@ -100,8 +125,9 @@ impl<'a> Scene<'a> {
 /// Where a pick's targets come from, asked again while the tags are up.
 pub trait Source {
     /// The targets as they are now, or `None` when they can't change (a
-    /// saved snapshot). A run scans its windows again.
-    fn rescan(&mut self) -> Result<Option<Snapshot>>;
+    /// saved snapshot). A run scans its windows again, and calls `slow` if
+    /// that takes long enough to say so.
+    fn rescan(&mut self, slow: &mut dyn FnMut()) -> Result<Option<Snapshot>>;
     /// Drops the lines of an opened block that another window covers or
     /// the monitor cuts off.
     fn keep(&self, opened: &mut Snapshot);
@@ -141,6 +167,10 @@ pub trait Source {
 ///
 /// While a hold keeps a button down (`start.holding`), whatever is picked
 /// is where it's let go, and `Esc` lets go where it is.
+///
+/// The input box's second line says `no targets` while nothing has a tag,
+/// names a letter no tag goes on with for `[info] duration`, and shows
+/// every key while the help key has it up (see [`Said`]).
 #[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 pub fn pick(
     overlay: &mut Overlay,
@@ -161,13 +191,15 @@ pub fn pick(
         selector.press(Input::Verb(action, Mods::NONE));
     }
     let (screen, mut pointer) = (overlay.monitor().rect, cursor().ok());
+    let mut said = Said::Nothing;
     // A scene per drawing: `shown` changes when a block opens, so nothing
     // may keep borrowing it in between.
-    let tags = |selector: &Selector, shown: &Snapshot, pointer| {
+    let tags = |selector: &Selector, shown: &Snapshot, pointer, said: &Said| {
         frame(
             selector,
             config,
             &Scene::new(&shown.targets, screen, pointer, start.holding),
+            said,
         )
     };
     if start.text {
@@ -177,13 +209,22 @@ pub fn pick(
             return Ok(pick);
         }
     }
-    overlay.show(&tags(&selector, shown, pointer))?;
+    overlay.show(&tags(&selector, shown, pointer, &said))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
     let next = || config.refresh.map(|every| Instant::now() + every);
     let mut due = next();
     loop {
-        let Some(event) = overlay.next_event(due)? else {
+        let wake = due.into_iter().chain(said.until()).min();
+        let Some(event) = overlay.next_event(wake)? else {
+            let now = Instant::now();
+            if said.until().is_some_and(|until| until <= now) {
+                said = Said::Nothing;
+                overlay.update(&tags(&selector, shown, pointer, &said))?;
+            }
+            if due.is_none_or(|due| due > now) {
+                continue;
+            }
             // A scan holds up the keys for as long as it takes, so none
             // while an arrow is held: the nudge would freeze mid-move.
             if overlay.holding() {
@@ -192,13 +233,26 @@ pub fn pick(
             }
             // A source that can't change is asked once.
             due = None;
-            let Some(refresh) = rescan(config, shown, &mut selector, source)? else {
+            // What shows while a slow scan goes on: the tags as they are,
+            // and `scanning` under what's typed.
+            let busy = config.info.scanning.then(|| Frame {
+                info: Some(scanning()),
+                ..tags(&selector, shown, pointer, &said)
+            });
+            let mut slowed = false;
+            let mut slow = || {
+                if let Some(busy) = &busy {
+                    slowed = overlay.update(busy).is_ok();
+                }
+            };
+            let refresh = rescan(config, shown, &mut selector, source, &mut slow)?;
+            let Some(refresh) = refresh else {
                 continue;
             };
-            if refresh != Refresh::Unchanged {
+            if refresh != Refresh::Unchanged || slowed {
                 overlay.set_layout(shown);
                 pointer = cursor().ok();
-                let frame = tags(&selector, shown, pointer);
+                let frame = tags(&selector, shown, pointer, &said);
                 if refresh == Refresh::Retag {
                     overlay.show(&frame)?;
                 } else {
@@ -217,15 +271,27 @@ pub fn pick(
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
             Event::Workspace => return Ok(Pick::Rescan),
         };
+        if config.verbs.is_help(key) {
+            said = if said == Said::Help {
+                Said::Nothing
+            } else {
+                Said::Help
+            };
+            overlay.update(&tags(&selector, shown, pointer, &said))?;
+            continue;
+        }
+        // A key that means nothing (a modifier on its own) leaves the
+        // message up; any other key takes it down.
         let Some(input) = input_of(key, mods, ticks, config) else {
             continue;
         };
+        said = Said::Nothing;
         // The command as it stood before this key: what a block opens with.
         let before = selector.clone();
         match selector.press(input) {
             Step::Typing => {
                 pointer = cursor().ok();
-                overlay.update(&tags(&selector, shown, pointer))?;
+                overlay.update(&tags(&selector, shown, pointer, &said))?;
             }
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
                 let mut opened = shown.open(index);
@@ -242,7 +308,7 @@ pub fn pick(
                 due = None;
                 // The lines have new labels: discard taps queued for the
                 // block before accepting keys for those lines.
-                overlay.show(&tags(&selector, shown, pointer))?;
+                overlay.show(&tags(&selector, shown, pointer, &said))?;
             }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
             Step::Here(act) => {
@@ -260,10 +326,27 @@ pub fn pick(
                 }
                 // Back to the tags of the same scan, as they were left.
                 pointer = cursor().ok();
-                overlay.show(&tags(&selector, shown, pointer))?;
+                overlay.show(&tags(&selector, shown, pointer, &said))?;
                 due = next();
             }
-            Step::Ignored => {}
+            // The letter is dropped, and named for `[info] duration`.
+            Step::Ignored => {
+                if let Input::Letter(letter, _) = input
+                    && config.info.no_match
+                {
+                    let letters = config.alphabet.letters();
+                    let case = config.style.case;
+                    let typed: String = before
+                        .typed()
+                        .iter()
+                        .chain([&letter])
+                        .map(|&i| case.of(letters[i].label))
+                        .collect();
+                    let until = Instant::now() + config.info.duration;
+                    said = Said::Missed(format!("no tag starts with {typed}"), until);
+                }
+                overlay.update(&tags(&selector, shown, pointer, &said))?;
+            }
             Step::Exit if start.holding => return Ok(Pick::Release),
             Step::Exit => return Ok(Pick::Leave),
         }
@@ -279,8 +362,9 @@ fn rescan(
     shown: &mut Snapshot,
     selector: &mut Selector,
     source: &mut dyn Source,
+    slow: &mut dyn FnMut(),
 ) -> Result<Option<Refresh>> {
-    let Some(mut fresh) = source.rescan()? else {
+    let Some(mut fresh) = source.rescan(slow)? else {
         return Ok(None);
     };
     fresh.merge_nearby(config.merge_distance);
@@ -343,45 +427,57 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
     }
 }
 
-/// The tags still possible after what's been typed, in `[style] case`, and
-/// where each would land if nudged.
+/// The tags still possible after what's been typed, in `[style] case`,
+/// where each would land if nudged, and the input box.
 ///
-/// Each tag reads as the whole command: everything typed so far, dimmed,
-/// then the letters still to type. So an armed verb's key goes in front,
-/// wherever it was typed (`kEA` after `k`, with `k` and nothing else
-/// dimmed; `kEA` again after `e k`, with `kE` dimmed), where the eyes
-/// already are. Its name also shows as a pill at the bottom of the screen,
-/// for a verb that has no key (`--verb`) and for `Space`, which uses no
-/// tag. The pill is drawn as one more tag: same look, no new drawing code.
-/// While a hold keeps a button down, the pill says `drop` instead.
+/// The input box names the armed verb, dimmed, or `drop` while a hold
+/// keeps a button down: a verb with no key (`--verb`) and `Space`, which
+/// uses no tag, show nowhere else. With `[input] hints`, the letters typed
+/// follow it there, and the tags keep only the letters still to type.
+/// Without, each tag reads as the whole command: everything typed so far,
+/// dimmed, then the letters still to type. So an armed verb's key goes in
+/// front, wherever it was typed (`kEA` after `k`, with `k` and nothing
+/// else dimmed; `kEA` again after `e k`, with `kE` dimmed), where the eyes
+/// already are.
+///
+/// Under what's typed, the box says what `said` holds, or `no targets`
+/// while nothing has a tag.
 ///
 /// A tag sits at `[style] position` on its target's visible box, moved by
-/// `[style] offset`. The pill stays centred.
+/// `[style] offset`.
 ///
 /// A nudge leaves the tags where they are and puts a dot where each one
 /// lands, one for `Space` too, at the pointer: a tag moved by the arrows
 /// would cover the very spot being aimed at. A line joins each dot to its
 /// tag. Only the tags still open get them, so they thin out with every
 /// letter typed, nudged before it or after.
-fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
+fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Frame {
     let letters = config.alphabet.letters();
+    let style = &config.style;
+    let hints = config.input.hints;
     let prefix = selector
         .armed()
         .and_then(|action| config.verbs.label(action))
+        .filter(|_| !hints)
         .unwrap_or("");
-    let typed = prefix.chars().count() + selector.typed().len();
+    // With hints, what's typed leaves the tags for the input box.
+    let (skip, dimmed) = if hints {
+        (selector.typed().len(), 0)
+    } else {
+        (0, prefix.chars().count() + selector.typed().len())
+    };
     let open: Vec<(&Vec<usize>, &Target)> = selector
         .labels()
         .iter()
         .zip(scene.targets)
         .filter(|(label, _)| selector.matches(label))
         .collect();
-    let style = &config.style;
     let spot = |target: &Target| {
         let [x, y] = style.offset;
         style.position.on(target.shown()).offset(Point::new(x, y))
     };
-    let mut tags: Vec<Tag> = open
+    let letter = |&i: &usize| style.case.of(letters[i].label);
+    let tags: Vec<Tag> = open
         .iter()
         .map(|(label, target)| Tag {
             at: spot(target),
@@ -389,21 +485,12 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             position: style.position,
             text: prefix
                 .chars()
-                .chain(label.iter().map(|&i| style.case.of(letters[i].label)))
+                .chain(label[skip..].iter().map(letter))
                 .collect(),
-            typed,
+            typed: dimmed,
             pixels: target.in_pixels(),
         })
         .collect();
-    // A held button's drop beats a verb: whatever comes next lets go.
-    let status = if scene.holding {
-        Some("drop")
-    } else {
-        selector.armed().map(Action::name)
-    };
-    if let Some(status) = status {
-        tags.push(pill(scene.screen, status.into(), 0));
-    }
     let nudge = selector.nudge();
     let dots = if nudge == Point::default() {
         Vec::new()
@@ -425,25 +512,50 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             })
             .collect()
     };
+    let info = match said {
+        Said::Help => Some((Notice::Help, config.verbs.legend())),
+        Said::Missed(message, _) => Some((Notice::NoMatch, message.clone())),
+        Said::Nothing if scene.targets.is_empty() && config.info.no_targets => {
+            Some((Notice::NoTargets, "no targets".into()))
+        }
+        Said::Nothing => None,
+    };
     Frame {
         tags,
         dots,
+        input: input(selector, config, scene.holding),
+        info,
         ..Frame::default()
     }
 }
 
-/// The status pill: `text` centred near the bottom of `screen`, its first
-/// `typed` characters dimmed. Drawn as one more tag: same look, no new
-/// drawing code.
-pub fn pill(screen: Rect, text: String, typed: usize) -> Tag {
-    Tag {
-        at: Point::new(screen.center().x, screen.bottom() - PILL_LIFT),
-        position: Position::Center,
+/// The input box's first line with the tags up: the armed verb's name,
+/// dimmed, or `drop` while a hold keeps a button down (whatever comes next
+/// lets go), then, with `[input] hints`, the letters typed so far. `None`
+/// with nothing to show.
+fn input(selector: &Selector, config: &Config, holding: bool) -> Option<Note> {
+    let status = if holding {
+        Some("drop")
+    } else {
+        selector.armed().map(Action::name)
+    };
+    let letters = config.alphabet.letters();
+    let typed: String = selector
+        .typed()
+        .iter()
+        .filter(|_| config.input.hints)
+        .map(|&i| config.style.case.of(letters[i].label))
+        .collect();
+    let (text, dimmed) = match (status, typed.is_empty()) {
+        (None, true) => return None,
+        (None, false) => (typed, 0),
+        (Some(status), true) => (status.to_owned(), status.chars().count()),
+        (Some(status), false) => (format!("{status} {typed}"), status.chars().count() + 1),
+    };
+    Some(Note {
         text,
-        target: None,
-        typed,
-        pixels: false,
-    }
+        typed: dimmed,
+    })
 }
 
 /// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick
@@ -474,7 +586,7 @@ mod tests {
     use super::*;
 
     impl Source for Snapshot {
-        fn rescan(&mut self) -> Result<Option<Snapshot>> {
+        fn rescan(&mut self, _: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
             Ok(Some(self.clone()))
         }
 
@@ -546,7 +658,7 @@ mod tests {
         fresh.targets[1].visible.x += 1;
         fresh.targets[1].hit.x += 1;
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw),
             "a redraw must keep queued keys and presses awaiting release"
         );
@@ -561,12 +673,12 @@ mod tests {
         let mut fresh = shown.clone();
         fresh.obstacles.push(Rect::new(200, 200, 20, 20));
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw)
         );
         fresh.targets.reverse();
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw)
         );
         assert_eq!(selector.typed(), [1]);
@@ -575,7 +687,7 @@ mod tests {
             Step::Picked { index: 1, .. }
         ));
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Unchanged)
         );
     }
@@ -599,7 +711,7 @@ mod tests {
         late.object.as_mut().unwrap().path = "/late".into();
         fresh.targets.push(late);
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw),
             "a gate reset here drops every key pressed during the scan"
         );
@@ -612,7 +724,7 @@ mod tests {
             let mut fresh = shown.clone();
             change(&mut fresh);
             assert_eq!(
-                rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+                rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
                 Some(Refresh::Retag)
             );
         };
@@ -640,12 +752,12 @@ mod tests {
             target.hit = target.hit.offset(by);
         }
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw)
         );
         fresh.windows[0].window.address = "0x2".into();
         assert_eq!(
-            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Retag)
         );
     }
@@ -762,8 +874,14 @@ mod tests {
             at: Point::new(x + 14, 100),
             tag: None,
         };
-        assert_eq!(frame(&selector, &config, &scene(100)).dots, [dot(100)]);
-        assert_eq!(frame(&selector, &config, &scene(500)).dots, [dot(500)]);
+        assert_eq!(
+            frame(&selector, &config, &scene(100), &Said::Nothing).dots,
+            [dot(100)]
+        );
+        assert_eq!(
+            frame(&selector, &config, &scene(500), &Said::Nothing).dots,
+            [dot(500)]
+        );
     }
 
     #[test]
@@ -798,7 +916,7 @@ mod tests {
         };
         let mut selector = Selector::new(3, 2, Action::Left);
         let froms = |selector: &Selector| -> Vec<i32> {
-            frame(selector, &config, &scene)
+            frame(selector, &config, &scene, &Said::Nothing)
                 .dots
                 .iter()
                 .map(|d| d.from.x)
@@ -810,7 +928,7 @@ mod tests {
         selector.press(Input::Letter(1, Mods::NONE));
         assert_eq!(froms(&selector), [220, 320], "b leaves ba and bb");
         selector.press(Input::Nudge(Point::new(14, 0)));
-        let dots = frame(&selector, &config, &scene).dots;
+        let dots = frame(&selector, &config, &scene, &Said::Nothing).dots;
         assert_eq!(
             dots.iter().map(|d| d.tag).collect::<Vec<_>>(),
             [Some(0), Some(1)],
@@ -859,7 +977,7 @@ mod tests {
                 &crate::keys::Layout::named("us", ""),
             )
             .unwrap();
-            frame(&selector, &config, &scene)
+            frame(&selector, &config, &scene, &Said::Nothing)
                 .tags
                 .into_iter()
                 .map(|t| (t.text, t.pixels))
@@ -868,5 +986,101 @@ mod tests {
         let pair = |a: &str, b: &str| [(a.to_owned(), false), (b.to_owned(), true)];
         assert_eq!(tags(""), pair("A", "B"));
         assert_eq!(tags("[style]\ncase = \"lower\""), pair("a", "b"));
+    }
+
+    /// Three buttons in a row, labelled a, ba and bb.
+    fn three_buttons() -> Vec<Target> {
+        (1..=3)
+            .map(|i| Target {
+                object: None,
+                window: 0,
+                rect: Rect::new(i * 100 - 20, 90, 40, 20),
+                visible: Rect::new(i * 100 - 20, 90, 40, 20),
+                hit: Point::new(i * 100, 100),
+                role: "button".into(),
+                name: String::new(),
+                editable: false,
+                clips: Vec::new(),
+                opens: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn with_hints_what_is_typed_leaves_the_tags_for_the_input_box() {
+        let targets = three_buttons();
+        let scene = |holding| Scene {
+            targets: &targets,
+            screen: Rect::new(0, 0, 1920, 1080),
+            pointer: None,
+            holding,
+        };
+        let shown = |extra: &str, holding| {
+            let config = Config::parse(
+                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\nright = \"r\"\n{extra}"),
+                &crate::keys::Layout::named("us", ""),
+            )
+            .unwrap();
+            let mut selector = Selector::new(3, 2, Action::Left);
+            selector.press(Input::Letter(1, Mods::NONE));
+            selector.press(Input::Verb(Action::Right, Mods::NONE));
+            let frame = frame(&selector, &config, &scene(holding), &Said::Nothing);
+            let tags: Vec<(String, usize)> =
+                frame.tags.into_iter().map(|t| (t.text, t.typed)).collect();
+            let input = frame.input.map(|n| (n.text, n.typed));
+            (tags, input)
+        };
+        let owned = |text: &str, typed| (text.to_owned(), typed);
+        let (tags, input) = shown("", false);
+        assert_eq!(tags, [owned("A", 0), owned("B", 0)], "only what's left");
+        assert_eq!(input, Some(owned("right B", 6)), "the verb dimmed");
+        let (tags, input) = shown("[input]\nhints = false", false);
+        assert_eq!(
+            tags,
+            [owned("rBA", 2), owned("rBB", 2)],
+            "the whole command, typed keys dimmed"
+        );
+        assert_eq!(input, Some(owned("right", 5)));
+        let (_, input) = shown("", true);
+        assert_eq!(
+            input,
+            Some(owned("drop B", 5)),
+            "a hold's drop beats a verb"
+        );
+    }
+
+    #[test]
+    fn the_second_line_says_no_targets_a_miss_or_every_key() {
+        let config = Config::parse("", &crate::keys::Layout::named("us", "")).unwrap();
+        let selector = Selector::new(0, config.alphabet.len(), Action::Left);
+        let targets = three_buttons();
+        let scene = |targets| Scene {
+            targets,
+            screen: Rect::new(0, 0, 1920, 1080),
+            pointer: None,
+            holding: false,
+        };
+        let info = |targets, said: &Said| frame(&selector, &config, &scene(targets), said).info;
+        assert_eq!(
+            info(&[], &Said::Nothing),
+            Some((Notice::NoTargets, "no targets".into()))
+        );
+        assert_eq!(info(&targets, &Said::Nothing), None);
+        let missed = Said::Missed("no tag starts with Q".into(), Instant::now());
+        assert_eq!(
+            info(&[], &missed),
+            Some((Notice::NoMatch, "no tag starts with Q".into())),
+            "a miss beats no targets"
+        );
+        let (notice, legend) = info(&targets, &Said::Help).unwrap();
+        assert_eq!(notice, Notice::Help);
+        assert!(legend.contains("Esc\tleave"), "{legend}");
+        let quiet = Config::parse(
+            "[info]\nno_targets = false",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let frame = frame(&selector, &quiet, &scene(&[]), &Said::Nothing);
+        assert_eq!(frame.info, None, "turned off");
     }
 }
