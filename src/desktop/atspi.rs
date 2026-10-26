@@ -34,8 +34,8 @@ use anyhow::{Context as _, Result, bail};
 use atspi::{
     AccessibilityConnection, CoordType, Granularity, Interface, ObjectRefOwned, State, StateSet,
     proxy::{
-        accessible::AccessibleProxy, action::ActionProxy, component::ComponentProxy,
-        text::TextProxy,
+        accessible::AccessibleProxy, action::ActionProxy, application::ApplicationProxy,
+        component::ComponentProxy, text::TextProxy,
     },
 };
 use futures::{StreamExt as _, future, stream};
@@ -50,7 +50,7 @@ use crate::{
         surfaces::Frame,
         tree::{Details, Node, ObjectId, States, Tree},
     },
-    geometry::Rect,
+    geometry::{Point, Rect},
 };
 
 /// Requests in flight at once. More doesn't help: apps answer one at a time.
@@ -547,9 +547,44 @@ impl<'c> Walk<'c> {
     }
 
     async fn extents(&self, object: &ObjectId) -> Result<Rect> {
+        self.extents_in(object, CoordType::Window).await
+    }
+
+    async fn extents_in(&self, object: &ObjectId, coords: CoordType) -> Result<Rect> {
         let component: ComponentProxy = self.proxy(object).await?;
-        let (x, y, w, h) = self.call(component.get_extents(CoordType::Window)).await?;
+        let (x, y, w, h) = self.call(component.get_extents(coords)).await?;
         Ok(Rect::new(x, y, w, h))
+    }
+
+    /// The coordinates to ask an object's text in, and how far to move
+    /// what comes back to make it window-relative.
+    ///
+    /// Window coordinates, except in Chromium (Electron too): its text in
+    /// window coordinates is measured from the page's corner, not the
+    /// window's (`kRootFrame`), so a match there lands a toolbar's height
+    /// off. Its screen coordinates are one frame for text and boxes alike,
+    /// so the object's own box says how far screen is from window. Not for
+    /// every app: GTK4 has no screen coordinates for text.
+    async fn text_frame(&self, object: &ObjectId) -> (CoordType, Point) {
+        let window = (CoordType::Window, Point::default());
+        let root = ObjectId {
+            bus: object.bus.clone(),
+            path: "/org/a11y/atspi/accessible/root".into(),
+        };
+        let Ok(app) = self.proxy::<ApplicationProxy>(&root).await else {
+            return window;
+        };
+        if self.call(app.toolkit_name()).await.ok().as_deref() != Some("Chromium") {
+            return window;
+        }
+        let (on_window, on_screen) = tokio::join!(
+            self.extents_in(object, CoordType::Window),
+            self.extents_in(object, CoordType::Screen)
+        );
+        match (on_window, on_screen) {
+            (Ok(w), Ok(s)) => (CoordType::Screen, Point::new(w.x - s.x, w.y - s.y)),
+            _ => window,
+        }
     }
 
     /// Name, box and action names of one candidate.
@@ -657,13 +692,11 @@ impl<'c> Walk<'c> {
         let (start, end) = if count <= LONG_TEXT {
             (0, count)
         } else {
+            let (coords, shift) = self.text_frame(object).await;
+            let at = |x: i32, y: i32| text.get_offset_at_point(x - shift.x, y - shift.y, coords);
             let (first, last) = tokio::join!(
-                self.call(text.get_offset_at_point(shown.x, shown.y, CoordType::Window)),
-                self.call(text.get_offset_at_point(
-                    shown.right() - 1,
-                    shown.bottom() - 1,
-                    CoordType::Window
-                ))
+                self.call(at(shown.x, shown.y)),
+                self.call(at(shown.right() - 1, shown.bottom() - 1))
             );
             // -1 is the app's "no character there".
             let start = first.ok().filter(|&f| f >= 0).unwrap_or(0);
@@ -688,17 +721,18 @@ impl<'c> Walk<'c> {
             return Vec::new();
         };
         let text = &text;
+        let (coords, shift) = self.text_frame(object).await;
         let range = move |from: i32, to: i32| async move {
-            let request = text.get_range_extents(from, to, CoordType::Window);
+            let request = text.get_range_extents(from, to, coords);
             let (x, y, w, h) = self.call(request).await.ok()?;
-            Some(Rect::new(x, y, w, h)).filter(|r| !r.is_empty())
+            Some(Rect::new(x, y, w, h).offset(shift)).filter(|r| !r.is_empty())
         };
         let (mut from, end) = (offset(start), offset(end));
         let mut parts = Vec::new();
         for _ in 0..MAX_LINES {
             let (whole, first) = tokio::join!(
                 range(from, end),
-                self.call(text.get_character_extents(from, CoordType::Window))
+                self.call(text.get_character_extents(from, coords))
             );
             let Some(whole) = whole else { break };
             let line = first.map_or(0, |(_, _, _, h)| h);
