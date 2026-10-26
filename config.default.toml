@@ -131,7 +131,7 @@
 # message can be turned off.
 # scanning = true           # "scanning" once a scan takes over half a second
 # no_targets = true         # "no targets" while nothing on the monitor has a tag
-# no_match = true           # a key that matches no tag, or a character no text, is dropped and named here
+# no_match = true           # named here: a key that matches no tag (dropped), or text nothing matches
 # duration = 2000           # ms a message stays
 # icon_font = "Symbols Nerd Font"  # a fontconfig pattern; icons it lacks are left out
 # Each message's icon, one glyph or "" for none, and its colour.
