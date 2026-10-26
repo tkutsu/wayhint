@@ -132,7 +132,7 @@ impl Overlay {
         monitor: &Monitor,
     ) -> Result<Self> {
         // The fonts first: a bad `[style] font` fails before any grab.
-        let painter = Painter::new(style, marks, &input.style, &info.style, 1.0)?;
+        let painter = Painter::new(style, marks, &input.style, info, 1.0)?;
 
         let (globals, mut queue) =
             registry_queue_init::<State>(conn).context("connecting to Wayland")?;

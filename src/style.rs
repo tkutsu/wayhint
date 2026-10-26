@@ -20,7 +20,7 @@ use crate::geometry::{Point, Rect};
 /// `TryFrom<String>`, so a bad colour fails while the file loads, with our
 /// message, and no other code ever sees an unparsed colour. `into` does the
 /// same backwards for printing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Color {
     pub r: u8,
@@ -139,8 +139,6 @@ impl Position {
 
 /// The farthest `[style] offset` moves a tag, either way, in px.
 const OFFSET: i32 = 500;
-/// The longest fade, in ms: past this it reads as lag.
-const FADE: u32 = 1000;
 
 /// The `[style]` table. `#[serde(default)]` fills every missing field from
 /// `Style::default()`, and `deny_unknown_fields` rejects `colour = ...`.
@@ -165,8 +163,6 @@ pub struct Style {
     pub position: Position,
     /// Moves every tag from its position, right then down, in px.
     pub offset: [i32; 2],
-    /// Ms to fade in as it appears, and out as it goes; 0 for no fade.
-    pub fade: u32,
     /// The line from a tag to its dot, and the dot: `[style.leader]`.
     pub leader: Leader,
 }
@@ -274,7 +270,6 @@ impl Default for Style {
             padding: [2.0, 5.0],
             position: Position::default(),
             offset: [0, 0],
-            fade: 100,
             leader: Leader::default(),
         }
     }
@@ -309,9 +304,6 @@ impl Style {
         }
         if self.font.trim().is_empty() {
             bail!("[{table}] font: empty");
-        }
-        if self.fade > FADE {
-            bail!("[{table}] fade: {} ms is over {FADE}", self.fade);
         }
         self.leader.validate()
     }
@@ -359,20 +351,18 @@ impl Style {
             "offset = [{}, {}]   # px from there, right and down",
             self.offset[0], self.offset[1]
         );
-        let _ = writeln!(
-            out,
-            "fade = {}   # ms to fade in and out; 0 for none",
-            self.fade
-        );
         out
     }
 }
 
-/// The input box, resolved from `[input]`: what's typed that isn't a tag
-/// letter. An armed verb's name, `drop` while a hold is down, and text
-/// mode's query with its decorations.
+/// The input box, resolved from `[input]`: what's typed. An armed verb's
+/// name, `drop` while a hold is down, the tag letters typed so far, and
+/// text mode's query with its decorations. `[info]`'s messages are its
+/// second line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
+    /// Whether typed tag letters show here, and leave the tags.
+    pub hints: bool,
     pub prefix: String,
     pub suffix: String,
     /// Shown, dimmed, while nothing is typed.
@@ -384,6 +374,7 @@ impl Input {
     /// Keep the tags' colours and font, centred near the screen's bottom.
     pub fn new(tags: &Style) -> Self {
         Self {
+            hints: true,
             prefix: String::new(),
             suffix: String::new(),
             placeholder: "text".into(),
@@ -401,10 +392,12 @@ impl Input {
         let (header, fields) = look.split_once('\n').unwrap();
         let quote = crate::config::quote;
         format!(
-            "\n{header}   # an armed verb, drop, and text mode's query\n\
+            "\n{header}   # what's typed, and [info]'s messages under it\n\
+             hints = {}   # typed tag letters show here, and leave the tags\n\
              placeholder = {}   # shown while nothing is typed in text mode\n\
              prefix = {}   # before the query, as \"find: \"\n\
              suffix = {}   # after the query, before the match count\n{fields}",
+            self.hints,
             quote(&self.placeholder),
             quote(&self.prefix),
             quote(&self.suffix),
@@ -412,55 +405,116 @@ impl Input {
     }
 }
 
-/// The info box, resolved from `[info]`: what wayhint has to say while
-/// the tags are up, each kind of message on or off.
+/// What wayhint has to say, under what's typed in the input box: each
+/// kind has its own icon and colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice {
+    /// The windows are being read, and it's taking a while.
+    Scanning,
+    /// Nothing on the monitor has a tag.
+    NoTargets,
+    /// A key matched no tag, or a character no text, and was dropped.
+    NoMatch,
+    /// Every key and what it does.
+    Help,
+}
+
+/// `[info]`: which messages the input box's second line shows, for how
+/// long, and in which colours.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Info {
-    /// `scanning`, while the windows are read: after the keybind, and
-    /// after each click.
+    /// `scanning`, once a scan takes long enough to notice.
     pub scanning: bool,
     /// `no targets`, while nothing on the monitor has a tag.
     pub no_targets: bool,
     /// A key that matches no tag, or a character no text: the key is
     /// dropped, and the box says so.
     pub no_match: bool,
-    /// How long a dropped key's message stays.
+    /// How long a message stays.
     pub duration: Duration,
-    pub style: Style,
+    /// A fontconfig pattern for the icons: a Nerd Font's symbols.
+    pub icon_font: String,
+    pub badges: Badges,
 }
 
-impl Info {
-    /// Every message on, in the tags' colours and font, just above the
-    /// input box's default spot.
-    pub fn new(tags: &Style) -> Self {
+/// A message's icon, a glyph from `[info] icon_font` (`""` for none), and
+/// the colour of the icon and the words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Badge {
+    pub icon: String,
+    pub color: Color,
+}
+
+/// Each message's badge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Badges {
+    pub scanning: Badge,
+    pub no_targets: Badge,
+    pub no_match: Badge,
+    pub help: Badge,
+}
+
+impl Default for Info {
+    /// Every message on, for two seconds, with Font Awesome's search, ban,
+    /// times-circle and keyboard glyphs in blue, yellow, red and lavender.
+    fn default() -> Self {
+        let badge = |icon: char, r, g, b| Badge {
+            icon: icon.into(),
+            color: Color::rgba(r, g, b, 0xff),
+        };
         Self {
             scanning: true,
             no_targets: true,
             no_match: true,
-            duration: Duration::from_millis(1000),
-            style: Style {
-                position: Position::Bottom,
-                offset: [0, -80],
-                ..tags.clone()
+            duration: Duration::from_millis(2000),
+            icon_font: "Symbols Nerd Font".into(),
+            badges: Badges {
+                scanning: badge('\u{f002}', 0x89, 0xb4, 0xfa),
+                no_targets: badge('\u{f05e}', 0xf9, 0xe2, 0xaf),
+                no_match: badge('\u{f057}', 0xf3, 0x8b, 0xa8),
+                help: badge('\u{f11c}', 0xb4, 0xbe, 0xfe),
             },
         }
     }
+}
 
-    /// The resolved box as editable TOML.
+impl Info {
+    pub const fn badge(&self, notice: Notice) -> &Badge {
+        match notice {
+            Notice::Scanning => &self.badges.scanning,
+            Notice::NoTargets => &self.badges.no_targets,
+            Notice::NoMatch => &self.badges.no_match,
+            Notice::Help => &self.badges.help,
+        }
+    }
+
+    /// The resolved table as editable TOML.
     pub fn render(&self) -> String {
-        let look = self.style.render_table("info", "on the screen");
-        let (header, fields) = look.split_once('\n').unwrap();
-        format!(
-            "\n{header}   # what wayhint has to say while the tags are up\n\
-             scanning = {}   # while the windows are read\n\
+        let quote = crate::config::quote;
+        let mut out = format!(
+            "\n[info]   # the input box's second line: what wayhint has to say\n\
+             scanning = {}   # once a scan takes over half a second\n\
              no_targets = {}   # while nothing on the monitor has a tag\n\
-             no_match = {}   # a key that matches no tag, or a character no text\n\
-             duration = {}   # ms a dropped key's message stays\n{fields}",
+             no_match = {}   # a key that matches no tag, or a character no text, is dropped and named\n\
+             duration = {}   # ms a message stays\n\
+             icon_font = {}   # a fontconfig pattern for the icons: a Nerd Font's symbols\n",
             self.scanning,
             self.no_targets,
             self.no_match,
             self.duration.as_millis(),
-        )
+            quote(&self.icon_font),
+        );
+        let b = &self.badges;
+        for (name, badge) in [
+            ("scanning", &b.scanning),
+            ("no_targets", &b.no_targets),
+            ("no_match", &b.no_match),
+            ("help", &b.help),
+        ] {
+            let _ = writeln!(out, "{name}_icon = {}", quote(&badge.icon));
+            let _ = writeln!(out, "{name}_color = \"{}\"", badge.color);
+        }
+        out
     }
 }
 

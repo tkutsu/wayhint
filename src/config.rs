@@ -25,7 +25,7 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::{Color, Info, Input, Mark, Marks, Position, Style},
+    style::{Badge, Badges, Color, Info, Input, Mark, Marks, Position, Style},
 };
 
 /// The default config, every setting explained and commented out:
@@ -84,53 +84,13 @@ impl FileText {
     }
 }
 
-/// A box's look as a table writes it: unset fields come from elsewhere
-/// (the tags' `[style]`, with the box's own spot on the screen). Serde
-/// can't flatten a table that denies unknown fields, so `[input]` and
-/// `[info]` each list the fields and hand them over as one of these.
-struct Look {
-    font: Option<String>,
-    size: Option<f32>,
-    text: Option<Color>,
-    dimmed: Option<Color>,
-    background: Option<Color>,
-    border: Option<Color>,
-    border_width: Option<f32>,
-    radius: Option<f32>,
-    padding: Option<[f32; 2]>,
-    position: Option<Position>,
-    offset: Option<[i32; 2]>,
-    fade: Option<u32>,
-}
-
-impl Look {
-    /// `base` with what's set here, checked under `[table]`.
-    fn over(self, base: Style, table: &str) -> Result<Style> {
-        let style = Style {
-            font: self.font.unwrap_or(base.font),
-            size: self.size.unwrap_or(base.size),
-            text: self.text.unwrap_or(base.text),
-            dimmed: self.dimmed.unwrap_or(base.dimmed),
-            background: self.background.unwrap_or(base.background),
-            border: self.border.unwrap_or(base.border),
-            border_width: self.border_width.unwrap_or(base.border_width),
-            radius: self.radius.unwrap_or(base.radius),
-            padding: self.padding.unwrap_or(base.padding),
-            position: self.position.unwrap_or(base.position),
-            offset: self.offset.unwrap_or(base.offset),
-            fade: self.fade.unwrap_or(base.fade),
-            leader: base.leader,
-        };
-        style.validate_table(table)?;
-        Ok(style)
-    }
-}
-
-/// `[input]`, once `[text.input]`: the box for an armed verb, `drop` and
-/// text mode's query, with the query's decorations.
+/// `[input]`, once `[text.input]`: the box for what's typed, with the
+/// query's decorations. Unset look fields come from the tags' `[style]`,
+/// with the box's own spot on the screen.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
+    hints: Option<bool>,
     placeholder: Option<String>,
     prefix: String,
     suffix: String,
@@ -146,7 +106,6 @@ struct FileInput {
     padding: Option<[f32; 2]>,
     position: Option<Position>,
     offset: Option<[i32; 2]>,
-    fade: Option<u32>,
 }
 
 impl FileInput {
@@ -154,21 +113,21 @@ impl FileInput {
     /// target. `table` is the name the file used.
     fn resolve(self, tags: &Style, table: &str) -> Result<Input> {
         let base = Input::new(tags);
-        let look = Look {
-            font: self.font,
-            size: self.size,
-            text: self.text,
-            dimmed: self.dimmed,
-            background: self.background,
-            border: self.border,
-            border_width: self.border_width,
-            radius: self.radius,
-            padding: self.padding,
-            position: self.position,
-            offset: self.offset,
-            fade: self.fade,
+        let style = Style {
+            font: self.font.unwrap_or(base.style.font),
+            size: self.size.unwrap_or(base.style.size),
+            text: self.text.unwrap_or(base.style.text),
+            dimmed: self.dimmed.unwrap_or(base.style.dimmed),
+            background: self.background.unwrap_or(base.style.background),
+            border: self.border.unwrap_or(base.style.border),
+            border_width: self.border_width.unwrap_or(base.style.border_width),
+            radius: self.radius.unwrap_or(base.style.radius),
+            padding: self.padding.unwrap_or(base.style.padding),
+            position: self.position.unwrap_or(base.style.position),
+            offset: self.offset.unwrap_or(base.style.offset),
+            leader: base.style.leader,
         };
-        let style = look.over(base.style, table)?;
+        style.validate_table(table)?;
         let placeholder = self.placeholder.unwrap_or(base.placeholder);
         if [&placeholder, &self.prefix, &self.suffix]
             .iter()
@@ -179,6 +138,7 @@ impl FileInput {
             );
         }
         Ok(Input {
+            hints: self.hints.unwrap_or(base.hints),
             prefix: self.prefix,
             suffix: self.suffix,
             placeholder,
@@ -187,49 +147,33 @@ impl FileInput {
     }
 }
 
-/// `[info]`: which messages the info box shows, and its look.
+/// `[info]`: which messages the input box's second line shows, for how
+/// long, and in which colours.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInfo {
     scanning: Option<bool>,
     no_targets: Option<bool>,
     no_match: Option<bool>,
-    /// Ms a dropped key's message stays.
+    /// Ms a message stays.
     duration: Option<u32>,
-    font: Option<String>,
-    size: Option<f32>,
-    text: Option<Color>,
-    dimmed: Option<Color>,
-    background: Option<Color>,
-    border: Option<Color>,
-    border_width: Option<f32>,
-    radius: Option<f32>,
-    padding: Option<[f32; 2]>,
-    position: Option<Position>,
-    offset: Option<[i32; 2]>,
-    fade: Option<u32>,
+    icon_font: Option<String>,
+    scanning_icon: Option<String>,
+    scanning_color: Option<Color>,
+    no_targets_icon: Option<String>,
+    no_targets_color: Option<Color>,
+    no_match_icon: Option<String>,
+    no_match_color: Option<Color>,
+    help_icon: Option<String>,
+    help_color: Option<Color>,
 }
 
-/// The longest a dropped key's message may stay, in ms.
+/// The longest a message may stay, in ms.
 const DURATION: u32 = 10_000;
 
 impl FileInfo {
-    fn resolve(self, tags: &Style) -> Result<Info> {
-        let base = Info::new(tags);
-        let look = Look {
-            font: self.font,
-            size: self.size,
-            text: self.text,
-            dimmed: self.dimmed,
-            background: self.background,
-            border: self.border,
-            border_width: self.border_width,
-            radius: self.radius,
-            padding: self.padding,
-            position: self.position,
-            offset: self.offset,
-            fade: self.fade,
-        };
+    fn resolve(self) -> Result<Info> {
+        let base = Info::default();
         let duration = match self.duration {
             Some(ms) if !(1..=DURATION).contains(&ms) => {
                 bail!("[info] duration = {ms}: give 1-{DURATION} ms")
@@ -237,12 +181,48 @@ impl FileInfo {
             Some(ms) => Duration::from_millis(ms.into()),
             None => base.duration,
         };
+        let icon_font = self.icon_font.unwrap_or(base.icon_font);
+        if icon_font.trim().is_empty() {
+            bail!("[info] icon_font: empty; give a font, and \"\" icons for none");
+        }
+        let badge = |name: &str, icon: Option<String>, color: Option<Color>, base: Badge| {
+            let icon = icon.unwrap_or(base.icon);
+            if icon.chars().any(char::is_control) || icon.chars().count() > 2 {
+                bail!("[info] {name}_icon = {icon:?}: one glyph, or \"\" for none");
+            }
+            Ok(Badge {
+                icon,
+                color: color.unwrap_or(base.color),
+            })
+        };
+        let b = base.badges;
         Ok(Info {
             scanning: self.scanning.unwrap_or(base.scanning),
             no_targets: self.no_targets.unwrap_or(base.no_targets),
             no_match: self.no_match.unwrap_or(base.no_match),
             duration,
-            style: look.over(base.style, "info")?,
+            icon_font,
+            badges: Badges {
+                scanning: badge(
+                    "scanning",
+                    self.scanning_icon,
+                    self.scanning_color,
+                    b.scanning,
+                )?,
+                no_targets: badge(
+                    "no_targets",
+                    self.no_targets_icon,
+                    self.no_targets_color,
+                    b.no_targets,
+                )?,
+                no_match: badge(
+                    "no_match",
+                    self.no_match_icon,
+                    self.no_match_color,
+                    b.no_match,
+                )?,
+                help: badge("help", self.help_icon, self.help_color, b.help)?,
+            },
         })
     }
 }
@@ -941,19 +921,15 @@ impl Verbs {
         let unshifted = Key { code, shift: false };
         tag_keys.contains(&code)
             || self.is_help(unshifted)
-            || self
-                .taken()
-                .iter()
-                .any(|t| t.0 == code && t.1 != "help")
+            || self.taken().iter().any(|t| t.0 == code && t.1 != "help")
     }
 
     /// The help key's line in `[keys]`, for `wayhint config`.
     fn render_help(&self) -> String {
         match (&self.help, &self.help_unbound) {
-            (Some((_, label)), _) => format!(
-                "help = {}   # every key and what it does\n",
-                quote(label)
-            ),
+            (Some((_, label)), _) => {
+                format!("help = {}   # every key and what it does\n", quote(label))
+            }
             (None, Some(label)) => format!(
                 "# help has no key: its default, {label:?}, is on one of your tag letters or is another command's key\n"
             ),
@@ -1097,7 +1073,7 @@ impl Config {
             (None, Some(old)) => old.resolve(&file.style, "text.input")?,
             (None, None) => FileInput::default().resolve(&file.style, "input")?,
         };
-        let info = file.info.resolve(&file.style)?;
+        let info = file.info.resolve()?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
@@ -1944,38 +1920,41 @@ offset = [-13, 17]
 
     #[test]
     fn the_input_box_is_input_and_its_old_name_still_loads() {
-        let new = Config::parse("[input]\nposition = \"top\"\nfade = 0", &us()).unwrap();
-        let old = Config::parse("[text.input]\nposition = \"top\"\nfade = 0", &us()).unwrap();
+        let new = Config::parse("[input]\nposition = \"top\"\nhints = false", &us()).unwrap();
+        let old = Config::parse("[text.input]\nposition = \"top\"\nhints = false", &us()).unwrap();
         assert_eq!(new.input, old.input);
         assert_eq!(new.input.style.position, Position::Top);
-        assert_eq!(new.input.style.fade, 0);
+        assert!(!new.input.hints);
+        assert!(
+            Config::parse("", &us()).unwrap().input.hints,
+            "on by default"
+        );
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[input]\n[text.input]").contains("same table"));
         assert!(err("[input]\nsize = 0").contains("[input] size"));
-        assert!(err("[input]\nfade = 1001").contains("[input] fade"));
+        assert!(err("[input]\nfade = 100").contains("unknown field"));
     }
 
     #[test]
-    fn the_info_box_shows_everything_unless_told_and_round_trips() {
-        let config = Config::parse("[style]\nsize = 17", &us()).unwrap();
-        let info = &config.info;
+    fn info_shows_every_message_unless_told_and_round_trips() {
+        let info = Config::parse("", &us()).unwrap().info;
+        assert_eq!(info, Info::default());
         assert!(info.scanning && info.no_targets && info.no_match);
-        assert_eq!(info.duration, Duration::from_millis(1000));
-        assert_eq!(info.style.size, 17.0, "the tags' look");
-        assert_eq!(info.style.position, Position::Bottom);
+        assert_eq!(info.duration, Duration::from_millis(2000));
         let mine = Config::parse(
-            "[info]\nscanning = false\nno_match = false\nduration = 400\nposition = \"top-right\"\nbackground = \"#000\"",
+            "[info]\nscanning = false\nno_match = false\nduration = 400\nno_match_color = \"#000\"",
             &us(),
         )
         .unwrap();
         assert!(!mine.info.scanning && mine.info.no_targets && !mine.info.no_match);
         assert_eq!(mine.info.duration, Duration::from_millis(400));
-        assert_eq!(mine.info.style.background, Color::rgba(0, 0, 0, 0xff));
+        assert_eq!(mine.info.badges.no_match.color, Color::rgba(0, 0, 0, 0xff));
+        assert_eq!(mine.info.badges.help, info.badges.help);
         let again = Config::parse(&mine.render(), &us()).unwrap();
         assert_eq!(again.info, mine.info);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[info]\nduration = 0").contains("[info] duration"));
-        assert!(err("[info]\nnoise = true").contains("unknown field"));
+        assert!(err("[info]\nposition = \"top\"").contains("unknown field"));
     }
 
     #[test]
@@ -2012,10 +1991,7 @@ offset = [-13, 17]
         assert!(!letter.verbs.is_help(key(53, true)));
         let rendered = letter.render();
         assert!(rendered.contains("# help has no key"), "{rendered}");
-        assert_eq!(
-            Config::parse(&rendered, &us()).unwrap().verbs,
-            letter.verbs
-        );
+        assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, letter.verbs);
         let legend = config.verbs.legend();
         assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
         assert!(legend.contains("r tag\tright click"), "{legend}");

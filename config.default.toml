@@ -72,7 +72,6 @@
 # padding = [2, 5]          # vertical, horizontal
 # position = "bottom-right" # on the target: center, top, bottom, left, right, or a corner as top-left
 # offset = [0, 0]           # px from there, right and down
-# fade = 100                # ms the tags take to fade in after a scan, and out as wayhint leaves; 0 for none
 
 [style.leader]
 # The line from a tag to the dot where it clicks: shown when an arrow moves
@@ -89,10 +88,12 @@
 
 
 [input]
-# The box for what you type that isn't a tag letter: an armed verb's name,
-# "drop" while a hold is down, and text mode's query. Once called
-# [text.input], which a file may still say. Unset look fields follow
-# [style]; position and offset are on the screen here.
+# The box for what you type: an armed verb's name, "drop" while a hold is
+# down, the tag letters typed so far, and text mode's query. [info]'s
+# messages are its second line. Once called [text.input], which a file may
+# still say. Unset look fields follow [style]; position and offset are on
+# the screen here.
+# hints = true              # typed tag letters show here, and leave the tags; false dims them on the tags
 # placeholder = "text"      # shown, dimmed, while nothing is typed in text mode
 # prefix = ""               # before the query, as "find: "
 # suffix = ""               # after the query, before the match count
@@ -107,28 +108,26 @@
 # padding = [2, 5]          # vertical, horizontal
 # position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
 # offset = [0, -48]         # px from there, right and down
-# fade = 100                # ms to fade in as it appears and out as it goes; 0 for none
 
 
 [info]
-# A small box for what wayhint has to say while the tags are up. Each kind
-# of message can be turned off. Unset look fields follow [style].
-# scanning = true           # "scanning" while the windows are read, after the keybind and after each click
+# What wayhint has to say, as the input box's second line: an icon and a
+# few words in the message's colour, at most two lines. Each kind of
+# message can be turned off.
+# scanning = true           # "scanning" once a scan takes over half a second
 # no_targets = true         # "no targets" while nothing on the monitor has a tag
 # no_match = true           # a key that matches no tag, or a character no text, is dropped and named here
-# duration = 1000           # ms a dropped key's message stays
-# font = "sans-serif:bold"
-# size = 13
-# text = "#ffffffff"
-# dimmed = "#ffffff66"
-# background = "#1e1e2ef0"
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
-# offset = [0, -80]         # px from there, right and down
-# fade = 100                # ms to fade in as it appears and out as it goes; 0 for none
+# duration = 2000           # ms a message stays
+# icon_font = "Symbols Nerd Font"  # a fontconfig pattern; icons it lacks are left out
+# Each message's icon, one glyph or "" for none, and its colour.
+# scanning_icon = "\uF002"   # nf-fa-search
+# scanning_color = "#89b4faff"
+# no_targets_icon = "\uF05E" # nf-fa-ban
+# no_targets_color = "#f9e2afff"
+# no_match_icon = "\uF057"   # nf-fa-times_circle
+# no_match_color = "#f38ba8ff"
+# help_icon = "\uF11C"       # nf-fa-keyboard: the key list
+# help_color = "#b4befeff"
 
 
 [text]
