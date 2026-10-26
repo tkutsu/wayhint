@@ -111,8 +111,8 @@ pub struct Desktop {
 enum Seen {
     Tree(tree::Tree, filter::Filtered, Stats),
     /// With its picture, shrunk, and the picture's pixels per logical
-    /// pixel: `layout` reads the same one.
-    Pixels(Window, Found, (Frame, f64), Stats),
+    /// pixel: `layout` reads the same one. A fixed terminal hint has no picture.
+    Pixels(Window, Found, Option<(Frame, f64)>, Stats),
     Untagged(Window),
 }
 
@@ -127,10 +127,10 @@ impl Seen {
     fn read(&self) -> Read<'_> {
         match self {
             Self::Tree(tree, filtered, stats) => Read::Tree(tree, filtered, stats),
-            Self::Pixels(window, found, (_, scale), stats) => Read::Pixels {
+            Self::Pixels(window, found, picture, stats) => Read::Pixels {
                 window,
                 found,
-                scale: *scale,
+                scale: picture.as_ref().map_or(1.0, |(_, scale)| *scale),
                 stats,
             },
             Self::Untagged(window) => Read::Untagged(window),
@@ -290,6 +290,15 @@ impl Desktop {
             if terminal && !terminal_hint {
                 continue;
             }
+            if terminal && pixels.is_none() && window.kind == Kind::Client {
+                let patch = pixels::terminal_patch(window.rect.w, window.rect.h);
+                let found = Found {
+                    bodies: vec![[patch.x, patch.y, patch.right(), patch.bottom()]],
+                    ..Found::default()
+                };
+                seen.push(Seen::Pixels(window.clone(), found, None, Stats::default()));
+                continue;
+            }
             let detector = hint_detector(pixels, terminal_hint, terminal)
                 .filter(|_| window.kind == Kind::Client);
             match (read, detector) {
@@ -301,7 +310,7 @@ impl Desktop {
                 (Err(no_tree), Some(detector)) => {
                     match look(&mut self.camera, window, detector, terminals) {
                         Ok((found, picture, stats)) => {
-                            seen.push(Seen::Pixels(window.clone(), found, picture, stats));
+                            seen.push(Seen::Pixels(window.clone(), found, Some(picture), stats));
                         }
                         Err(e) => {
                             failed.push(Unread::new(window, anyhow!("{no_tree:#}, and {e:#}")));
@@ -323,12 +332,22 @@ impl Desktop {
         seen.sort_by_key(|s| stack.windows.iter().position(|w| w.address == s.address()));
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
+        for (index, scanned) in snapshot.windows.iter().enumerate() {
+            if is_terminal(&scanned.window, terminals) {
+                for target in snapshot.targets.iter_mut().filter(|t| t.window == index) {
+                    target.role = "terminal".into();
+                }
+            }
+        }
         keep_visible(&mut snapshot, stack, monitor);
         let pictures: Vec<_> = seen
             .iter()
             .filter_map(|s| match s {
-                Seen::Pixels(window, _, picture, _) => Some((window.address.as_str(), picture)),
-                Seen::Tree(..) | Seen::Untagged(_) => None,
+                Seen::Pixels(window, _, picture, _) => {
+                    Some((window.address.as_str(), picture.as_ref()))
+                }
+                Seen::Untagged(window) => Some((window.address.as_str(), None)),
+                Seen::Tree(..) => None,
             })
             .collect();
         self.layout(&mut snapshot, monitor, stack, &pictures);
@@ -349,13 +368,14 @@ impl Desktop {
     /// unreadable window stays fully protected instead of guessing it is blank.
     /// The same picture puts each document body's tag in its clearest spot
     /// that no surface in `stack` may cover. A client in `pictures` (by
-    /// address, shrunk, with its scale) was taken this scan already.
+    /// address, shrunk, with its scale) was taken this scan already;
+    /// `None` skips capture for a fixed terminal hint.
     pub fn layout(
         &mut self,
         snapshot: &mut Snapshot,
         monitor: &Monitor,
         stack: &Stack,
-        pictures: &[(&str, &(Frame, f64))],
+        pictures: &[(&str, Option<&(Frame, f64)>)],
     ) {
         let mut obstacles = Vec::new();
         // Text sources kept: a button only where its picture shows letters.
@@ -365,15 +385,20 @@ impl Desktop {
             if window.rect.intersect(monitor.rect).is_none() {
                 continue;
             }
+            let taken = pictures.iter().find(|(a, _)| *a == window.address);
+            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
+            if matches!(taken, Some((_, None))) {
+                obstacles.extend(in_view([window.rect], &covers));
+                continue;
+            }
             let is_body = |t: &Target| t.window == index && filter::is_body(&t.role, t.editable);
             let bodies = snapshot.targets.iter().any(is_body);
             let captured = (|| -> Result<_> {
                 if window.kind != Kind::Client {
                     bail!("only clients can be exported");
                 }
-                let taken = pictures.iter().find(|(a, _)| *a == window.address);
                 let shot;
-                let (frame, scale) = if let Some((_, (frame, scale))) = taken {
+                let (frame, scale) = if let Some((_, Some((frame, scale)))) = taken {
                     (frame, *scale)
                 } else {
                     shot = pixels::shrink(self.shoot(&window.address)?, window.rect.w);
@@ -395,7 +420,6 @@ impl Desktop {
             let origin = window.rect.origin();
             // What a window shows only blocks tags where it's on top: an
             // unreadable background layer would otherwise block them all.
-            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
             match &captured {
                 #[allow(clippy::cast_possible_truncation)]
                 Ok((space, _, scale)) => {
@@ -920,7 +944,13 @@ pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) ->
         scale,
         stats: &stats,
     };
-    Ok(Snapshot::build(1, window.monitor, [read]))
+    let mut snapshot = Snapshot::build(1, window.monitor, [read]);
+    if is_terminal(window, terminals) {
+        for target in &mut snapshot.targets {
+            target.role = "terminal".into();
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Takes a picture of `window` and finds its tags, with the `camera`
@@ -1029,6 +1059,26 @@ mod tests {
             );
             assert_eq!(snapshot.targets.len(), usize::from(enabled));
             assert!(snapshot.windows.iter().any(|s| is_kitty(&s.window)));
+            assert!(desktop.camera.is_none(), "pixel-off hints must not capture");
+            if enabled {
+                let target = &snapshot.targets[0];
+                let window = &snapshot.windows[target.window].window;
+                assert_eq!(window.rect.right() - target.rect.right(), 10);
+                assert_eq!(window.rect.bottom() - target.rect.bottom(), 10);
+                assert!(target.editable && target.opens.is_empty());
+            }
+        }
+        for detector in [Detector::Fast, Detector::Full] {
+            let (snapshot, unread) =
+                desktop.scan(&stack, &monitor, Some(detector), true, &["kitty".into()]);
+            assert!(unread.is_empty());
+            assert!(
+                desktop.camera.is_some(),
+                "pixel-on hints must check a screenshot"
+            );
+            assert_eq!(snapshot.targets.len(), 1);
+            assert_eq!(snapshot.targets[0].role, "terminal");
+            assert!(snapshot.targets[0].editable);
         }
     }
 
