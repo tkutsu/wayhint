@@ -124,6 +124,9 @@ pub enum Step {
     Picked { index: usize, act: Act },
     /// `Space`: do `act` where the pointer is.
     Here(Act),
+    /// A verb typed twice, no letter between: do `act` again where the
+    /// last command was done. The run knows where that was.
+    Again(Act),
     /// The repeat key. The run knows what the last command was.
     Repeat,
     /// The text key: text mode takes over, with the verb and the nudge
@@ -304,8 +307,15 @@ impl Selector {
                     Step::Ignored
                 }
             }
+            // The same verb twice with no letter yet: `PgDn PgDn` scrolls
+            // where the last one did. Arrows in between still count.
+            Input::Verb(action, held) if self.armed == Some(action) && self.typed.is_empty() => {
+                let act = self.act(held);
+                self.reset();
+                Step::Again(act)
+            }
             // Letters typed before a verb stay, as before an arrow: the verb
-            // says what, the letters and the nudge where. A second verb
+            // says what, the letters and the nudge where. Another verb
             // replaces the first, so a wrong one needs no Backspace.
             Input::Verb(action, held) => {
                 self.armed = Some(action);
@@ -474,6 +484,26 @@ mod tests {
         s.press(letter(3));
         s.press(verb(Action::Double));
         assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[3][..]));
+    }
+
+    #[test]
+    fn a_verb_typed_twice_acts_again_where_the_last_command_was() {
+        let mut s = five();
+        s.press(verb(Action::ScrollDown));
+        s.press(Input::Nudge(Point::new(0, 10)));
+        let again = Act {
+            nudge: Point::new(0, 10),
+            ..act(Action::ScrollDown, Mods::NONE)
+        };
+        assert_eq!(s.press(verb(Action::ScrollDown)), Step::Again(again));
+        assert_eq!(s.armed(), None, "a whole command: nothing is left armed");
+        s.press(verb(Action::ScrollDown));
+        s.press(letter(3));
+        assert_eq!(
+            s.press(verb(Action::ScrollDown)),
+            Step::Typing,
+            "after a letter, the verb is for that tag"
+        );
     }
 
     #[test]

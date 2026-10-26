@@ -72,20 +72,31 @@ bind = SUPER, slash, exec, wayhint
 | `t` then a tag | Double click ("twice") |
 | `o` then a tag | Hover: moves the pointer there and leaves it |
 | `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
-| `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection |
+| `PageUp` / `PageDown` then a tag | Turns the wheel up or down there, 5 notches (`[pointer] scroll`) |
+| `,` then a tag | Hold: presses the left button there and keeps it down; the next tag or `Space` lets go there, a drag |
+| a verb twice | Does it again where the last command was: `PageDown PageDown` scrolls the same pane again |
+| `Shift`, `Ctrl` or `Alt` held on a tag's last letter | The same click with that key held: Ctrl-click opens a link in a background tab, Shift-click extends a selection, Ctrl-scroll zooms |
 | `Space` | Does the default action, or the verb typed before it, where the pointer is |
 | arrows, before the tag's last letter or `Space` | Move where that one click lands, 10 px per press; held, they keep going, faster |
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
 | `/` | Text mode: the tags go, and what you type finds text on screen |
 | `Backspace` | Removes the last letter or verb typed |
-| `Esc` | Exits, whatever was typed |
+| `Esc` | Exits, whatever was typed; while a hold is down, lets go where it is instead |
 
 A verb can also come between a tag's letters: `a t s` double-clicks
 `as`, as `t a s` does. A typed verb shows in front of every tag (`tAS`
 after `t`, or after `a t`), and its name
 shows at the bottom of the screen, until the tag is typed. Typing another
-verb replaces it. Right Alt doesn't count as Alt, since on many layouts
-it's AltGr.
+verb replaces it, and typing the same verb again before any letter does
+it where the last command was, or at the pointer if there was none yet.
+Right Alt doesn't count as Alt, since on many layouts it's AltGr.
+
+A scroll doesn't click, so it never ends the run, and the pointer goes
+back afterwards as after a click. A hold keeps its button down across
+rounds: the tags come back with `drop` at the bottom of the screen, and
+whatever you pick next, a tag, `Space`, a text match or a verb typed
+twice, is where it lets go, moving there in small steps so apps see a
+drag. `, ,` or `Esc` lets go where it went down: a long press.
 
 Arrows let a tag click anywhere near it: `→ → ↓` then a tag clicks 20 px
 right of the control and 10 px below. Hold an arrow to go further: it
@@ -114,9 +125,10 @@ and `End` go to the first and last. `Enter` clicks the middle of the
 current match's first line, with the verb typed before `/` if there was
 one (`t/save Enter` double-clicks "save"), and `Shift`, `Ctrl` or `Alt`
 held on `Enter` hold that key through the click. Nothing is clicked until
-`Enter`. `Backspace` takes back the last character; with nothing typed,
-it goes back to the tags. `Esc` exits, as it does from the tags. The bottom of
-the screen shows the query and where you are, as in `con  2/5`.
+`Enter`. `Backspace` takes back the last character, and with nothing typed
+goes back to the tags. `Esc` exits wayhint. The bottom of the screen shows
+the query and where you are, as in `con  2/5`, and `text`
+(`[text.input] placeholder`) while nothing is typed.
 
 A query in lower case ignores case, and one capital letter makes it exact.
 Accents are ignored both ways, so `cafe` finds "café" and `α` finds
@@ -167,7 +179,12 @@ click wayhint can't vouch for: one an arrow moved outside its control, or
 one made with `Space`, since a field there would take the focus while
 wayhint kept your keys. `wayhint --once` exits after one action, and
 `wayhint --verb right` starts with a verb already typed, so a keybind can
-go straight to right-clicking.
+go straight to right-clicking, and `wayhint --text` starts in text mode,
+with no tags shown first. To bind it to Super+Ctrl+W:
+
+```
+bind = SUPER CTRL, W, exec, wayhint --text
+```
 
 `wayhint --static` scans once and keeps those hints until you act or exit.
 It closes after one action or a workspace switch. To bind it to Super+Alt+W:
@@ -199,89 +216,53 @@ with no tree is read by OCR there, as in a run.
 
 ## Configuration
 
-`~/.config/wayhint/config.toml`. Every key is optional; `wayhint config`
-prints the settings in effect, as a file you can save and edit to start
-one.
+`~/.config/wayhint/config.toml`. Every setting is optional.
+[`config.default.toml`](config.default.toml) lists them all at their
+defaults, commented out, with what each does; start yours from it:
+
+```sh
+wayhint config --default > ~/.config/wayhint/config.toml
+```
+
+`wayhint config` prints the settings in effect: your file merged with the
+defaults. A file that still says `matched` (now `dimmed`) or `[text.style]`
+(now `[text.matches]`) loads as before.
+
+A short one:
+
+```toml
+[keys]
+alphabet = "ciaehtns"   # tag letters, most used first; default: the home row
+right = ""              # "" makes this what a bare tag does (default: left)
+left = "."              # every other verb gets a key: one character or a name
+hover = "_"             # Shift works: _ is Shift and -
+hold = "Home"           # names: PageUp PageDown Home End Delete
+repeat = "r"            # the last command again; no key unless you set one
+
+[keys.aliases]
+";" = "c"               # another key that types the same letter
+
+[style]
+font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
+dimmed = "#ffffff66"    # letters already typed
+
+[style.leader]
+line = "#ff6060"        # the line from a tag to its dot; unset, the tags' text colour
+
+[text.input]
+placeholder = "find…"   # shown while nothing is typed
+```
 
 Hints whose click centers are within `scan.merge_distance` logical pixels
 form a group, including chains of nearby centers. Each group keeps the
 existing hint nearest its average center. Ties keep the first hint in
 reading order. The default distance is `0`, which shows every hint.
 
-```toml
-[keys]
-alphabet = "ciaehtns"   # tag letters, most used first; default: the home row
-
-right = ""              # "" makes this what a bare tag does (default: left)
-left = "."              # every other verb gets a key: one character or a name
-hover = "_"             # Shift works: _ is Shift and -
-back = "Home"           # names: PgUp PgDn Home End Delete
-repeat = "r"            # the last command again; no key unless you set one
-text = "/"              # text mode (the default); "" for none
-
-[keys.aliases]
-";" = "c"               # another key that types the same letter
-
-[pointer]
-after = "restore"       # cursor back after a click; "leave" keeps it on the target
-nudge = 10              # px one arrow press moves a click
-
-[pixels]
-detector = "full"       # windows with no accessibility tree: "fast", or "off"
-terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]
-
-[scan]
-refresh = 500           # ms the tags stay up before a rescan; 0 for only after a click
-merge_distance = 0      # logical px between nearby hint centers; 0 keeps every hint
-
-[style]
-font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
-size = 13
-text = "#ffffffff"
-matched = "#ffffff66"   # letters already typed
-background = "#1e1e2ef0"
-border = "#d0d0d0ff"
-position = "bottom-right"  # on the target: center, top, bottom, left, right, or a corner
-offset = [0, 0]         # px from there, right and down
-
-[text]
-ocr = "eng"             # Tesseract's languages for windows with no tree, as "eng+ell"; "" for no OCR
-
-[text.style]            # text mode's boxes over matches
-background = "#ffff0080"
-border = "#d0d0d0ff"
-border_width = 0
-radius = 4
-padding = [2, 5]        # vertical, horizontal
-
-[text.style.current]    # the current match; unset fields come from [text.style]
-background = "#ff963280"
-border = "#d0d0d0ff"
-border_width = 0
-radius = 4
-padding = [2, 5]
-
-[text.input]            # the typed query; unset font/colour/box fields inherit [style]
-prefix = ""            # before the query, for example "find: "
-suffix = ""            # after the query, before the match count
-font = "Inter:bold"
-size = 13
-text = "#ffffffff"
-matched = "#ffffff66"   # the armed action's name, before the query
-background = "#1e1e2ef0"
-border = "#d0d0d0ff"
-border_width = 1
-radius = 4
-padding = [2, 5]        # vertical, horizontal
-position = "bottom"    # on the screen, independent of hint placement
-offset = [0, -48]      # px right and down from that position
-```
-
 Text mode's boxes are neon yellow at half opacity with no border, and the
 current match's is orange, as in a browser's find bar. Their radius and
 padding come from the tags unless you set them.
 
-`[text.style.current]` controls the selected match independently: background,
+`[text.matches.current]` controls the selected match independently: background,
 border colour and width, radius, and padding. These boxes sit over the app's
 text, which shows through their background.
 
@@ -337,16 +318,16 @@ hints, including terminal focus hints.
 When labels overlap, one moves into nearby clear space and gains a line
 and dot pointing to its click target. Displaced labels avoid captured ink,
 small controls, and other labels. Their positions stay fixed while you
-type a tag. Placement searches up to 256 pixels within the target's window;
+type a tag. `[style.leader]` sets that line and dot's colours and sizes,
+and those of the dots the arrows draw. Placement searches up to 256 pixels within the target's window;
 if no clear slot fits, the label keeps its original position. Failed
 captures protect the whole window rather than treating it as empty.
 
 A key is a tag letter or a command (a verb, repeat, or text), never both.
-A command key you write is taken out of the alphabet. A default verb or
-text key that is in the alphabet you wrote stays off instead, and `wayhint
-config` lists which commands have no key. The text key's default also
-gives way to any other command on its key. `Esc`, `Backspace`, `Space`, `Enter`, `Tab` and
-the arrows are never command keys.
+A command key you write is taken out of the alphabet. A default key that
+is in the alphabet you wrote, or that you gave another command, stays off
+instead, and `wayhint config` lists which commands have no key. `Esc`,
+`Backspace`, `Space`, `Enter`, `Tab` and the arrows are never command keys.
 
 ## Known gaps
 

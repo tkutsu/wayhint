@@ -22,8 +22,11 @@
 //!
 //! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
 //! before the tag's last letter), or a verb and the spot under the
-//! pointer (`[verb] Space`), which skips the re-check.
+//! pointer (`[verb] Space`), which skips the re-check, or a verb typed
+//! twice, done again where the last command was.
 //! Shift, Ctrl or Alt held on the last key are held through the click.
+//! A hold presses a button and keeps it down through the next round: the
+//! next command, whatever its verb, lets go where it points.
 //! Arrows typed before the last key move where that one command lands,
 //! so a tag near the spot can click anywhere.
 //! The repeat key does the last command on a target again: the target is
@@ -32,7 +35,8 @@
 //!
 //! The text key hides the tags and searches the windows' text instead
 //! (`search.rs`); `Enter` acts on the current match as on a tag, after
-//! its text is read again and found unchanged.
+//! its text is read again and found unchanged, and `Esc` ends the run.
+//! `--text` starts there.
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
@@ -53,7 +57,7 @@ use crate::{
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
-    pick::{self, Pick, lands},
+    pick::{self, Pick, Start, lands},
     pointer::Pointer,
     search::Chosen,
     snapshot::{Snapshot, Target},
@@ -77,6 +81,10 @@ struct Session {
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
+    /// Where the last command was done, for a verb typed twice.
+    spot: Option<Point>,
+    /// The button a hold keeps down, until the next command lets go.
+    held: Option<Held>,
     /// What the scans have warned about so far: each rescan finds the same
     /// unreadable window again, and once a run is enough to say so.
     warned: HashSet<String>,
@@ -92,6 +100,14 @@ struct Command {
     act: Act,
 }
 
+/// A hold's button, down at `at`, and where the cursor goes back to once
+/// it's let go, if `[pointer] after` puts it back.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    at: Point,
+    back: Option<Point>,
+}
+
 /// How a pick ended for the loop.
 enum Done {
     /// Acted. `ends` when the run is over: a text field may have taken
@@ -101,12 +117,13 @@ enum Done {
     Refused,
 }
 
-/// The run: `verb` arms the first pick; static mode never scans again.
+/// The run: `start` says how the first pick starts (`--verb`, `--text`);
+/// static mode never scans again.
 pub fn run(
     mut config: Config,
     once: bool,
     static_mode: bool,
-    verb: Option<Action>,
+    start: Start,
     toggle: std::os::unix::net::UnixDatagram,
 ) -> Result<()> {
     if static_mode {
@@ -132,15 +149,17 @@ pub fn run(
     let mut session = Session {
         overlay,
         desktop: Desktop::connect()?,
-        pointer: Pointer::new(&conn, outputs)?,
+        pointer: Pointer::new(&conn, outputs, config.scroll)?,
         keyboard: None,
         screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
+        spot: None,
+        held: None,
         warned: HashSet::new(),
         conn,
     };
 
-    let result = session.rounds(&config, once || static_mode, static_mode, verb);
+    let result = session.rounds(&config, once || static_mode, static_mode, start);
     session.clean_up();
     result
 }
@@ -152,7 +171,7 @@ impl Session {
         config: &Config,
         once: bool,
         static_mode: bool,
-        mut verb: Option<Action>,
+        mut start: Start,
     ) -> Result<()> {
         loop {
             // No tags while scanning: nothing stale can be typed.
@@ -161,16 +180,20 @@ impl Session {
             let monitor = &self.overlay.monitor().clone();
             let mut scans = Scans::new(&mut self.desktop, &mut self.warned, monitor, config)?;
 
-            // `take` hands `--verb` to the first pick and leaves `None`, so
-            // later rounds start with the default action again. `snapshot`
-            // is what the pick ends in: the last scan, or a block opened in
-            // it.
+            // `take` hands `--verb` and `--text` to the first pick and
+            // leaves the defaults, so later rounds start with the tags and
+            // the default action again. `snapshot` is what the pick ends
+            // in: the last scan, or a block opened in it.
             let mut snapshot = scans.latest.clone();
+            let first = Start {
+                holding: self.held.is_some(),
+                ..std::mem::take(&mut start)
+            };
             let picked = pick::pick(
                 &mut self.overlay,
                 config,
                 &mut snapshot,
-                verb.take(),
+                first,
                 &desktop::cursor,
                 &mut scans,
             )?;
@@ -194,6 +217,26 @@ impl Session {
                     Done::Acted {
                         ends: act.action.clicks(),
                     }
+                }
+                // A verb typed twice: where the last command was, or at
+                // the pointer before the first. As unknown as `Space`'s spot,
+                // so a click there ends the run too.
+                Pick::Again { act } => {
+                    self.last = None;
+                    let from = match self.spot {
+                        Some(spot) => spot,
+                        None => desktop::cursor()?,
+                    };
+                    let at = lands(from, act.nudge, &self.screens);
+                    let restore = config.after == After::Restore;
+                    self.act(act.action, act.mods, at, restore)?;
+                    Done::Acted {
+                        ends: act.action.clicks(),
+                    }
+                }
+                Pick::Release => {
+                    self.release()?;
+                    Done::Acted { ends: false }
                 }
                 Pick::Target { index, act } => {
                     let target = &snapshot.targets[index];
@@ -234,6 +277,9 @@ impl Session {
                 }
             };
             match done {
+                // A held button waits for the next command to let go, so
+                // the run goes on, even with `--once` or after a field.
+                _ if self.held.is_some() => {}
                 // Loop around: a fresh scan, fresh tags. A refusal never let
                 // go of the keyboard.
                 Done::Refused if !once => continue,
@@ -320,13 +366,31 @@ impl Session {
     /// tag would be typed into the page. A modifier click lets go first, as
     /// spike test 9 did it, and so does the focus fallback, the path tests
     /// 2 and 3 proved; `rounds` takes the keyboard back.
+    ///
+    /// While a hold keeps a button down, any command lets go of it at `at`
+    /// instead, whatever its verb: a drag there, from where the hold
+    /// pressed. A hold itself keeps its button down and the cursor on it,
+    /// and puts the cursor back only once it's let go.
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
-        let mods = if action.clicks() { mods } else { Mods::NONE };
+        self.spot = Some(at);
+        if let Some(held) = self.held.take() {
+            self.overlay.clear()?;
+            self.pointer.drag(held.at, at)?;
+            return match held.back {
+                Some(back) => self.pointer.put_back(back),
+                None => Ok(()),
+            };
+        }
+        let mods = if action.takes_mods() {
+            mods
+        } else {
+            Mods::NONE
+        };
         self.overlay.clear()?;
         if !mods.is_empty() || !self.overlay.grabs_without_focus() {
             self.overlay.release_keyboard()?;
         }
-        let back = if restore && action.clicks() {
+        let back = if restore && action.restores() {
             desktop::cursor().ok()
         } else {
             None
@@ -345,8 +409,22 @@ impl Session {
             keyboard.release_all();
         }
         clicked?;
+        if action == Action::Hold {
+            self.held = Some(Held { at, back });
+            return Ok(());
+        }
         match back {
             Some(back) => self.pointer.put_back(back),
+            None => Ok(()),
+        }
+    }
+
+    /// Lets go of a hold's button where it went down, `Esc` while it's
+    /// down: a long press.
+    fn release(&mut self) -> Result<()> {
+        match self.held {
+            // With a button held, `act` lets go: here, where it went down.
+            Some(held) => self.act(Action::Left, Mods::NONE, held.at, false),
             None => Ok(()),
         }
     }
@@ -505,13 +583,14 @@ fn report(snapshot: &Snapshot, unread: &[anyhow::Error], warned: &mut HashSet<St
     }
 }
 
-/// `wayhint click --at X,Y`: the pointer alone, one action.
+/// `wayhint click --at X,Y`: the pointer alone, one action. A hold lets go
+/// as the command ends, and a scroll turns the default notches.
 pub fn click_at(at: Point, action: Action) -> Result<()> {
     let monitors = desktop::monitors()?;
     let outputs = Rect::bounding(monitors.iter().map(|m| m.rect)).context("no monitors")?;
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
-    let mut pointer = Pointer::new(&conn, outputs)?;
-    let back = desktop::cursor().ok().filter(|_| action.clicks());
+    let mut pointer = Pointer::new(&conn, outputs, crate::config::SCROLL)?;
+    let back = desktop::cursor().ok().filter(|_| action.restores());
     let result = pointer.act(action, at).and_then(|()| match back {
         Some(back) => pointer.put_back(back),
         None => Ok(()),

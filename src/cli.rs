@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(long, value_name = "ACTION")]
     pub verb: Option<Action>,
 
+    /// Start in text mode: type text on screen, Enter acts on it
+    #[arg(long)]
+    pub text: bool,
+
     /// Config file to use instead of ~/.config/wayhint/config.toml
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
@@ -40,7 +44,12 @@ pub enum Command {
     /// Print what wayhint sees, as JSON (may contain private text from your windows)
     Dump(Dump),
     /// Print the config in effect: your file merged with the defaults
-    Config,
+    Config {
+        /// Print the default config instead, every setting explained and
+        /// commented out: a file to start yours from
+        #[arg(long)]
+        default: bool,
+    },
     /// Show a saved snapshot's tags and print the one you pick; clicks nothing
     #[command(hide = true)]
     Overlay {

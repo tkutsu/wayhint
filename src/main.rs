@@ -83,10 +83,21 @@ fn dispatch(cli: &Cli) -> Result<()> {
     };
     match &cli.command {
         None => match toggle::start_or_stop()? {
-            Some(socket) => run::run(config()?, cli.once, cli.static_mode, cli.verb, socket),
+            Some(socket) => {
+                let start = pick::Start {
+                    verb: cli.verb,
+                    text: cli.text,
+                    holding: false,
+                };
+                run::run(config()?, cli.once, cli.static_mode, start, socket)
+            }
             None => Ok(()),
         },
-        Some(Command::Config) => {
+        Some(Command::Config { default: true }) => {
+            print!("{}", config::DEFAULT);
+            Ok(())
+        }
+        Some(Command::Config { default: false }) => {
             print!("{}", config()?.render());
             Ok(())
         }
@@ -146,7 +157,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         &mut overlay,
         config,
         &mut snapshot,
-        None,
+        pick::Start::default(),
         &cursor,
         &mut Saved,
     )? {
@@ -161,7 +172,11 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         Pick::Here { act, .. } => {
             eprintln!("wayhint: {} where the pointer is", act.action.name());
         }
+        Pick::Again { act } => {
+            eprintln!("wayhint: {} where the last command was", act.action.name());
+        }
         Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),
+        Pick::Release => eprintln!("wayhint: release (nothing is held here)"),
         Pick::Text(chosen) => {
             eprintln!("wayhint: {} on a text match", chosen.act.action.name());
             println!("{}", serde_json::to_string_pretty(&chosen.target)?);

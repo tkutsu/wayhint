@@ -15,7 +15,11 @@ use smithay_client_toolkit::reexports::{
     client::{
         Connection, Dispatch, EventQueue, QueueHandle,
         globals::{GlobalListContents, registry_queue_init},
-        protocol::{wl_pointer::ButtonState, wl_registry, wl_seat::WlSeat},
+        protocol::{
+            wl_pointer::{Axis, AxisSource, ButtonState},
+            wl_registry,
+            wl_seat::WlSeat,
+        },
     },
     protocols_wlr::virtual_pointer::v1::client::{
         zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
@@ -41,17 +45,25 @@ const BTN_EXTRA: u32 = 0x114;
 /// 400 ms GTK and Qt allow by default.
 const ARRIVE: Duration = Duration::from_millis(30);
 const PRESS: Duration = Duration::from_millis(20);
+/// One wheel notch, as a mouse sends it: 15 in the axis's units, one step.
+const NOTCH: f64 = 15.0;
+/// A drag moves in this many steps, `STEP` apart: apps start a drag once
+/// the pointer has moved a few px with the button down, and some want to
+/// see it move more than once.
+const STEPS: i32 = 12;
+const STEP: Duration = Duration::from_millis(8);
 
-/// The button an action presses, and how many times: a hover, none.
+/// The button a click presses, and how many times: a hover or a scroll,
+/// none.
 const fn presses(action: Action) -> (u32, u32) {
     match action {
-        Action::Left => (BTN_LEFT, 1),
+        Action::Left | Action::Hold => (BTN_LEFT, 1),
         Action::Double => (BTN_LEFT, 2),
         Action::Right => (BTN_RIGHT, 1),
         Action::Middle => (BTN_MIDDLE, 1),
         Action::Back => (BTN_SIDE, 1),
         Action::Forward => (BTN_EXTRA, 1),
-        Action::Hover => (BTN_LEFT, 0),
+        Action::Hover | Action::ScrollUp | Action::ScrollDown => (BTN_LEFT, 0),
     }
 }
 
@@ -87,12 +99,15 @@ pub struct Pointer {
     /// All monitors together: absolute motion is a fraction of this box.
     extent: Rect,
     held: Vec<u32>,
+    /// Wheel notches a scroll turns: `[pointer] scroll`.
+    notches: u16,
 }
 
 impl Pointer {
     /// A virtual pointer on the first seat. `outputs` is the bounding box
-    /// of every monitor, in global logical pixels.
-    pub fn new(conn: &Connection, outputs: Rect) -> Result<Self> {
+    /// of every monitor, in global logical pixels; a scroll turns the wheel
+    /// `notches` notches.
+    pub fn new(conn: &Connection, outputs: Rect, notches: u16) -> Result<Self> {
         let (globals, queue) = registry_queue_init::<Quiet>(conn)?;
         let qh = queue.handle();
         let seat: WlSeat = globals.bind(&qh, 1..=9, ())?;
@@ -106,24 +121,62 @@ impl Pointer {
             device,
             extent: outputs,
             held: Vec::new(),
+            notches,
         })
     }
 
     /// Moves to `at` and does `action` there. The cursor stays; put it back
-    /// with [`Pointer::put_back`], after letting go of any modifiers.
+    /// with [`Pointer::put_back`], after letting go of any modifiers. A
+    /// hold leaves its button down, for [`Pointer::drag`] to let go.
     pub fn act(&mut self, action: Action, at: Point) -> Result<()> {
         self.move_to(at)?;
         sleep(ARRIVE);
-        let (button, count) = presses(action);
-        for i in 0..count {
-            if i > 0 {
-                sleep(PRESS);
+        match action {
+            Action::ScrollUp => self.scroll(-1)?,
+            Action::ScrollDown => self.scroll(1)?,
+            Action::Hold => self.button(BTN_LEFT, true)?,
+            _ => {
+                let (button, count) = presses(action);
+                for i in 0..count {
+                    if i > 0 {
+                        sleep(PRESS);
+                    }
+                    self.button(button, true)?;
+                    sleep(PRESS);
+                    self.button(button, false)?;
+                }
             }
-            self.button(button, true)?;
-            sleep(PRESS);
+        }
+        self.handled()
+    }
+
+    /// Moves from `from` to `to` with the held button still down, in
+    /// steps, and lets go there: the end of a hold. From a point to
+    /// itself, it's a long press.
+    pub fn drag(&mut self, from: Point, to: Point) -> Result<()> {
+        for i in 1..=STEPS {
+            let along = |a: i32, b: i32| a + (b - a) * i / STEPS;
+            self.move_to(Point::new(along(from.x, to.x), along(from.y, to.y)))?;
+            sleep(STEP);
+        }
+        sleep(PRESS);
+        for button in self.held.clone() {
             self.button(button, false)?;
         }
         self.handled()
+    }
+
+    /// Turns the wheel down, or up for a `way` of -1, one frame a notch,
+    /// as a mouse wheel sends them.
+    fn scroll(&mut self, way: i32) -> Result<()> {
+        for _ in 0..self.notches {
+            self.device.axis_source(AxisSource::Wheel);
+            self.device
+                .axis_discrete(now(), Axis::VerticalScroll, NOTCH * f64::from(way), way);
+            self.device.frame();
+        }
+        self.conn.flush()?;
+        Ok(())
     }
 
     /// Moves the cursor to `to` after a pause, so the app sees the click

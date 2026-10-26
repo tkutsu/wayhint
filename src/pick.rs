@@ -38,8 +38,12 @@ pub enum Pick {
     /// bare `Space` reads the pointer as it's pressed; a nudged one keeps
     /// the pointer its dot was drawn from, so it lands on the dot.
     Here { act: Act, from: Point },
+    /// Do `act` where the last command was done (a verb typed twice).
+    Again { act: Act },
     /// Do the last command again, on its target.
     Repeat,
+    /// `Esc` while a hold keeps a button down: let go where it is.
+    Release,
     /// A match chosen in text mode (boxed: it carries its target).
     Text(Box<Chosen>),
     /// `Esc`, Ctrl+C, or the overlay went away: nothing chosen.
@@ -57,20 +61,38 @@ enum Refresh {
     Retag,
 }
 
+/// How a pick starts: with a verb armed (`--verb`), in text mode
+/// (`--text`), and whether a hold keeps a button down, so the next
+/// command lets go of it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Start {
+    pub verb: Option<Action>,
+    pub text: bool,
+    pub holding: bool,
+}
+
 /// What the screen holds while a pick runs: the targets, the monitor they
-/// are on, and the pointer, if known, for where a nudged `Space` lands.
+/// are on, the pointer, if known, for where a nudged `Space` lands, and
+/// whether a button is held.
 struct Scene<'a> {
     targets: &'a [Target],
     screen: Rect,
     pointer: Option<Point>,
+    holding: bool,
 }
 
 impl<'a> Scene<'a> {
-    const fn new(targets: &'a [Target], screen: Rect, pointer: Option<Point>) -> Self {
+    const fn new(
+        targets: &'a [Target],
+        screen: Rect,
+        pointer: Option<Point>,
+        holding: bool,
+    ) -> Self {
         Self {
             targets,
             screen,
             pointer,
+            holding,
         }
     }
 }
@@ -95,8 +117,9 @@ pub trait Source {
 }
 
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
-/// `verb` (from `--verb`) is armed as if its key were the first one typed.
-/// `cursor` reads where the pointer is. The overlay never sees the mouse
+/// `start.verb` (from `--verb`) is armed as if its key were the first one
+/// typed, and `start.text` (from `--text`) opens text mode before any tag
+/// shows. `cursor` reads where the pointer is. The overlay never sees the mouse
 /// move, so it's read again at every key: a dot shows where a nudged
 /// `Space` lands from the pointer as of the last key.
 ///
@@ -113,13 +136,17 @@ pub trait Source {
 /// in.
 ///
 /// The text key hands the keys to text mode (`search::search`), with the
-/// verb and arrows typed before it; leaving text mode brings the same tags
-/// back.
+/// verb and arrows typed before it; Backspace with nothing typed brings
+/// the same tags back.
+///
+/// While a hold keeps a button down (`start.holding`), whatever is picked
+/// is where it's let go, and `Esc` lets go where it is.
+#[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 pub fn pick(
     overlay: &mut Overlay,
     config: &Config,
     shown: &mut Snapshot,
-    verb: Option<Action>,
+    start: Start,
     cursor: &dyn Fn() -> Result<Point>,
     source: &mut dyn Source,
 ) -> Result<Pick> {
@@ -130,7 +157,7 @@ pub fn pick(
         config.alphabet.len(),
         config.verbs.default_action(),
     );
-    if let Some(action) = verb {
+    if let Some(action) = start.verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
     let (screen, mut pointer) = (overlay.monitor().rect, cursor().ok());
@@ -140,9 +167,16 @@ pub fn pick(
         frame(
             selector,
             config,
-            &Scene::new(&shown.targets, screen, pointer),
+            &Scene::new(&shown.targets, screen, pointer, start.holding),
         )
     };
+    if start.text {
+        // An empty frame opens the keys, with no tag to flash first.
+        overlay.show(&Frame::default())?;
+        if let Some(pick) = search::search(overlay, shown, &selector, source, &config.input)? {
+            return Ok(pick);
+        }
+    }
     overlay.show(&tags(&selector, shown, pointer))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
@@ -218,6 +252,7 @@ pub fn pick(
                 };
                 return Ok(Pick::Here { act, from });
             }
+            Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
             Step::Text => {
                 if let Some(pick) =
@@ -231,6 +266,7 @@ pub fn pick(
                 due = next();
             }
             Step::Ignored => {}
+            Step::Exit if start.holding => return Ok(Pick::Release),
             Step::Exit => return Ok(Pick::Leave),
         }
     }
@@ -319,6 +355,7 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
 /// already are. Its name also shows as a pill at the bottom of the screen,
 /// for a verb that has no key (`--verb`) and for `Space`, which uses no
 /// tag. The pill is drawn as one more tag: same look, no new drawing code.
+/// While a hold keeps a button down, the pill says `drop` instead.
 ///
 /// A tag sits at `[style] position` on its target's visible box, moved by
 /// `[style] offset`. The pill stays centred.
@@ -359,8 +396,14 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
             typed,
         })
         .collect();
-    if let Some(action) = selector.armed() {
-        tags.push(pill(scene.screen, action.name().into(), 0));
+    // A held button's drop beats a verb: whatever comes next lets go.
+    let status = if scene.holding {
+        Some("drop")
+    } else {
+        selector.armed().map(Action::name)
+    };
+    if let Some(status) = status {
+        tags.push(pill(scene.screen, status.into(), 0));
     }
     let nudge = selector.nudge();
     let dots = if nudge == Point::default() {
@@ -731,6 +774,7 @@ mod tests {
             targets: &[],
             screen: Rect::new(0, 0, 1920, 1080),
             pointer: Some(Point::new(x, 100)),
+            holding: false,
         };
         let dot = |x| Dot {
             from: Point::new(x, 100),
@@ -769,6 +813,7 @@ mod tests {
             targets: &targets,
             screen: Rect::new(0, 0, 1920, 1080),
             pointer: None,
+            holding: false,
         };
         let mut selector = Selector::new(3, 2, Action::Left);
         let froms = |selector: &Selector| -> Vec<i32> {

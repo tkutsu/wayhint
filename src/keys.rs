@@ -35,6 +35,8 @@ impl KeyCode {
     pub const RIGHT: Self = Self(106);
     pub const HOME: Self = Self(102);
     pub const END: Self = Self(107);
+    pub const PAGE_UP: Self = Self(104);
+    pub const PAGE_DOWN: Self = Self(109);
     // The keys a modifier click presses on the virtual keyboard. Which
     // modifiers the user holds comes from the compositor instead (see
     // `keyboard::held`): the keymap can put Ctrl on any key.
@@ -63,14 +65,17 @@ impl KeyCode {
 }
 
 /// The keys a config writes by name, in evdev codes. Names match in any
-/// case (`home`, `Home`); [`name_of`] gives them back as written here.
-const NAMED: [(&str, KeyCode); 14] = [
+/// case (`home`, `Home`); [`name_of`] gives them back as written first
+/// here, so `PgUp` reads as `PageUp`.
+const NAMED: [(&str, KeyCode); 16] = [
     ("Up", KeyCode::UP),
     ("Down", KeyCode::DOWN),
     ("Left", KeyCode::LEFT),
     ("Right", KeyCode::RIGHT),
-    ("PgUp", KeyCode(104)),
-    ("PgDn", KeyCode(109)),
+    ("PageUp", KeyCode::PAGE_UP),
+    ("PageDown", KeyCode::PAGE_DOWN),
+    ("PgUp", KeyCode::PAGE_UP),
+    ("PgDn", KeyCode::PAGE_DOWN),
     ("Home", KeyCode::HOME),
     ("End", KeyCode::END),
     ("Delete", KeyCode(111)),
@@ -279,7 +284,12 @@ mod tests {
     fn named_keys_match_in_any_case() {
         assert_eq!(named("pgup"), Some(KeyCode(104)));
         assert_eq!(named("HOME").and_then(name_of), Some("Home"));
-        assert_eq!(named("PageUp"), None);
+        assert_eq!(named("PageUp"), Some(KeyCode(104)));
+        assert_eq!(
+            named("pgdn").and_then(name_of),
+            Some("PageDown"),
+            "printed by the long name"
+        );
     }
 
     #[test]

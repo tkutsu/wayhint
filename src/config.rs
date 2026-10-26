@@ -28,6 +28,11 @@ use crate::{
     style::{Color, Input, Mark, Marks, Position, Style},
 };
 
+/// The default config, every setting explained and commented out:
+/// `wayhint config --default`, and `config.default.toml` in the repo. A
+/// test keeps it equal to the defaults.
+pub const DEFAULT: &str = include_str!("../config.default.toml");
+
 /// The file as written. `#[serde(default)]` lets every table and field be
 /// left out; `Default` says what "left out" means.
 #[derive(Debug, Default, Deserialize)]
@@ -47,7 +52,9 @@ struct File {
 struct FileText {
     /// Tesseract's languages for windows read from pixels, `""` for none.
     ocr: Option<String>,
-    style: FileMarks,
+    /// `[text.matches]`, once `[text.style]`, which a file may still say.
+    #[serde(alias = "style")]
+    matches: FileMarks,
     input: FileInput,
 }
 
@@ -77,12 +84,14 @@ impl FileText {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
+    placeholder: Option<String>,
     prefix: String,
     suffix: String,
     font: Option<String>,
     size: Option<f32>,
     text: Option<Color>,
-    matched: Option<Color>,
+    #[serde(alias = "matched")]
+    dimmed: Option<Color>,
     background: Option<Color>,
     border: Option<Color>,
     border_width: Option<f32>,
@@ -100,7 +109,7 @@ impl FileInput {
             font: self.font.unwrap_or(base.style.font),
             size: self.size.unwrap_or(base.style.size),
             text: self.text.unwrap_or(base.style.text),
-            matched: self.matched.unwrap_or(base.style.matched),
+            dimmed: self.dimmed.unwrap_or(base.style.dimmed),
             background: self.background.unwrap_or(base.style.background),
             border: self.border.unwrap_or(base.style.border),
             border_width: self.border_width.unwrap_or(base.style.border_width),
@@ -108,25 +117,28 @@ impl FileInput {
             padding: self.padding.unwrap_or(base.style.padding),
             position: self.position.unwrap_or(base.style.position),
             offset: self.offset.unwrap_or(base.style.offset),
+            leader: base.style.leader,
         };
         style.validate_table("text.input")?;
-        if [&self.prefix, &self.suffix]
+        let placeholder = self.placeholder.unwrap_or(base.placeholder);
+        if [&placeholder, &self.prefix, &self.suffix]
             .iter()
             .any(|s| s.chars().any(char::is_control))
         {
             bail!(
-                "[text.input] prefix and suffix must be single-line text without control characters"
+                "[text.input] placeholder, prefix and suffix must be single-line text without control characters"
             );
         }
         Ok(Input {
             prefix: self.prefix,
             suffix: self.suffix,
+            placeholder,
             style,
         })
     }
 }
 
-/// `[text.style]`, every match's mark, with `[text.style.current]` inside
+/// `[text.matches]`, every match's mark, with `[text.matches.current]` inside
 /// it for the selected match's. Unset fields take the defaults (see
 /// [`Mark::new`]); unset current ones come from every match's mark, in
 /// orange ([`Mark::for_current`]).
@@ -172,8 +184,8 @@ impl FileMarks {
             radius: c.radius.unwrap_or(orange.radius),
             padding: c.padding.unwrap_or(orange.padding),
         };
-        all.validate("text.style")?;
-        current.validate("text.style.current")?;
+        all.validate("text.matches")?;
+        current.validate("text.matches.current")?;
         Ok(Marks { all, current })
     }
 }
@@ -284,7 +296,7 @@ struct FileKeys {
     /// Other keys that count as an alphabet letter: `";" = "c"`.
     aliases: BTreeMap<String, String>,
     // One field per verb: a key as written (`"."`, `"Home"`), or `""` for
-    // the action a bare tag does. `Action::ALL` lists the same seven.
+    // the action a bare tag does. `Action::ALL` lists the same ten.
     left: Option<String>,
     right: Option<String>,
     middle: Option<String>,
@@ -292,6 +304,9 @@ struct FileKeys {
     hover: Option<String>,
     back: Option<String>,
     forward: Option<String>,
+    scroll_up: Option<String>,
+    scroll_down: Option<String>,
+    hold: Option<String>,
     /// Does the last action again, on the same target. No default key;
     /// `""` is the same as leaving it out.
     repeat: Option<String>,
@@ -313,6 +328,9 @@ impl FileKeys {
             Action::Hover => &self.hover,
             Action::Back => &self.back,
             Action::Forward => &self.forward,
+            Action::ScrollUp => &self.scroll_up,
+            Action::ScrollDown => &self.scroll_down,
+            Action::Hold => &self.hold,
         }
         .as_deref()
     }
@@ -324,10 +342,15 @@ struct FilePointer {
     after: After,
     /// Px per arrow press. `u16`, so serde itself refuses a negative.
     nudge: Option<u16>,
+    /// Wheel notches per scroll.
+    scroll: Option<u16>,
 }
 
 /// How far one arrow press moves a command, in px, unless the file says.
 const NUDGE: u16 = 10;
+/// How many wheel notches a scroll turns, unless the file says: about half
+/// a page in most apps.
+pub const SCROLL: u16 = 5;
 
 /// Where the cursor goes after a click: `[pointer] after`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,10 +365,11 @@ pub enum After {
 
 /// The verbs' default keys, as positions, so they sit in the same place on
 /// every layout, as the home row does. On US they print `r m t o b n`:
-/// right, middle, twice, over, back, next. Mnemonic letters on the home row
-/// (`d`, `h`, `f`) would clash with the default alphabet. Left has none: a
-/// bare tag left-clicks.
-const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
+/// right, middle, twice, over, back, next; then Page Up and Page Down for
+/// the wheel, and `,` for hold. Mnemonic letters on the home row (`d`,
+/// `h`, `f`) would clash with the default alphabet. Left has none: a bare
+/// tag left-clicks.
+const DEFAULT_VERBS: [(Action, Option<KeyCode>); 10] = [
     (Action::Left, None),
     (Action::Right, Some(KeyCode::from_evdev(19))),
     (Action::Middle, Some(KeyCode::from_evdev(50))),
@@ -353,6 +377,9 @@ const DEFAULT_VERBS: [(Action, Option<KeyCode>); 7] = [
     (Action::Hover, Some(KeyCode::from_evdev(24))),
     (Action::Back, Some(KeyCode::from_evdev(48))),
     (Action::Forward, Some(KeyCode::from_evdev(49))),
+    (Action::ScrollUp, Some(KeyCode::PAGE_UP)),
+    (Action::ScrollDown, Some(KeyCode::PAGE_DOWN)),
+    (Action::Hold, Some(KeyCode::from_evdev(51))),
 ];
 
 /// The text key's default, as a position, as the verbs' are: `/` on US.
@@ -382,7 +409,7 @@ pub struct Config {
     /// for `wayhint config`.
     pub layout: String,
     pub style: Style,
-    /// How text mode marks its matches: `[text.style]`.
+    /// How text mode marks its matches: `[text.matches]`.
     pub marks: Marks,
     /// Text mode's query display: `[text.input]`.
     pub input: Input,
@@ -392,6 +419,8 @@ pub struct Config {
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
+    /// Wheel notches one scroll turns: `[pointer] scroll`.
+    pub scroll: u16,
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
@@ -606,57 +635,74 @@ impl Verbs {
             .map(|v| v.2.as_str())
     }
 
-    /// Decodes the seven verb fields, fills in the defaults, checks them.
+    /// Decodes the verb, repeat and text fields, fills in the defaults,
+    /// checks them.
     ///
-    /// A default never takes a tag key: a verb the file doesn't bind gets
-    /// its default key only if that isn't one of `tag_keys`, the alphabet's
-    /// letters (yours, or the home row) and aliases. A verb key the file
-    /// does write takes its letter out of the alphabet instead.
+    /// The keys the file writes come first, and each must be free: not
+    /// built in, not another command's. A written key takes its letter out
+    /// of the alphabet. Then each command the file leaves out gets its
+    /// default key, unless that's one of `tag_keys` (the alphabet's letters,
+    /// yours or the home row, and aliases) or a key the file gave another
+    /// command: a default gives way, so `hover = "r"` leaves right without
+    /// its default `r` instead of failing.
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
+        let mut verbs = Self {
+            default: Action::Left,
+            keys: Vec::new(),
+            unbound: Vec::new(),
+            repeat: None,
+            text: None,
+            text_unbound: None,
+        };
         let mut defaults = Vec::new();
-        let mut unbound = Vec::new();
-        let mut keys: Vec<(Action, Key, String)> = Vec::new();
-        for (action, default) in DEFAULT_VERBS {
-            let field = action.name();
-            let (key, label) = match (file.verb(action), default) {
-                // `""`, written or by default: no key, a bare tag does it.
-                (Some(""), _) | (None, None) => {
-                    defaults.push(action);
-                    continue;
+        for (action, _) in DEFAULT_VERBS {
+            match file.verb(action) {
+                // `""`: no key, a bare tag does it.
+                Some("") => defaults.push(action),
+                Some(text) => {
+                    let (key, label) = verbs.written(action.name(), text, layout)?;
+                    verbs.keys.push((action, key, label));
                 }
-                (Some(text), _) => {
-                    let key =
-                        decode_key(text, layout).with_context(|| format!("[keys] {field}"))?;
-                    // A name is printed back as the table spells it: "home" is "Home".
-                    let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
-                    (key, label)
-                }
-                (None, Some(code)) => {
-                    // The character this position prints, which every
-                    // Latin layout has.
-                    let label = layout.char_at(code).with_context(|| {
-                        format!(
-                            "[keys] {field}: its default key types nothing on layout {}; give it a key",
-                            layout.name()
-                        )
-                    })?;
-                    if tag_keys.contains(&code) {
-                        unbound.push((action, label.into()));
-                        continue;
-                    }
-                    (Key { code, shift: false }, label.into())
-                }
-            };
-            if BUILT_IN.contains(&key.code) {
-                bail!("[keys] {field} = {label:?}: {BUILT_IN_NAMES} are built in");
+                None => {}
             }
-            if let Some(other) = keys.iter().find(|v| v.1 == key) {
-                bail!("[keys] {} and {field} are both {label:?}", other.0.name());
-            }
-            keys.push((action, key, label));
         }
+        if let Some(text) = file.repeat.as_deref().filter(|t| !t.is_empty()) {
+            verbs.repeat = Some(verbs.written("repeat", text, layout)?);
+        }
+        if let Some(text) = file.text.as_deref().filter(|t| !t.is_empty()) {
+            verbs.text = Some(verbs.written("text", text, layout)?);
+        }
+        for (action, default) in DEFAULT_VERBS {
+            if file.verb(action).is_some() {
+                continue;
+            }
+            // Left has no default key: a bare tag left-clicks, unless the
+            // file makes another verb the default.
+            let Some(code) = default else {
+                defaults.push(action);
+                continue;
+            };
+            let (key, label) = default_key(action.name(), code, layout)?;
+            if verbs.taken_by(code, tag_keys) {
+                verbs.unbound.push((action, label));
+            } else {
+                verbs.keys.push((action, key, label));
+            }
+        }
+        if file.text.is_none() {
+            let (key, label) = default_key("text", TEXT_KEY, layout)?;
+            if verbs.taken_by(TEXT_KEY, tag_keys) {
+                verbs.text_unbound = Some(label);
+            } else {
+                verbs.text = Some((key, label));
+            }
+        }
+        // In `Action::ALL`'s order, however they were bound, so the same
+        // keys compare equal and print the same.
+        verbs.keys.sort_by_key(|v| v.0);
+        verbs.unbound.sort_by_key(|v| v.0);
         // A slice pattern names the three cases: one default, none, several.
-        let default = match defaults.as_slice() {
+        verbs.default = match defaults.as_slice() {
             [one] => *one,
             [] => bail!("[keys]: no verb is the default; set one to \"\", as in left = \"\""),
             [a, b, ..] => bail!(
@@ -666,81 +712,36 @@ impl Verbs {
                 a.name()
             ),
         };
-        let repeat = match file.repeat.as_deref() {
-            None | Some("") => None,
-            Some(text) => {
-                let key = decode_key(text, layout).context("[keys] repeat")?;
-                if BUILT_IN.contains(&key.code) {
-                    bail!("[keys] repeat = {text:?}: {BUILT_IN_NAMES} are built in");
-                }
-                if let Some(other) = keys.iter().find(|v| v.1 == key) {
-                    bail!("[keys] {} and repeat are both {text:?}", other.0.name());
-                }
-                let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
-                Some((key, label))
-            }
-        };
-        let mut verbs = Self {
-            default,
-            keys,
-            unbound,
-            repeat,
-            text: None,
-            text_unbound: None,
-        };
-        verbs.resolve_text(file.text.as_deref(), layout, tag_keys)?;
         Ok(verbs)
     }
 
-    /// The text key: as written, else its default position, unless that's
-    /// a tag key or any command's. A default that came after the other
-    /// commands mustn't break a file that bound its key to one of them.
-    fn resolve_text(
-        &mut self,
-        written: Option<&str>,
-        layout: &Layout,
-        tag_keys: &[KeyCode],
-    ) -> Result<()> {
-        let key = match written {
-            Some("") => return Ok(()),
-            Some(text) => {
-                let key = decode_key(text, layout).context("[keys] text")?;
-                let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
-                (key, label)
-            }
-            None => {
-                let label = layout.char_at(TEXT_KEY).with_context(|| {
-                    format!(
-                        "[keys] text: its default key types nothing on layout {}; give it a key",
-                        layout.name()
-                    )
-                })?;
-                let commands = self.taken();
-                if tag_keys.contains(&TEXT_KEY) || commands.iter().any(|t| t.0 == TEXT_KEY) {
-                    self.text_unbound = Some(label.into());
-                    return Ok(());
-                }
-                (
-                    Key {
-                        code: TEXT_KEY,
-                        shift: false,
-                    },
-                    label.into(),
-                )
-            }
-        };
-        let label = &key.1;
-        if BUILT_IN.contains(&key.0.code) {
-            bail!("[keys] text = {label:?}: {BUILT_IN_NAMES} are built in");
+    /// The key the file writes for `command`, and how it's printed, if no
+    /// command bound so far has it. Shift is part of the key: `-` and `_`
+    /// can be two commands.
+    fn written(&self, command: &str, text: &str, layout: &Layout) -> Result<(Key, String)> {
+        let key = decode_key(text, layout).with_context(|| format!("[keys] {command}"))?;
+        // A name is printed back as the table spells it: "home" is "Home".
+        let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
+        if BUILT_IN.contains(&key.code) {
+            bail!("[keys] {command} = {label:?}: {BUILT_IN_NAMES} are built in");
         }
-        if let Some(other) = self.keys.iter().find(|v| v.1 == key.0) {
-            bail!("[keys] {} and text are both {label:?}", other.0.name());
+        let clash = self
+            .keys
+            .iter()
+            .find(|v| v.1 == key)
+            .map(|v| v.0.name())
+            .or_else(|| self.is_repeat(key).then_some("repeat"))
+            .or_else(|| self.is_text(key).then_some("text"));
+        if let Some(other) = clash {
+            bail!("[keys] {other} and {command} are both {label:?}");
         }
-        if self.is_repeat(key.0) {
-            bail!("[keys] repeat and text are both {label:?}");
-        }
-        self.text = Some(key);
-        Ok(())
+        Ok((key, label))
+    }
+
+    /// Whether a default key at `code` must give way: it's a tag key, or a
+    /// command already has it.
+    fn taken_by(&self, code: KeyCode, tag_keys: &[KeyCode]) -> bool {
+        tag_keys.contains(&code) || self.taken().iter().any(|t| t.0 == code)
     }
 
     /// The text key's line in `[keys]`, for `wayhint config`.
@@ -751,7 +752,7 @@ impl Verbs {
                 quote(label)
             ),
             (None, Some(label)) => format!(
-                "# text has no key: its default, {label:?}, is one of your tag letters or commands\n"
+                "# text has no key: its default, {label:?}, is one of your tag letters or another command's key\n"
             ),
             (None, None) => "text = \"\"   # no text mode\n".into(),
         }
@@ -790,6 +791,22 @@ fn decode_key(text: &str, layout: &Layout) -> Result<Key> {
         )
     })?;
     Ok(Key { code, shift: false })
+}
+
+/// `command`'s default key, at `code`, and how it's printed: a named key by
+/// its name (`PageUp`), else the character this layout types there, which
+/// every Latin layout has.
+fn default_key(command: &str, code: KeyCode, layout: &Layout) -> Result<(Key, String)> {
+    let label = keys::name_of(code)
+        .map(String::from)
+        .or_else(|| layout.char_at(code).map(String::from))
+        .with_context(|| {
+            format!(
+                "[keys] {command}: its default key types nothing on layout {}; give it a key",
+                layout.name()
+            )
+        })?;
+    Ok((Key { code, shift: false }, label))
 }
 
 /// A config key string that must be exactly one character.
@@ -852,13 +869,17 @@ impl Config {
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
-        let marks = file.text.style.resolve(&file.style)?;
+        let marks = file.text.matches.resolve(&file.style)?;
         let ocr = file.text.ocr()?;
         let input = file.text.input.resolve(&file.style)?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
             bail!("[pointer] nudge = 0: an arrow press must move at least 1 px");
+        }
+        let scroll = file.pointer.scroll.unwrap_or(SCROLL);
+        if !(1..=50).contains(&scroll) {
+            bail!("[pointer] scroll = {scroll}: give 1-50 wheel notches");
         }
         Ok(Self {
             alphabet,
@@ -870,6 +891,7 @@ impl Config {
             ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
+            scroll,
             pixels: match file.pixels.detector {
                 Pixels::Full => Some(Detector::Full),
                 Pixels::Fast => Some(Detector::Fast),
@@ -895,59 +917,8 @@ impl Config {
     /// The config in effect, as a TOML file you could save: `wayhint config`.
     pub fn render(&self) -> String {
         let mut out =
-            String::from("# wayhint config in effect: defaults merged with your file\n\n[keys]\n");
-        let _ = writeln!(
-            out,
-            "alphabet = {}   # priority order: earlier letters are used more",
-            quote(&self.alphabet.written)
-        );
-        // A comment, not a setting: the layout is your keyboard's own.
-        let _ = writeln!(
-            out,
-            "# keys are read with your keyboard's first layout, {}",
-            self.layout
-        );
-        if !self.alphabet.dropped.is_empty() {
-            let dropped: Vec<String> = self
-                .alphabet
-                .dropped
-                .iter()
-                .map(|(label, command)| format!("{label} ({command})"))
-                .collect();
-            let _ = writeln!(out, "# left out of the alphabet: {}", dropped.join(", "));
-        }
-        for action in Action::ALL {
-            let name = action.name();
-            if action == self.verbs.default {
-                let _ = writeln!(out, "{name} = \"\"   # a bare tag does this");
-            } else if let Some(label) = self.verbs.label(action) {
-                let _ = writeln!(out, "{name} = {}", quote(label));
-            } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
-                let _ = writeln!(
-                    out,
-                    "# {name} has no key: its default, {label:?}, is one of your tag letters"
-                );
-            }
-        }
-        match &self.verbs.repeat {
-            Some((_, label)) => {
-                let _ = writeln!(out, "repeat = {}", quote(label));
-            }
-            None => out.push_str("# repeat has no key: give it one to do the last action again\n"),
-        }
-        out.push_str(&self.verbs.render_text());
-        if !self.alphabet.aliases.is_empty() {
-            out.push_str("\n[keys.aliases]\n");
-            for alias in &self.alphabet.aliases {
-                let letter = self.alphabet.letters[alias.letter].label.to_string();
-                let _ = writeln!(
-                    out,
-                    "{} = {}",
-                    quote(&alias.label.to_string()),
-                    quote(&letter)
-                );
-            }
-        }
+            String::from("# wayhint config in effect: defaults merged with your file\n\n");
+        out.push_str(&self.render_keys());
         out.push('\n');
         out.push_str(&self.style.render());
         out.push_str(&self.render_text());
@@ -965,6 +936,11 @@ impl Config {
             out,
             "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click; held, it goes on, faster\n",
             self.nudge
+        );
+        let _ = writeln!(
+            out,
+            "scroll = {}   # wheel notches one scroll_up or scroll_down turns",
+            self.scroll
         );
         let detector = match self.pixels {
             Some(Detector::Full) => "full",
@@ -994,6 +970,69 @@ impl Config {
             "merge_distance = {}   # logical px between nearby hint centers; 0 keeps every hint",
             self.merge_distance
         );
+        out
+    }
+
+    /// `[keys]`, and `[keys.aliases]` if there are any, for `render`.
+    fn render_keys(&self) -> String {
+        let mut out = String::from("[keys]\n");
+        let _ = writeln!(
+            out,
+            "alphabet = {}   # priority order: earlier letters are used more",
+            quote(&self.alphabet.written)
+        );
+        // A comment, not a setting: the layout is your keyboard's own.
+        let _ = writeln!(
+            out,
+            "# keys are read with your keyboard's first layout, {}",
+            self.layout
+        );
+        if !self.alphabet.dropped.is_empty() {
+            let dropped: Vec<String> = self
+                .alphabet
+                .dropped
+                .iter()
+                .map(|(label, command)| format!("{label} ({command})"))
+                .collect();
+            let _ = writeln!(out, "# left out of the alphabet: {}", dropped.join(", "));
+        }
+        out.push_str(
+            "# The verbs: type one before a tag's last letter, or before Space for\n\
+             # the pointer, or twice for where the last command was. \"\" makes a\n\
+             # verb what a bare tag does.\n",
+        );
+        for action in Action::ALL {
+            let (name, about) = (action.name(), action.about());
+            if action == self.verbs.default {
+                let _ = writeln!(out, "{name} = \"\"   # {about}: a bare tag does this");
+            } else if let Some(label) = self.verbs.label(action) {
+                let _ = writeln!(out, "{name} = {}   # {about}", quote(label));
+            } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
+                let _ = writeln!(
+                    out,
+                    "# {name} has no key: its default, {label:?}, is one of your tag letters or another command's key"
+                );
+            }
+        }
+        let repeat = self.verbs.repeat.as_ref().map_or("", |(_, label)| label);
+        let _ = writeln!(
+            out,
+            "repeat = {}   # the last command again, on the same target; \"\" for none",
+            quote(repeat)
+        );
+        out.push_str(&self.verbs.render_text());
+        if !self.alphabet.aliases.is_empty() {
+            out.push_str("\n[keys.aliases]\n");
+            for alias in &self.alphabet.aliases {
+                let letter = self.alphabet.letters[alias.letter].label.to_string();
+                let _ = writeln!(
+                    out,
+                    "{} = {}",
+                    quote(&alias.label.to_string()),
+                    quote(&letter)
+                );
+            }
+        }
         out
     }
 }
@@ -1143,7 +1182,7 @@ mod tests {
         assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
         assert!(err("[keys]\nhover = \"esc\"").contains("built in"));
         assert!(err("[keys]\nright = \"x\"\nmiddle = \"x\"").contains("both"));
-        assert!(err("[keys]\nback = \"PageUp\"").contains("the names are Up, Down"));
+        assert!(err("[keys]\nback = \"PageUpp\"").contains("the names are Up, Down"));
         assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));
         assert!(
             err("[keys]\nalphabet = \"ab\"\nhover = \"a\"")
@@ -1354,9 +1393,11 @@ mod tests {
         let again = Config::parse(&set.render(), &us()).unwrap();
         assert_eq!(again.marks, set.marks);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[text.style.current]\nradius = -1").contains("[text.style.current] radius"));
-        assert!(err("[text.style]\nopacity = 0.5").contains("unknown field"));
-        assert!(err("[text.style]\nborder = \"red\"").contains("isn't a colour"));
+        assert!(
+            err("[text.matches.current]\nradius = -1").contains("[text.matches.current] radius")
+        );
+        assert!(err("[text.matches]\nopacity = 0.5").contains("unknown field"));
+        assert!(err("[text.matches]\nborder = \"red\"").contains("isn't a colour"));
     }
 
     #[test]
@@ -1378,7 +1419,7 @@ mod tests {
             r##"
 [style]
 size = 11
-[text.style.current]
+[text.matches.current]
 background = "#10203040"
 border = "#50607080"
 border_width = 2
@@ -1500,5 +1541,149 @@ offset = [-13, 17]
     #[test]
     fn missing_explicit_file_is_an_error() {
         assert!(Config::load(Some(Path::new("/nonexistent/wayhint.toml")), &us()).is_err());
+    }
+
+    /// The settings in `text`, commented out or not, as TOML: `# size = 13`
+    /// reads as `size = 13`. Prose and examples (`# ";" = "c"`) stay
+    /// comments: only a lower-case name before `=` is a setting.
+    fn settings(text: &str) -> toml::Table {
+        let is_name = |key: &str| {
+            let key = key.trim();
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        };
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|line| {
+                line.strip_prefix("# ")
+                    .filter(|rest| rest.split_once('=').is_some_and(|(key, _)| is_name(key)))
+                    .unwrap_or(line)
+            })
+            .collect();
+        toml::from_str(&lines.join("\n")).unwrap()
+    }
+
+    #[test]
+    fn the_default_file_shows_every_setting_at_its_default() {
+        let defaults = Config::parse("", &us()).unwrap();
+        assert_eq!(
+            settings(DEFAULT),
+            settings(&defaults.render()),
+            "config.default.toml lists every setting `wayhint config` prints, at its default"
+        );
+        let uncommented = toml::to_string(&settings(DEFAULT)).unwrap();
+        let written = Config::parse(&uncommented, &us()).unwrap();
+        assert_eq!(
+            settings(&written.render()),
+            settings(&defaults.render()),
+            "uncommented, the same values"
+        );
+        let copied = Config::parse(DEFAULT, &us()).unwrap();
+        assert_eq!(copied.render(), defaults.render(), "copied as it is, too");
+    }
+
+    #[test]
+    fn the_new_verbs_default_to_page_keys_and_comma() {
+        let config = Config::parse("", &us()).unwrap();
+        let verbs = &config.verbs;
+        assert_eq!(
+            verbs.action_of(key(104, false)),
+            Some(Action::ScrollUp),
+            "PageUp"
+        );
+        assert_eq!(verbs.action_of(key(109, false)), Some(Action::ScrollDown));
+        assert_eq!(verbs.action_of(key(51, false)), Some(Action::Hold), ",");
+        assert_eq!(config.scroll, 5);
+        let mine = Config::parse(
+            "[keys]\nscroll_up = \"PgUp\"\nscroll_down = \"pagedown\"\nhold = \"_\"\n[pointer]\nscroll = 3",
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(mine.verbs.label(Action::ScrollUp), Some("PageUp"));
+        assert_eq!(mine.verbs.action_of(key(12, true)), Some(Action::Hold));
+        assert_eq!(mine.scroll, 3);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[pointer]\nscroll = 0").contains("1-50"));
+        assert!(err("[pointer]\nscroll = 51").contains("1-50"));
+    }
+
+    #[test]
+    fn a_default_key_gives_way_to_a_key_the_file_writes() {
+        // Right's default is `r`, middle's `m`. Before 2026-10-26 a written
+        // `hover = "r"` failed: "right and hover are both r".
+        let config = Config::parse("[keys]\nhover = \"r\"\nback = \"m\"", &us()).unwrap();
+        assert_eq!(config.verbs.action_of(key(19, false)), Some(Action::Hover));
+        assert_eq!(config.verbs.label(Action::Right), None);
+        assert_eq!(config.verbs.label(Action::Middle), None);
+        let rendered = config.render();
+        assert!(
+            rendered.contains("# right has no key: its default, \"r\", is one of your tag letters or another command's key"),
+            "{rendered}"
+        );
+        let again = Config::parse(&rendered, &us()).unwrap();
+        assert_eq!(again.verbs, config.verbs);
+        let text = Config::parse("[keys]\nrepeat = \"/\"", &us()).unwrap();
+        assert_eq!(text.verbs.text, None, "text's default gives way to repeat");
+    }
+
+    #[test]
+    fn old_names_still_load() {
+        let config = Config::parse(
+            "[style]\nmatched = \"#11223344\"\n[text.style]\nbackground = \"#55667788\"\n\
+             [text.input]\nmatched = \"#99aabbcc\"",
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(config.style.dimmed, Color::rgba(0x11, 0x22, 0x33, 0x44));
+        assert_eq!(
+            config.marks.all.background,
+            Color::rgba(0x55, 0x66, 0x77, 0x88)
+        );
+        assert_eq!(
+            config.input.style.dimmed,
+            Color::rgba(0x99, 0xaa, 0xbb, 0xcc)
+        );
+        let rendered = config.render();
+        assert!(rendered.contains("dimmed = \"#11223344\""));
+        assert!(rendered.contains("[text.matches]") && !rendered.contains("[text.style]"));
+    }
+
+    #[test]
+    fn the_leader_follows_the_tags_unless_set() {
+        let config = Config::parse("[style]\ntext = \"#123456\"", &us()).unwrap();
+        let leader = config.style.leader;
+        let (line, dot, outline) = leader.colors(&config.style);
+        assert_eq!((line, dot), (config.style.text, config.style.text));
+        assert_eq!(outline, config.style.background);
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.style, config.style, "unset stays unset");
+        let set = Config::parse(
+            "[style.leader]\nline = \"#ff0000\"\ndot = \"#00ff00\"\noutline_width = 0\nwidth = 2",
+            &us(),
+        )
+        .unwrap();
+        let (line, dot, _) = set.style.leader.colors(&set.style);
+        assert_eq!(line, Color::rgba(0xff, 0, 0, 0xff));
+        assert_eq!(dot, Color::rgba(0, 0xff, 0, 0xff));
+        assert_eq!(
+            Config::parse(&set.render(), &us()).unwrap().style,
+            set.style
+        );
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[style.leader]\nwidth = -1").contains("[style.leader] width"));
+        assert!(err("[style.leader]\ncolour = \"#ffffff\"").contains("unknown field"));
+    }
+
+    #[test]
+    fn the_placeholder_is_text_unless_set() {
+        assert_eq!(Config::parse("", &us()).unwrap().input.placeholder, "text");
+        let config = Config::parse("[text.input]\nplaceholder = \"find…\"", &us()).unwrap();
+        assert_eq!(config.input.placeholder, "find…");
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.input, config.input);
+        let err = format!(
+            "{:#}",
+            Config::parse("[text.input]\nplaceholder = \"a\\nb\"", &us()).unwrap_err()
+        );
+        assert!(err.contains("single-line"), "{err}");
     }
 }

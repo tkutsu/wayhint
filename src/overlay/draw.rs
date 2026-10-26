@@ -25,12 +25,6 @@ use crate::{
 
 /// Gap kept between a tag and the monitor's edge, in px.
 const EDGE: f32 = 2.0;
-/// A dot's radius, and the width of the ring around it, in px.
-const DOT: f32 = 3.0;
-const RING: f32 = 2.0;
-/// The width of the line from a tag to its dot, in px. Its ring adds
-/// `RING` px in all, half on each side.
-const LINE: f32 = 1.0;
 
 /// Everything one picture shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,7 +43,7 @@ pub struct Frame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Highlight {
     pub rect: BoxRect,
-    /// Part of the current match, drawn in `[text.style.current]`.
+    /// Part of the current match, drawn in `[text.matches.current]`.
     pub current: bool,
 }
 
@@ -221,19 +215,32 @@ impl Painter {
         }
     }
 
-    /// The line from where a command was nudged from to where it lands, in
-    /// the dot's two colours, so it shows on light and dark windows alike.
+    /// The line from a tag to where it clicks, inside its outline, so it
+    /// shows on light and dark windows alike: `[style.leader]`, by default
+    /// the tags' letters on their background.
     fn paint_line(&self, pixmap: &mut Pixmap, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) {
+        let style = &self.tags.style;
+        let leader = &style.leader;
+        let (line, _, outline) = leader.colors(style);
         let mut path = PathBuilder::new();
         path.move_to(x0, y0);
         path.line_to(x1, y1);
         let Some(path) = path.finish() else {
             return;
         };
-        for (width, color) in [
-            (LINE + RING, self.tags.style.background),
-            (LINE, self.tags.style.text),
+        // tiny-skia draws a 0 px stroke a pixel wide, so a part set to 0
+        // is left out, not stroked.
+        for (width, color, shown) in [
+            (
+                leader.width + leader.outline_width,
+                outline,
+                leader.outline_width > 0.0,
+            ),
+            (leader.width, line, leader.width > 0.0),
         ] {
+            if !shown {
+                continue;
+            }
             let stroke = Stroke {
                 width,
                 ..Stroke::default()
@@ -242,14 +249,15 @@ impl Painter {
         }
     }
 
-    /// A dot in the letters' colour inside a ring in the tags' background:
-    /// the pair a tag is already legible in, so the dot shows on light and
-    /// dark windows alike.
+    /// The dot where a tag clicks, inside its outline: `[style.leader]`.
     fn paint_dot(&self, pixmap: &mut Pixmap, at: Point) {
+        let style = &self.tags.style;
+        let leader = &style.leader;
+        let (_, dot, outline) = leader.colors(style);
         let (x, y) = centre(at);
         for (radius, color) in [
-            (DOT + RING, self.tags.style.background),
-            (DOT, self.tags.style.text),
+            (leader.radius + leader.outline_width, outline),
+            (leader.radius, dot),
         ] {
             if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
                 pixmap.fill_path(
@@ -376,7 +384,7 @@ impl TextPainter {
     /// A letter in the text or typed colour, rasterized on first use.
     fn glyph(&mut self, letter: char, typed: bool) -> &Glyph {
         let color = if typed {
-            self.style.matched
+            self.style.dimmed
         } else {
             self.style.text
         };
@@ -563,17 +571,17 @@ mod tests {
 [style]
 size = 8
 text = "#ff0000"
-[text.style]
+[text.matches]
 background = "#0000ff"
 padding = [0, 0]
 radius = 0
-[text.style.current]
+[text.matches.current]
 background = "#ff00ff"
 [text.input]
 font = "serif"
 size = 28
 text = "#00ff00"
-matched = "#00ffff"
+dimmed = "#00ffff"
 background = "#111111"
 border = "#ffff00"
 border_width = 2
