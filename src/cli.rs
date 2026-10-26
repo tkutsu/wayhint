@@ -11,7 +11,8 @@ use crate::{action::Action, geometry::Point, pixels::Detector};
 /// Keyboard hints for everything clickable on a Wayland desktop.
 ///
 /// With no command: tag the controls of every window on the focused
-/// monitor, click the one whose tag you type, and keep going until Esc.
+/// monitor, click the one whose tag you type, and keep going until the
+/// configured close key (Esc by default).
 #[derive(Debug, Parser)]
 #[command(version, about, long_about)]
 pub struct Cli {

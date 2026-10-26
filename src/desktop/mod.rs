@@ -111,7 +111,7 @@ pub struct Desktop {
 enum Seen {
     Tree(tree::Tree, filter::Filtered, Stats),
     /// With its picture, shrunk, and the picture's pixels per logical
-    /// pixel: `layout` reads the same one. A fixed terminal hint has no picture.
+    /// pixel: `layout` reads the same one. A terminal cursor needs no picture.
     Pixels(Window, Found, Option<(Frame, f64)>, Stats),
     Untagged(Window),
 }
@@ -262,14 +262,18 @@ impl Desktop {
         let readable: Vec<&Window> = stack
             .windows
             .iter()
-            .filter(|w| w.kind == Kind::Client || !w.frames.is_empty())
+            .filter(|w| {
+                w.kind == Kind::Client
+                    || !w.frames.is_empty()
+                    || (is_terminal(w, terminals) && is_kitty(w))
+            })
             .collect();
         // `join_all` runs the scans side by side on the one thread: each
         // waits on its own app, so three windows take as long as the
         // slowest, not the sum.
         let reads = readable.iter().map(|w| async {
             if is_terminal(w, terminals) {
-                bail!("{}: terminal focus is read from pixels", w.class);
+                bail!("{}: terminal focus is read separately", w.class);
             }
             self.read(w).await
         });
@@ -286,21 +290,16 @@ impl Desktop {
             })
             .collect();
         for (window, read) in readable.into_iter().zip(reads) {
-            let terminal = is_terminal(window, terminals);
-            if terminal && !terminal_hint {
+            if is_terminal(window, terminals) {
+                if terminal_hint {
+                    match read_terminal(&mut self.camera, window, pixels) {
+                        Ok(terminal) => seen.push(terminal),
+                        Err(e) => failed.push(Unread::new(window, e)),
+                    }
+                }
                 continue;
             }
-            if terminal && pixels.is_none() && window.kind == Kind::Client {
-                let patch = pixels::terminal_patch(window.rect.w, window.rect.h);
-                let found = Found {
-                    bodies: vec![[patch.x, patch.y, patch.right(), patch.bottom()]],
-                    ..Found::default()
-                };
-                seen.push(Seen::Pixels(window.clone(), found, None, Stats::default()));
-                continue;
-            }
-            let detector = hint_detector(pixels, terminal_hint, terminal)
-                .filter(|_| window.kind == Kind::Client);
+            let detector = pixels.filter(|_| window.kind == Kind::Client);
             match (read, detector) {
                 (Ok((tree, stats)), _) => {
                     let filtered = filter::filter(&tree);
@@ -308,7 +307,7 @@ impl Desktop {
                 }
                 (Err(e), None) => failed.push(Unread::new(window, e)),
                 (Err(no_tree), Some(detector)) => {
-                    match look(&mut self.camera, window, detector, terminals) {
+                    match look(&mut self.camera, window, detector, false) {
                         Ok((found, picture, stats)) => {
                             seen.push(Seen::Pixels(window.clone(), found, Some(picture), stats));
                         }
@@ -369,7 +368,7 @@ impl Desktop {
     /// The same picture puts each document body's tag in its clearest spot
     /// that no surface in `stack` may cover. A client in `pictures` (by
     /// address, shrunk, with its scale) was taken this scan already;
-    /// `None` skips capture for a fixed terminal hint.
+    /// `None` skips capture for a terminal cursor or fixed fallback hint.
     pub fn layout(
         &mut self,
         snapshot: &mut Snapshot,
@@ -922,30 +921,67 @@ fn is_terminal(window: &Window, terminals: &[String]) -> bool {
     })
 }
 
-/// Terminal focus needs only a clear patch; general pixel tags use the detector setting.
-fn hint_detector(
+/// One focus target on Kitty's active cursor cell, without capturing pixels.
+fn terminal_cursor(window: &Window) -> Result<(Found, Stats)> {
+    let start = Instant::now();
+    let cell = kitty::cursor(window, KITTY_TIMEOUT)?
+        .intersect(Rect::new(0, 0, window.rect.w, window.rect.h))
+        .context("kitty's cursor is outside its window")?;
+    Ok((
+        Found {
+            bodies: vec![[cell.x, cell.y, cell.right(), cell.bottom()]],
+            ..Found::default()
+        },
+        Stats {
+            ms: start.elapsed().as_secs_f64() * 1000.0,
+            ..Stats::default()
+        },
+    ))
+}
+
+/// Kitty supplies its cursor; other terminals keep their pixel or fixed fallback.
+fn read_terminal(
+    camera: &mut Option<Camera>,
+    window: &Window,
     pixels: Option<Detector>,
-    terminal_hint: bool,
-    terminal: bool,
-) -> Option<Detector> {
-    if terminal {
-        terminal_hint.then_some(pixels.unwrap_or_default())
+) -> Result<Seen> {
+    let (found, picture, stats) = if is_kitty(window) {
+        let (found, stats) = terminal_cursor(window)?;
+        (found, None, stats)
     } else {
-        pixels
-    }
+        ensure!(
+            window.kind == Kind::Client,
+            "only Kitty supplies a layer's terminal cursor"
+        );
+        if let Some(detector) = pixels {
+            let (found, picture, stats) = look(camera, window, detector, true)?;
+            (found, Some(picture), stats)
+        } else {
+            let patch = pixels::terminal_patch(window.rect.w, window.rect.h);
+            (
+                Found {
+                    bodies: vec![[patch.x, patch.y, patch.right(), patch.bottom()]],
+                    ..Found::default()
+                },
+                None,
+                Stats::default(),
+            )
+        }
+    };
+    Ok(Seen::Pixels(window.clone(), found, picture, stats))
 }
 
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
 pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) -> Result<Snapshot> {
-    let (found, (_, scale), stats) = look(&mut None, window, detector, terminals)?;
-    let read = Read::Pixels {
-        window,
-        found: &found,
-        scale,
-        stats: &stats,
+    let terminal = is_terminal(window, terminals);
+    let seen = if terminal {
+        read_terminal(&mut None, window, Some(detector))?
+    } else {
+        let (found, picture, stats) = look(&mut None, window, detector, false)?;
+        Seen::Pixels(window.clone(), found, Some(picture), stats)
     };
-    let mut snapshot = Snapshot::build(1, window.monitor, [read]);
-    if is_terminal(window, terminals) {
+    let mut snapshot = Snapshot::build(1, window.monitor, [seen.read()]);
+    if terminal {
         for target in &mut snapshot.targets {
             target.role = "terminal".into();
         }
@@ -960,7 +996,7 @@ fn look(
     camera: &mut Option<Camera>,
     window: &Window,
     detector: Detector,
-    terminals: &[String],
+    terminal: bool,
 ) -> Result<(Found, (Frame, f64), Stats)> {
     let start = Instant::now();
     let until = start + CAPTURE_TIMEOUT;
@@ -970,7 +1006,6 @@ fn look(
     };
     let picture = camera.shoot(&window.address, until)?;
     let (frame, scale) = pixels::shrink(picture, window.rect.w);
-    let terminal = is_terminal(window, terminals);
     let found = pixels::find(&frame, detector, terminal);
     let stats = Stats {
         ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -1023,19 +1058,21 @@ mod tests {
     }
 
     #[test]
-    fn terminal_hint_routing_is_independent_of_general_pixel_tags() {
-        for pixels in [None, Some(Detector::Fast), Some(Detector::Full)] {
-            assert!(hint_detector(pixels, true, true).is_some());
-            assert_eq!(hint_detector(pixels, false, true), None);
-            for terminal_hint in [true, false] {
-                assert_eq!(hint_detector(pixels, terminal_hint, false), pixels);
-            }
-        }
+    fn other_terminals_keep_the_fixed_fallback_without_pixels() {
+        let mut window = window("test", Rect::new(100, 50, 800, 600));
+        window.class = "foot".into();
+        let mut camera = None;
+        let seen = read_terminal(&mut camera, &window, None).unwrap();
+        let snapshot = Snapshot::build(1, 0, [seen.read()]);
+        assert!(camera.is_none());
+        assert_eq!(snapshot.targets.len(), 1);
+        assert_eq!(snapshot.targets[0].rect, Rect::new(854, 616, 36, 24));
+        assert!(snapshot.targets[0].editable);
     }
 
     #[test]
     #[ignore = "requires a live desktop and WAYHINT_TEST_KITTY_ADDRESS"]
-    fn live_terminal_hint_works_with_general_pixels_off() {
+    fn live_terminal_hint_tracks_kitty_cursor_in_every_pixel_mode() {
         let address = std::env::var("WAYHINT_TEST_KITTY_ADDRESS").unwrap();
         let window = window_by_address(&address).unwrap().unwrap();
         assert!(is_kitty(&window));
@@ -1046,40 +1083,48 @@ mod tests {
             .unwrap();
         let stack = stack(vec![window]);
         let mut desktop = Desktop::connect().unwrap();
-        for enabled in [true, false] {
-            let (snapshot, unread) =
-                desktop.scan(&stack, &monitor, None, enabled, &["kitty".into()]);
-            assert!(
-                unread.is_empty(),
-                "{:?}",
-                unread
-                    .iter()
-                    .map(|u| u.error.to_string())
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(snapshot.targets.len(), usize::from(enabled));
-            assert!(snapshot.windows.iter().any(|s| is_kitty(&s.window)));
-            assert!(desktop.camera.is_none(), "pixel-off hints must not capture");
-            if enabled {
-                let target = &snapshot.targets[0];
-                let window = &snapshot.windows[target.window].window;
-                assert_eq!(window.rect.right() - target.rect.right(), 10);
-                assert_eq!(window.rect.bottom() - target.rect.bottom(), 10);
-                assert!(target.editable && target.opens.is_empty());
+        for pixels in [None, Some(Detector::Fast), Some(Detector::Full)] {
+            for enabled in [true, false] {
+                let (snapshot, unread) =
+                    desktop.scan(&stack, &monitor, pixels, enabled, &["kitty".into()]);
+                assert!(
+                    unread.is_empty(),
+                    "{:?}",
+                    unread
+                        .iter()
+                        .map(|u| u.error.to_string())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(snapshot.targets.len(), usize::from(enabled));
+                assert!(snapshot.windows.iter().any(|s| is_kitty(&s.window)));
+                assert!(desktop.camera.is_none(), "cursor hints must not capture");
+                if enabled {
+                    let target = &snapshot.targets[0];
+                    let window = &snapshot.windows[target.window].window;
+                    let cell = kitty::cursor(window, KITTY_TIMEOUT)
+                        .unwrap()
+                        .offset(window.rect.origin());
+                    assert_eq!(target.rect, cell);
+                    assert_eq!(target.hit, cell.center());
+                    assert_eq!(target.role, "terminal");
+                    assert!(target.editable && target.opens.is_empty());
+                }
             }
         }
-        for detector in [Detector::Fast, Detector::Full] {
-            let (snapshot, unread) =
-                desktop.scan(&stack, &monitor, Some(detector), true, &["kitty".into()]);
-            assert!(unread.is_empty());
-            assert!(
-                desktop.camera.is_some(),
-                "pixel-on hints must check a screenshot"
-            );
-            assert_eq!(snapshot.targets.len(), 1);
-            assert_eq!(snapshot.targets[0].role, "terminal");
-            assert!(snapshot.targets[0].editable);
-        }
+        let window = &stack.windows[0];
+        assert!(
+            !kitty::read(window, KITTY_TIMEOUT).unwrap().is_empty(),
+            "the shared helper must still return text panes"
+        );
+        let dump = read_pixels(window, Detector::Full, &["kitty".into()]).unwrap();
+        assert_eq!(dump.targets.len(), 1);
+        assert_eq!(dump.targets[0].role, "terminal");
+        assert_eq!(
+            dump.targets[0].rect,
+            kitty::cursor(window, KITTY_TIMEOUT)
+                .unwrap()
+                .offset(window.rect.origin())
+        );
     }
 
     #[test]

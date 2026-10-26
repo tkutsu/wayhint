@@ -1,4 +1,4 @@
-# What each kitty window shows, for wayhint's text mode. wayhint writes this
+# What each kitty window shows and where its cursor is. wayhint writes this
 # kitten out and runs it inside kitty with `kitten @ kitten`; it answers with
 # JSON: each OS window's title, size and cell size, and for each pane on
 # screen, where its first cell is and the lines it shows.
@@ -56,22 +56,40 @@ def past_tab(shown, x):
     return x
 
 
-def pane(window, cell_height):
+def text_top(window, cell_height):
+    """The first text row, below a top title bar when one is present."""
     g, screen = window.geometry, window.screen
     # A title bar takes a row, on top or under the text.
     top = g.top
     if screen.lines < g.ynum and get_options().window_title_bar == 'top':
         top += cell_height
+    return top
+
+
+def pane(window, cell_height):
+    """The visible text and cell origin of one pane."""
     return {
         'id': window.id,
-        'left': g.left,
-        'top': top,
-        'lines': [line(screen, y) for y in range(screen.lines)],
+        'left': window.geometry.left,
+        'top': text_top(window, cell_height),
+        'lines': [line(window.screen, y) for y in range(window.screen.lines)],
     }
+
+
+def cursor(window, size):
+    """The active cursor cell's origin in physical window pixels."""
+    screen = window.screen
+    # Pending line wrap can leave x one cell beyond the last column.
+    x = min(screen.cursor.x, screen.columns - 1)
+    return [
+        window.geometry.left + x * size['cell_width'],
+        text_top(window, size['cell_height']) + screen.cursor.y * size['cell_height'],
+    ]
 
 
 @result_handler(no_ui=True)
 def handle_result(args, answer, target_window_id, boss):
+    cursor_only = 'cursor' in args[1:]
     focused = current_focused_os_window_id()
     out = []
     for os_window_id, tabs in boss.os_window_map.items():
@@ -86,6 +104,7 @@ def handle_result(args, answer, target_window_id, boss):
             'width': size['width'],
             'framebuffer_width': size['framebuffer_width'],
             'cell': [size['cell_width'], size['cell_height']],
-            'panes': [pane(w, size['cell_height']) for w in shown],
+            'cursor': cursor(tab.active_window, size) if tab.active_window in shown else None,
+            'panes': [] if cursor_only else [pane(w, size['cell_height']) for w in shown],
         })
     return json.dumps(out)

@@ -380,7 +380,7 @@ enum Pixels {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileKeys {
-    /// Tag letters in priority order, as the first layout prints them.
+    /// Tag letters, easiest to press first, as the first layout prints them.
     alphabet: Option<String>,
     /// Other keys that count as an alphabet letter: `";" = "c"`.
     aliases: BTreeMap<String, String>,
@@ -404,6 +404,8 @@ struct FileKeys {
     text: Option<String>,
     /// Shows every key and what it does, in the info box. `""` for none.
     help: Option<String>,
+    /// Leaves wayhint, from tags and text mode alike. Defaults to Esc.
+    close: Option<String>,
 }
 
 impl FileKeys {
@@ -497,8 +499,7 @@ const TEXT_KEY: KeyCode = KeyCode::from_evdev(53);
 
 /// Keys every mode reads itself, so no verb may take them, and how the
 /// message that says so lists them.
-const BUILT_IN: [KeyCode; 9] = [
-    KeyCode::ESC,
+const BUILT_IN: [KeyCode; 8] = [
     KeyCode::BACKSPACE,
     KeyCode::SPACE,
     KeyCode::ENTER,
@@ -508,7 +509,7 @@ const BUILT_IN: [KeyCode; 9] = [
     KeyCode::LEFT,
     KeyCode::RIGHT,
 ];
-const BUILT_IN_NAMES: &str = "Esc, Backspace, Space, Enter, Tab and the arrows";
+const BUILT_IN_NAMES: &str = "Backspace, Space, Enter, Tab and the arrows";
 
 /// Everything wayhint needs from the settings, checked.
 #[derive(Debug)]
@@ -711,6 +712,7 @@ impl Alphabet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verbs {
     default: Action,
+    close: (Key, String),
     /// Each bound verb, its key, and the key as `wayhint config` prints it.
     keys: Vec<(Action, Key, String)>,
     /// Verbs left without a key because their default key is a tag key,
@@ -731,6 +733,26 @@ pub struct Verbs {
 }
 
 impl Verbs {
+    /// Named close keys accept modifiers too, as Esc always has.
+    pub fn is_close(&self, key: Key) -> bool {
+        self.close.0 == key
+            || (keys::name_of(self.close.0.code).is_some() && self.close.0.code == key.code)
+    }
+
+    /// Whether the Escape helper should give this mode's Escape to wayhint.
+    pub fn uses_escape(&self, typing: bool) -> bool {
+        let key = Key {
+            code: KeyCode::ESC,
+            shift: false,
+        };
+        self.is_close(key)
+            || (!typing
+                && (self.action_of(key).is_some()
+                    || self.is_repeat(key)
+                    || self.is_text(key)
+                    || self.is_help(key)))
+    }
+
     /// The action a bare tag (or a bare `Space`) does.
     pub fn default_action(&self) -> Action {
         self.default
@@ -775,10 +797,13 @@ impl Verbs {
             ("Space", "at the pointer"),
             ("arrows", "move where the click lands"),
             ("Backspace", "take back a key"),
-            ("Esc", "leave"),
         ] {
+            if keys::named(key) == Some(self.close.0.code) {
+                continue;
+            }
             lines.push(format!("{key}\t{what}"));
         }
+        lines.push(format!("{}\tleave", self.close.1));
         lines.join("\n")
     }
 
@@ -803,8 +828,12 @@ impl Verbs {
     /// command: a default gives way, so `hover = "r"` leaves right without
     /// its default `r` instead of failing.
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
+        let text = file.close.as_deref().unwrap_or("Esc");
+        let key = decode_key(text, layout).context("[keys] close")?;
+        let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
         let mut verbs = Self {
             default: Action::Left,
+            close: (key, label),
             keys: Vec::new(),
             unbound: Vec::new(),
             repeat: None,
@@ -870,7 +899,9 @@ impl Verbs {
                 shift: true,
             };
             let commands = verbs.keys.iter().map(|v| v.1);
-            let mut commands = commands.chain(verbs.repeat.iter().chain(&verbs.text).map(|v| v.0));
+            let mut commands = commands
+                .chain(verbs.repeat.iter().chain(&verbs.text).map(|v| v.0))
+                .chain([verbs.close.0]);
             if tag_keys.contains(&TEXT_KEY) || commands.any(|k| k == key) {
                 verbs.help_unbound = Some(label.into());
             } else {
@@ -912,7 +943,8 @@ impl Verbs {
             .map(|v| v.0.name())
             .or_else(|| self.is_repeat(key).then_some("repeat"))
             .or_else(|| self.is_text(key).then_some("text"))
-            .or_else(|| self.is_help(key).then_some("help"));
+            .or_else(|| self.is_help(key).then_some("help"))
+            .or_else(|| self.is_close(key).then_some("close"));
         if let Some(other) = clash {
             bail!("[keys] {other} and {command} are both {label:?}");
         }
@@ -966,6 +998,7 @@ impl Verbs {
             .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
             .chain(self.text.iter().map(|(key, _)| (key.code, "text")))
             .chain(self.help.iter().map(|(key, _)| (key.code, "help")))
+            .chain([(self.close.0.code, "close")])
             .collect()
     }
 }
@@ -1212,7 +1245,7 @@ impl Config {
         let mut out = String::from("[keys]\n");
         let _ = writeln!(
             out,
-            "alphabet = {}   # priority order: earlier letters are used more",
+            "alphabet = {}   # easiest to press first; easy letters carry prefixes",
             quote(&self.alphabet.written)
         );
         // A comment, not a setting: the layout is your keyboard's own.
@@ -1256,6 +1289,11 @@ impl Config {
         );
         out.push_str(&self.verbs.render_text());
         out.push_str(&self.verbs.render_help());
+        let _ = writeln!(
+            out,
+            "close = {}   # leave wayhint, from tags or text mode",
+            quote(&self.verbs.close.1)
+        );
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
@@ -1306,6 +1344,57 @@ mod tests {
         let config = Config::parse("", &us()).unwrap();
         assert_eq!(labels(&config), "asdfghjkl");
         assert_eq!(config.layout, "English (US)");
+    }
+
+    #[test]
+    fn close_defaults_to_escape_and_a_written_close_key_leaves_the_alphabet() {
+        let default = Config::parse("", &us()).unwrap();
+        assert!(default.verbs.is_close(key(1, false)));
+        assert!(default.verbs.is_close(key(1, true)));
+        let config = Config::parse("[keys]\nalphabet = \"asq\"\nclose = \"q\"", &us()).unwrap();
+        assert_eq!(labels(&config), "as");
+        assert!(config.verbs.is_close(key(16, false)));
+        assert!(!config.verbs.is_close(key(1, false)));
+        assert!(!config.verbs.uses_escape(false));
+        assert!(!config.verbs.uses_escape(true));
+        assert!(config.verbs.legend().contains("q\tleave"));
+        assert!(!config.verbs.legend().contains("Esc\tleave"));
+        assert_eq!(
+            Config::parse(&config.render(), &us()).unwrap().verbs,
+            config.verbs
+        );
+    }
+
+    #[test]
+    fn close_keys_override_built_ins_and_free_escape_for_other_commands() {
+        for name in [
+            "Backspace",
+            "Space",
+            "Enter",
+            "Tab",
+            "Up",
+            "Home",
+            "Delete",
+            "F1",
+            "F12",
+            "F24",
+            "?",
+            "Esc",
+            "Escape",
+        ] {
+            let config = Config::parse(&format!("[keys]\nclose = {name:?}"), &us()).unwrap();
+            assert!(
+                config.verbs.is_close(decode_key(name, &us()).unwrap()),
+                "{name}"
+            );
+        }
+        let config = Config::parse("[keys]\nclose = \"q\"\nhover = \"Esc\"", &us()).unwrap();
+        assert!(config.verbs.uses_escape(false));
+        assert!(!config.verbs.uses_escape(true));
+        assert_eq!(config.verbs.action_of(key(1, false)), Some(Action::Hover));
+        let clash = Config::parse("[keys]\nclose = \"q\"\nhover = \"q\"", &us()).unwrap_err();
+        assert!(format!("{clash:#}").contains("close and hover"));
+        assert!(Config::parse("[keys]\nclose = \"\"", &us()).is_err());
     }
 
     #[test]
@@ -1415,7 +1504,7 @@ mod tests {
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[keys]\nright = \"\"").contains("only one verb can be the default"));
         assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
-        assert!(err("[keys]\nhover = \"esc\"").contains("built in"));
+        assert!(err("[keys]\nhover = \"esc\"").contains("close and hover"));
         assert!(err("[keys]\nright = \"x\"\nmiddle = \"x\"").contains("both"));
         assert!(err("[keys]\nback = \"PageUpp\"").contains("the names are Up, Down"));
         assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));

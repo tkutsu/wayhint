@@ -26,6 +26,33 @@ pub fn start_or_stop() -> Result<Option<UnixDatagram>> {
     at(&address)
 }
 
+/// Requests on the session socket. Escape is acknowledged only after the
+/// current mode decides whether it uses the key. Helpers forward `pass`
+/// to the app; `used` means the overlay will process it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Request {
+    Stop,
+    Escape,
+}
+
+/// Reads one request and replies to an Escape helper before queuing its key.
+pub fn receive(socket: &UnixDatagram, uses_escape: bool) -> Result<Option<Request>> {
+    let mut message = [0; 32];
+    let (len, sender) = match socket.recv_from(&mut message) {
+        Ok(received) => received,
+        Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match &message[..len] {
+        b"stop" => Ok(Some(Request::Stop)),
+        b"escape" => {
+            socket.send_to_addr(if uses_escape { b"used" } else { b"pass" }, &sender)?;
+            Ok(uses_escape.then_some(Request::Escape))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Binding chooses the owner atomically; other launches send it a stop.
 fn at(address: &SocketAddr) -> Result<Option<UnixDatagram>> {
     match UnixDatagram::bind_addr(address) {
@@ -77,5 +104,29 @@ mod tests {
             second.recv(&mut [0; 16]).unwrap_err().kind(),
             ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn escape_is_acknowledged_only_when_the_current_mode_uses_it() {
+        let server = at(&address("escape-server")).unwrap().unwrap();
+        let client = UnixDatagram::bind_addr(&address("escape-client")).unwrap();
+        client.connect_addr(&address("escape-server")).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        for used in [false, true] {
+            client.send(b"escape").unwrap();
+            assert_eq!(
+                receive(&server, used).unwrap(),
+                used.then_some(Request::Escape)
+            );
+            let mut reply = [0; 4];
+            assert_eq!(client.recv(&mut reply).unwrap(), 4);
+            assert_eq!(&reply, if used { b"used" } else { b"pass" });
+        }
+        client.send(b"unknown").unwrap();
+        assert_eq!(receive(&server, true).unwrap(), None);
+        client.send(b"stop").unwrap();
+        assert_eq!(receive(&server, false).unwrap(), Some(Request::Stop));
     }
 }

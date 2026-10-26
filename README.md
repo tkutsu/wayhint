@@ -7,7 +7,8 @@ Keyboard hints for everything clickable on a Wayland desktop.
 
 Press a keybind and every button, link, tab and field in the windows on
 your screen gets a short letter tag. Type a tag and wayhint clicks that
-control, then tags the windows again for the next one. `Esc` ends it.
+control, then tags the windows again for the next one. The close key
+(`Esc` by default) ends it.
 
 It's vimium's link hints for the whole desktop, read from the
 accessibility tree that screen readers use, with pixel detection for the
@@ -152,8 +153,8 @@ An app joins the bus when it starts. Apps started before the bus, or
 before you turned a switch on, need reopening; wayhint says so when it
 finds an app that started before the bus.
 
-kitty has no accessibility tree, so text mode asks kitty what its panes
-show. That needs a socket, in `kitty.conf`:
+Kitty has no accessibility tree, so wayhint asks it for its text and cursor
+position. Text mode and the cursor hint need a socket, in `kitty.conf`:
 
 ```conf
 allow_remote_control socket-only
@@ -180,7 +181,7 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | `/` | Text mode |
 | `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
-| `Esc` | Exits; while a hold is down, lets go where it is instead |
+| close key (`Esc` by default) | Exits; while a hold is down, lets go where it is instead |
 
 ### Verbs and modifiers
 
@@ -227,7 +228,7 @@ follows the pointer.
 A hold keeps its button down across rounds. The tags come back with
 `drop` in the input box, and whatever you pick next (a tag,
 `Space`, a text match, a verb typed twice) is where it lets go, moving
-there in small steps so apps see a drag. `, ,` or `Esc` lets go where it
+there in small steps so apps see a drag. `, ,` or the close key lets go where it
 went down: a long press. A scroll never clicks, so it never ends the run.
 
 ### Text mode
@@ -275,11 +276,13 @@ A click in such a window always ends the run, since nothing says whether
 it landed in a text field. A paragraph's tag opens into a tag per line
 instead of clicking, and a verb typed before it carries over.
 
-A terminal gets one tag 10 px from its bottom and right edges. With pixel
-detection on, it checks the screenshot and moves to nearby clear space if
-needed. With `detector = "off"`, it uses the fixed spot without a screenshot.
-This corner inset takes precedence over `[style] position` and `offset`.
-Picking it clicks there and exits, so your typing goes to the terminal;
+A Kitty terminal gets one tag centered on its active pane's text cursor.
+It reads the cursor through Kitty's remote control, without a screenshot,
+whether pixel detection is on or off. `[style] position` and `offset` do
+not move the terminal tag. If remote control cannot be read, Kitty gets
+no tag. Other terminals use a patch near the bottom-right corner, checked
+for clear space when pixel detection is on. Picking the tag clicks there
+and exits, so your typing goes to the terminal;
 `[pixels] terminal_hint = false` hides it. An editable sheet or document
 gets one tag on the empty spot
 nearest its middle, which does the same. Links and controls around it keep
@@ -287,7 +290,7 @@ their own tags.
 
 ### When a run ends
 
-A run ends on `Esc`, on the keybind, after a click on a text field (so
+A run ends on the close key, on the keybind, after a click on a text field (so
 your typing goes to it), and after a click wayhint can't vouch for: one an
 arrow moved off its control, one made with `Space`, or one in a window
 tagged from its pixels. Hovers and scrolls never end it.
@@ -338,7 +341,7 @@ A short one:
 
 ```toml
 [keys]
-alphabet = "ciaehtns"   # tag letters, most used first; default: the home row
+alphabet = "ciaehtns"   # tag letters, easiest to press first; default: the home row
 right = ""              # "" makes this what a bare tag does (default: left)
 left = "."              # one character or a name: PageUp PageDown Home End Delete
 hover = "_"             # Shift works: _ is Shift and -
@@ -362,7 +365,7 @@ The sections:
 
 | Section | Sets |
 |---|---|
-| `[keys]` | Tag letters, verb keys, repeat, text and help keys, aliases |
+| `[keys]` | Tag letters, verb keys, repeat, text, help and close keys, aliases |
 | `[style]` | The tags: font, size, colours, border, radius, padding, letter case, position on the control, offset |
 | `[style.leader]` | The line and dot from a moved tag or a nudged click to where it lands |
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
@@ -382,8 +385,12 @@ Keys are written as your keyboard's first layout prints them, which must
 be a Latin one (US, Colemak, AZERTY and so on), and matched by position. A
 key is a tag letter or a command, never both: a command key you set leaves
 the alphabet, and a default command key that clashes with your alphabet
-goes unbound. `Esc`, `Backspace`, `Space`, `Enter`, `Tab` and the arrows
-can't be rebound.
+goes unbound. Set `close = "q"` under `[keys]` to close with `q` instead of
+`Esc`. It takes `q` out of the alphabet and also closes text mode, so you
+cannot type that character in a query. Named keys such as `Esc`, `F1`
+through `F24`, `Space` or `Home` work too. `Backspace`, `Space`, `Enter`,
+`Tab` and the arrows keep their built-in behavior unless chosen as the
+close key. The launch shortcut always closes wayhint.
 
 `detector = "fast"` reads pixels in one pass instead of two: about half
 the work (7 ms against 11 on the author's laptop), with 82% of controls one
@@ -473,9 +480,9 @@ compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
 - A sheet is recognised only when its grid lines show, are 1 px thin, and
   rows are 12 to 40 px apart. Otherwise every cell gets a tag. Links inside
   cells get none.
-- A terminal with no empty patch in its lower half gets its tag on the
-  least busy one, and clicking it can still trigger the running TUI's
-  mouse handling.
+- Clicking a terminal tag can trigger the running TUI's mouse handling.
+  Terminals other than Kitty use the least busy patch in their lower half
+  when pixel detection finds no empty one.
 
 ### Text mode
 

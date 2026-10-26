@@ -98,6 +98,8 @@ pub enum Event {
     /// comes as a `Key`, on its release, so the release can't reach the app
     /// after the click it makes.
     Typed(Key, Mods, Option<char>),
+    /// Escape accepted from the compositor helper, across redraws too.
+    Escape,
     /// SIGINT or SIGTERM: leave through the normal cleanup.
     Interrupted,
     /// The compositor closed the overlay (its monitor went away) or
@@ -254,14 +256,26 @@ impl Overlay {
     }
 
     /// A second launch wakes the loop and leaves through normal cleanup.
-    pub fn listen_for_toggle(&mut self, socket: UnixDatagram) -> Result<()> {
+    pub fn listen_for_toggle(
+        &mut self,
+        socket: UnixDatagram,
+        verbs: &crate::config::Verbs,
+    ) -> Result<()> {
+        let (tags, text) = (verbs.uses_escape(false), verbs.uses_escape(true));
         let source = Generic::new(socket, Interest::READ, Mode::Level);
         self.event_loop
             .handle()
-            .insert_source(source, |_, socket, state: &mut State| {
-                let mut message = [0; 16];
-                if socket.recv(&mut message).is_ok() {
-                    state.events.push_front(Event::Interrupted);
+            .insert_source(source, move |_, socket, state: &mut State| {
+                let uses_escape = if state.typist.is_some() { text } else { tags };
+                match crate::toggle::receive(socket, uses_escape) {
+                    Ok(Some(crate::toggle::Request::Stop)) => {
+                        state.events.push_front(Event::Interrupted);
+                    }
+                    Ok(Some(crate::toggle::Request::Escape)) => {
+                        state.events.push_back(Event::Escape);
+                    }
+                    Ok(None) => {}
+                    Err(error) => desktop::log(&format!("wayhint: Escape helper: {error:#}")),
                 }
                 Ok(PostAction::Continue)
             })

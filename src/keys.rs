@@ -67,7 +67,7 @@ impl KeyCode {
 /// The keys a config writes by name, in evdev codes. Names match in any
 /// case (`home`, `Home`); [`name_of`] gives them back as written first
 /// here, so `PgUp` reads as `PageUp`.
-const NAMED: [(&str, KeyCode); 16] = [
+const NAMED: &[(&str, KeyCode)] = &[
     ("Up", KeyCode::UP),
     ("Down", KeyCode::DOWN),
     ("Left", KeyCode::LEFT),
@@ -84,6 +84,32 @@ const NAMED: [(&str, KeyCode); 16] = [
     ("Enter", KeyCode::ENTER),
     ("Esc", KeyCode::ESC),
     ("Backspace", KeyCode::BACKSPACE),
+    ("Escape", KeyCode::ESC),
+    ("Insert", KeyCode(110)),
+    ("F1", KeyCode(59)),
+    ("F2", KeyCode(60)),
+    ("F3", KeyCode(61)),
+    ("F4", KeyCode(62)),
+    ("F5", KeyCode(63)),
+    ("F6", KeyCode(64)),
+    ("F7", KeyCode(65)),
+    ("F8", KeyCode(66)),
+    ("F9", KeyCode(67)),
+    ("F10", KeyCode(68)),
+    ("F11", KeyCode(87)),
+    ("F12", KeyCode(88)),
+    ("F13", KeyCode(183)),
+    ("F14", KeyCode(184)),
+    ("F15", KeyCode(185)),
+    ("F16", KeyCode(186)),
+    ("F17", KeyCode(187)),
+    ("F18", KeyCode(188)),
+    ("F19", KeyCode(189)),
+    ("F20", KeyCode(190)),
+    ("F21", KeyCode(191)),
+    ("F22", KeyCode(192)),
+    ("F23", KeyCode(193)),
+    ("F24", KeyCode(194)),
 ];
 
 /// The key a name stands for: `"pgup"` is Page Up.
