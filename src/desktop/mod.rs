@@ -316,18 +316,16 @@ impl Desktop {
             })
             .collect();
         self.layout(&mut snapshot, monitor, stack, &pictures);
-        snapshot.obstacles.extend(
-            stack
+        let unscanned = stack.windows.iter().filter(|w| {
+            !snapshot
                 .windows
                 .iter()
-                .filter(|w| {
-                    !snapshot
-                        .windows
-                        .iter()
-                        .any(|s| s.window.address == w.address)
-                })
-                .map(|w| w.rect),
-        );
+                .any(|s| s.window.address == w.address)
+        });
+        for window in unscanned {
+            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
+            snapshot.obstacles.extend(in_view([window.rect], &covers));
+        }
         (snapshot, failed)
     }
 
@@ -379,22 +377,27 @@ impl Desktop {
                 Ok((Space::pixels(frame), cells, scale))
             })();
             let origin = window.rect.origin();
+            // What a window shows only blocks tags where it's on top: an
+            // unreadable background layer would otherwise block them all.
+            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
             match &captured {
                 #[allow(clippy::cast_possible_truncation)]
-                Ok((space, _, scale)) => obstacles.extend(space.obstacles().into_iter().map(|r| {
-                    let x = (f64::from(r.x) / scale).floor() as i32;
-                    let y = (f64::from(r.y) / scale).floor() as i32;
-                    let right = (f64::from(r.right()) / scale).ceil() as i32;
-                    let bottom = (f64::from(r.bottom()) / scale).ceil() as i32;
-                    Rect::new(x, y, right - x, bottom - y).offset(origin)
-                })),
-                Err(_) => obstacles.push(window.rect),
+                Ok((space, _, scale)) => {
+                    let ink = space.obstacles().into_iter().map(|r| {
+                        let x = (f64::from(r.x) / scale).floor() as i32;
+                        let y = (f64::from(r.y) / scale).floor() as i32;
+                        let right = (f64::from(r.right()) / scale).ceil() as i32;
+                        let bottom = (f64::from(r.bottom()) / scale).ceil() as i32;
+                        Rect::new(x, y, right - x, bottom - y).offset(origin)
+                    });
+                    obstacles.extend(in_view(ink, &covers));
+                }
+                Err(_) => obstacles.extend(in_view([window.rect], &covers)),
             }
             let cells = captured
                 .as_ref()
                 .ok()
                 .and_then(|(_, cells, scale)| Some((cells.as_ref()?, *scale)));
-            let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
             for target in snapshot.targets.iter_mut().filter(|t| is_body(t)) {
                 focus_body(target, origin, cells, monitor.rect, &covers);
             }
@@ -786,6 +789,15 @@ pub fn shows(stack: &Stack, monitor: &Monitor, address: &str, at: Point) -> bool
     monitor.rect.contains(at) && uncovered(stack, address, at).is_some()
 }
 
+/// The parts of `rects` that none of `covers` hides.
+fn in_view(rects: impl IntoIterator<Item = Rect>, covers: &[Rect]) -> Vec<Rect> {
+    let mut parts: Vec<Rect> = rects.into_iter().collect();
+    for &cover in covers {
+        parts = parts.into_iter().flat_map(|r| r.minus(cover)).collect();
+    }
+    parts
+}
+
 /// Shrinks a document body's tag to the clearest tag-sized patch nearest
 /// its middle, and clicks there: an empty cell of a sheet, a blank stretch
 /// of a page. `picture` is the window's ink without grid lines
@@ -1130,5 +1142,26 @@ mod tests {
             &[cover],
         );
         assert!(!cover.contains(target.hit), "{:?}", target.hit);
+    }
+
+    #[test]
+    fn an_unreadable_backdrop_blocks_only_the_gaps_between_windows() {
+        // Quickshell's backdrop: a background layer the size of the
+        // monitor, with no picture. Blocked whole, no tag could move.
+        let monitor = Rect::new(0, 0, 2560, 1440);
+        let windows = [Rect::new(8, 38, 1790, 1394), Rect::new(1806, 38, 746, 1394)];
+        let blocked = in_view([monitor], &windows);
+        let space = Space::rectangles(monitor, &blocked);
+        for window in windows {
+            assert_eq!(space.ink(window.inset(4)), 0, "{window:?}");
+        }
+        assert!(
+            space.ink(Rect::new(0, 0, 2560, 38)) > 0,
+            "the bar's strip shows it"
+        );
+        assert!(
+            space.ink(Rect::new(1798, 38, 8, 100)) > 0,
+            "so does the gap"
+        );
     }
 }
