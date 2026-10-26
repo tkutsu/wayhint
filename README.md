@@ -17,9 +17,10 @@ Hyprland says which windows the focused monitor shows and how they stack,
 so a control under a floating window gets no tag. Layer-shell surfaces
 (bars, launchers, a Quickshell shell) and their popups get tags too, and
 each one covers its whole box: a control behind a launcher gets no tag,
-even where the launcher is see-through. Keys come through an
-input-method keyboard grab, so an open menu stays open while you type its
-tag. Clicks go through the compositor's virtual pointer,
+even where the launcher is see-through. An app's open menu, such as a
+right-click menu, gets tags too and hides the tags under it. Keys come
+through an input-method keyboard grab, so an open menu stays open while
+you type its tag. Clicks go through the compositor's virtual pointer,
 and the cursor goes back where it was.
 
 A window with no accessibility tree (kitty, canvases, games, many Electron
@@ -331,9 +332,12 @@ instead, and `wayhint config` lists which commands have no key. `Esc`,
 
 ## Known gaps
 
-- A menu that opens after a click, such as a right-click menu, is usually a
-  separate window to the accessibility tree and is not scanned yet, so its
-  items get no tags.
+- An app's menu gets tags only if it opened while wayhint was running,
+  such as one opened with wayhint's right click. Apps announce a menu as
+  it opens, and the accessibility tree gives no other way to find one in
+  Qt apps. A menu that was already open when wayhint started gets no tags
+  and doesn't hide the tags under it.
+- Text mode doesn't search open menus, and an X11 app's menus get no tags.
 - A layer surface gets tags only when it sits in the top-left corner of
   its monitor, because elsewhere the accessibility tree doesn't say where
   it is. A bar across the top or a full-screen launcher qualifies; a dock

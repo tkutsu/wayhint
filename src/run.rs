@@ -11,8 +11,9 @@
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
-//! one, except where another window covers them. While the tags are up,
-//! the windows are scanned again every `[scan] refresh`, so a page that
+//! one, except where another window covers them. A menu an app opens
+//! during the run counts as a window right above its own. While the tags
+//! are up, the windows are scanned again every `[scan] refresh`, so a page that
 //! loaded or a window that opened gets tags without a key, and a target
 //! found again keeps its tag. When the monitor switches to another
 //! workspace (a Super bind still reaches Hyprland while wayhint holds the
@@ -146,9 +147,13 @@ pub fn run(
             "wayhint: the tags won't follow workspace changes: {e:#}"
         ));
     }
+    let mut desktop = Desktop::connect()?;
+    if let Err(e) = desktop.watch_menus() {
+        desktop::warn(&format!("wayhint: menus won't get tags: {e:#}"));
+    }
     let mut session = Session {
         overlay,
-        desktop: Desktop::connect()?,
+        desktop,
         pointer: Pointer::new(&conn, outputs, config.scroll)?,
         keyboard: None,
         screens: monitors.iter().map(|m| m.rect).collect(),
