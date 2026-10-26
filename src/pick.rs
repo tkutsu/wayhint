@@ -252,12 +252,15 @@ fn rescan(
     fresh.merge_nearby(config.merge_distance);
     let changed = fresh.obstacles != shown.obstacles || fresh.targets != shown.targets;
     let survivors = fresh.survivors(shown);
-    let retagged = selector.relabel(&survivors, config.alphabet.len());
-    // Movement and captured ink need a redraw, not a fresh input gate.
-    // An object reused for a different action, or a replacement window
-    // with identical pixel boxes, must still discard stale keys.
+    let misleads = selector.relabel(&survivors, config.alphabet.len());
+    // Movement, captured ink and tags that came or went need a redraw,
+    // not a fresh input gate: that drops every key pressed during the
+    // scan, and a page that changes all the time would lose keys at every
+    // refresh. Keys that could now pick another target must go, and so
+    // must keys for an object reused for a different action, or a
+    // replacement window with identical pixel boxes.
     let replaced = fresh.targets.iter().zip(&survivors).any(|(now, was)| {
-        was.is_none_or(|i| {
+        was.is_some_and(|i| {
             let old = &shown.targets[i];
             fresh.windows[now.window].window.address != shown.windows[old.window].window.address
                 || now.role != old.role
@@ -267,7 +270,7 @@ fn rescan(
         })
     });
     *shown = fresh;
-    Ok(Some(if retagged || replaced {
+    Ok(Some(if misleads || replaced {
         Refresh::Retag
     } else if changed {
         Refresh::Redraw
@@ -542,6 +545,31 @@ mod tests {
         assert_eq!(
             rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
             Some(Refresh::Unchanged)
+        );
+    }
+
+    #[test]
+    fn a_tag_that_comes_in_a_refresh_keeps_hint_input_live() {
+        // a s d over asdf, and a fourth control loads under the free `f`:
+        // no key typed for a, s or d can reach it.
+        let (_, mut shown, _) = refresh_scene();
+        let config = Config::parse(
+            "[keys]\nalphabet = \"asdf\"\nleft = \"\"",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let mut selector = Selector::new(3, config.alphabet.len(), Action::Left);
+        let mut fresh = shown.clone();
+        let mut late = fresh.targets[2].clone();
+        late.rect.x += 200;
+        late.visible.x += 200;
+        late.hit.x += 200;
+        late.object.as_mut().unwrap().path = "/late".into();
+        fresh.targets.push(late);
+        assert_eq!(
+            rescan(&config, &mut shown, &mut selector, &mut fresh).unwrap(),
+            Some(Refresh::Redraw),
+            "a gate reset here drops every key pressed during the scan"
         );
     }
 

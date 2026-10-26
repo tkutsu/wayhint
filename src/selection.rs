@@ -239,7 +239,13 @@ impl Selector {
     /// it. The letters go if none does, or if one more letter would pick a
     /// tag new under them: a key already on its way, typed for a tag that
     /// left, must not land on another. A verb typed after them stays.
-    /// Returns whether any label names a different target now.
+    ///
+    /// Returns whether keys typed for the old tags could pick another
+    /// target now, so the overlay must drop them: the letters went, or a
+    /// label new on its target lies on an old label's path (the same, or
+    /// one starting the other). A tag that only moved, left, or came under
+    /// fresh letters leaves every key aimed at the old ones landing where
+    /// it was aimed, or nowhere.
     pub fn relabel(&mut self, survivors: &[Option<usize>], alphabet_size: usize) -> bool {
         let kept: Vec<Option<&[usize]>> = survivors
             .iter()
@@ -258,17 +264,20 @@ impl Selector {
             .iter()
             .zip(&kept)
             .any(|(label, was)| *was != Some(label.as_slice()) && after(label) == 1);
-        let retagged = labels.len() != self.labels.len()
-            || labels
-                .iter()
-                .zip(&kept)
-                .any(|(label, was)| *was != Some(label.as_slice()));
+        let misleads = labels.iter().zip(&kept).any(|(label, was)| {
+            *was != Some(label.as_slice())
+                && self
+                    .labels
+                    .iter()
+                    .any(|old| old.starts_with(label) || label.starts_with(old))
+        });
         self.labels = labels;
+        let dropped = (!leads || instant) && !self.typed.is_empty();
         if !leads || instant {
             self.typed.clear();
             self.armed_at = 0;
         }
-        retagged
+        misleads || dropped
     }
 
     /// Whether a label is still possible: it starts with what's typed.
@@ -633,6 +642,29 @@ mod tests {
             None,
             "back in the tags, Backspace takes the verb"
         );
+    }
+
+    #[test]
+    fn a_rescan_says_when_keys_on_their_way_could_land_elsewhere() {
+        // a s d fa fs, all found again, and a sixth target under `fd`: no
+        // key typed for the old tags reaches it.
+        let mut s = five();
+        assert!(!s.relabel(&[Some(0), Some(1), Some(2), Some(3), Some(4), None], 4));
+        // `fs` left and a new target took its label.
+        let mut s = five();
+        assert!(s.relabel(&[Some(0), Some(1), Some(2), Some(3), None], 4));
+        // `fs` left: four targets are a s d f, and `f` alone picks what
+        // was `fa`.
+        let mut s = five();
+        assert!(s.relabel(&[Some(0), Some(1), Some(2), Some(3)], 4));
+        // a s d fa fs fd ff, and `a` left: the rest keep theirs, and keys
+        // for `a` land nowhere.
+        let mut s = Selector::new(7, 4, Action::Left);
+        assert!(!s.relabel(&[Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)], 4));
+        // Letters typed and dropped: the next key starts from nothing.
+        let mut s = five();
+        s.press(letter(3));
+        assert!(s.relabel(&[Some(0), Some(1), Some(2)], 4));
     }
 
     #[test]
