@@ -1,7 +1,7 @@
-//! Text mode's way into kitty, which has no accessibility tree: ask kitty
-//! itself what its panes show. Its remote control runs a kitten (a Python
-//! file, `kitty.py`) inside kitty, over the socket `listen_on` opens; the
-//! kitten answers with each pane's lines and the cell they start at.
+//! Wayhint's way into kitty, which has no accessibility tree: ask kitty
+//! itself what its panes show and where its active cursor is. Its remote
+//! control runs a kitten (a Python file, `kitty.py`) inside kitty, over the
+//! socket `listen_on` opens. It answers with pane text or cursor geometry.
 //!
 //! The socket's address is whatever kitty.conf says, so it's read where
 //! kitty puts it for its programs: `KITTY_LISTEN_ON` in the environment of
@@ -22,7 +22,10 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use super::{Window, runtime_dir};
-use crate::{geometry::Point, text::Cells};
+use crate::{
+    geometry::{Point, Rect},
+    text::Cells,
+};
 
 /// The kitten, written out where kitty can run it from.
 const KITTEN: &str = include_str!("kitty.py");
@@ -48,11 +51,7 @@ pub fn is_kitty(window: &Window) -> bool {
 
 /// The panes `window` shows, each with its text, within `timeout`.
 pub fn read(window: &Window, timeout: Duration) -> Result<Vec<Pane>> {
-    let until = Instant::now() + timeout;
-    let address = listen_on(window.pid)?;
-    let answer = ask(&address, &kitten()?, until)
-        .with_context(|| format!("kitty's remote control at {address}"))?;
-    let windows: Vec<OsWindow> = serde_json::from_str(&answer).context("the kitten's answer")?;
+    let windows = request(window, timeout, &[])?;
     let os_window = pick(&windows, window)?;
     // Logical px per physical px: kitty's own, so a size Hyprland rounded
     // doesn't skew the cells.
@@ -79,6 +78,21 @@ pub fn read(window: &Window, timeout: Duration) -> Result<Vec<Pane>> {
         .collect())
 }
 
+/// The active pane's cursor cell, in logical pixels within `window`.
+pub fn cursor(window: &Window, timeout: Duration) -> Result<Rect> {
+    let windows = request(window, timeout, &["cursor"])?;
+    pick(&windows, window)?.cursor_cell()
+}
+
+/// Ask only for cursor geometry when text is not needed.
+fn request(window: &Window, timeout: Duration, args: &[&str]) -> Result<Vec<OsWindow>> {
+    let until = Instant::now() + timeout;
+    let address = listen_on(window.pid)?;
+    let answer = ask(&address, &kitten()?, args, until)
+        .with_context(|| format!("kitty's remote control at {address}"))?;
+    serde_json::from_str(&answer).context("the kitten's answer")
+}
+
 /// What the kitten says about one OS window.
 #[derive(Deserialize)]
 struct OsWindow {
@@ -87,7 +101,28 @@ struct OsWindow {
     width: i32,
     framebuffer_width: i32,
     cell: [i32; 2],
+    cursor: Option<[i32; 2]>,
     panes: Vec<PaneRead>,
+}
+
+impl OsWindow {
+    /// Scale the cursor cell's edges just as text mode scales its cells.
+    fn cursor_cell(&self) -> Result<Rect> {
+        let [x, y] = self.cursor.context("kitty has no visible active pane")?;
+        #[allow(clippy::cast_possible_truncation)]
+        let logical = |px: i32| {
+            (f64::from(px) * f64::from(self.width.max(1))
+                / f64::from(self.framebuffer_width.max(1)))
+            .round() as i32
+        };
+        let (left, top) = (logical(x), logical(y));
+        Ok(Rect::new(
+            left,
+            top,
+            logical(x + self.cell[0]) - left,
+            logical(y + self.cell[1]) - top,
+        ))
+    }
 }
 
 #[derive(Deserialize)]
@@ -204,7 +239,7 @@ fn kitten() -> Result<PathBuf> {
 
 /// Runs the kitten at `kitten` through the remote control at `address`
 /// (`unix:/path` or `unix:@abstract`) and returns what it said.
-fn ask(address: &str, kitten: &std::path::Path, until: Instant) -> Result<String> {
+fn ask(address: &str, kitten: &std::path::Path, args: &[&str], until: Instant) -> Result<String> {
     let path = address
         .strip_prefix("unix:")
         .with_context(|| format!("only unix sockets are supported, not {address}"))?;
@@ -225,7 +260,7 @@ fn ask(address: &str, kitten: &std::path::Path, until: Instant) -> Result<String
         "cmd": "kitten",
         "version": [0, 26, 0],
         "no_response": false,
-        "payload": { "kitten": kitten, "args": [], "all": true },
+        "payload": { "kitten": kitten, "args": args, "all": true },
     });
     stream.write_all(&[START, command.to_string().as_bytes(), END].concat())?;
     let mut answer = Vec::new();
@@ -297,8 +332,25 @@ mod tests {
             width: 100,
             framebuffer_width: 100,
             cell: [7, 17],
+            cursor: None,
             panes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cursor_cells_scale_their_edges_without_a_window_offset() {
+        let mut window = os_window("a", true);
+        assert!(window.cursor_cell().is_err(), "no visible active pane");
+        window.width = 200;
+        window.framebuffer_width = 400;
+        window.cell = [14, 34];
+        window.cursor = Some([108, 246]);
+        assert_eq!(window.cursor_cell().unwrap(), Rect::new(54, 123, 7, 17));
+
+        window.framebuffer_width = 300;
+        window.cell = [10, 23];
+        window.cursor = Some([17, 37]);
+        assert_eq!(window.cursor_cell().unwrap(), Rect::new(11, 25, 7, 15));
     }
 
     #[test]

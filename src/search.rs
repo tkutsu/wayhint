@@ -6,7 +6,7 @@
 //! text key -> tags hidden -> text read once -> keys: query edits, arrows
 //!                                                |
 //!                 Backspace with nothing typed: back to the tags
-//!                 Esc: leave wayhint
+//!                 close key: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
 //!                 one match left (with [text] pick_unique): as Enter
 //!                 a character that matches nothing: dropped, and named
@@ -54,7 +54,7 @@ pub struct Chosen {
     pub check: Option<Check>,
 }
 
-/// Text mode, from the text key until a match is chosen or Esc leaves
+/// Text mode, from the text key until a match is chosen or the close key leaves
 /// (`Some` pick), or until Backspace with nothing typed goes back to the
 /// tags (`None`).
 /// `selector` holds the verb and the nudge typed before the text key.
@@ -99,6 +99,14 @@ fn keys(
             continue;
         };
         let (key, mods, typed) = match event {
+            Event::Escape => (
+                crate::keys::Key {
+                    code: KeyCode::ESC,
+                    shift: false,
+                },
+                Mods::NONE,
+                None,
+            ),
             Event::Typed(key, mods, typed) => (key, mods, typed),
             // Enter, on its release.
             Event::Key(key, mods) => (key, mods, None),
@@ -109,10 +117,12 @@ fn keys(
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
             Event::Workspace => return Ok(Some(Pick::Rescan)),
         };
+        if config.verbs.is_close(key) {
+            return Ok(Some(Pick::Leave));
+        }
         let edit = match key.code {
-            // Esc leaves, as with the tags. Backspace takes back the last
-            // character; with nothing typed, it goes back to the tags.
-            KeyCode::ESC => return Ok(Some(Pick::Leave)),
+            // Backspace takes back the last character; with nothing
+            // typed, it goes back to the tags.
             KeyCode::BACKSPACE => {
                 if !search.pop() {
                     return Ok(None);

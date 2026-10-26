@@ -16,20 +16,20 @@ use crate::{
 
 /// Labels for `count` targets from an alphabet of `size` letters.
 ///
-/// The rules, from the plan:
+/// The rules:
 ///
 /// - Prefix-free: no label starts another, so typing never has to wait to
 ///   see whether more is coming.
 /// - Shortest first, as short as possible: with up to `size` targets every
 ///   label is one letter.
-/// - Priority order: earlier letters are used more. Prefixes come from the
-///   end of the alphabet, so the strongest keys stay single-key labels.
+/// - Ease order: earlier letters are easier to press. Expand the earliest
+///   shortest label so these letters carry the repeated prefix keystrokes.
 /// - Deterministic: the same count always gives the same labels.
 ///
-/// How: start with one label per letter. While there are too few, replace
-/// the last of the shortest labels with itself plus each letter. Each step
-/// trades one label for `size`, so the list grows by `size - 1`, and it
-/// stays sorted by length because the expanded label was the last short one.
+/// How: start with one label per letter. While there are too few, remove
+/// the first label and append itself plus each letter. Each step trades
+/// one label for `size`, so the list grows by `size - 1`. Appending the
+/// children keeps the list sorted by length, then alphabet order.
 pub fn labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     let mut labels = all_labels(count, size);
     labels.truncate(count);
@@ -42,17 +42,9 @@ fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     assert!(size >= 2, "the config guarantees two letters or more");
     let mut labels: Vec<Vec<usize>> = (0..size).map(|letter| vec![letter]).collect();
     while labels.len() < count {
-        let shortest = labels[0].len();
-        // The last label of the shortest length: just before the first longer one.
-        let last = labels
-            .iter()
-            .rposition(|l| l.len() == shortest)
-            .unwrap_or(0);
-        let prefix = labels[last].clone();
+        let prefix = labels.remove(0);
         let children = (0..size).map(|letter| [prefix.as_slice(), &[letter]].concat());
-        // `splice` replaces a range with the items of an iterator in place:
-        // here the one prefix label with its `size` children.
-        labels.splice(last..=last, children);
+        labels.extend(children);
     }
     labels
 }
@@ -383,20 +375,39 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_come_from_the_end_of_the_alphabet() {
-        assert_eq!(text(5), ["a", "s", "d", "fa", "fs"]);
-        assert_eq!(text(7), ["a", "s", "d", "fa", "fs", "fd", "ff"]);
-        assert_eq!(text(8), ["a", "s", "da", "ds", "dd", "df", "fa", "fs"]);
+    fn easier_letters_are_pressed_at_least_as_often_as_harder_letters() {
+        // Count every keystroke, including prefixes, with each target picked once.
+        for size in 2..=22 {
+            for count in 0..=600 {
+                let mut presses = vec![0; size];
+                for label in labels(count, size) {
+                    for letter in label {
+                        presses[letter] += 1;
+                    }
+                }
+                assert!(
+                    presses.windows(2).all(|pair| pair[0] >= pair[1]),
+                    "size {size}, count {count}: {presses:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefixes_use_the_easiest_letters_first() {
+        assert_eq!(text(5), ["s", "d", "f", "aa", "as"]);
+        assert_eq!(text(7), ["s", "d", "f", "aa", "as", "ad", "af"]);
+        assert_eq!(text(8), ["d", "f", "aa", "as", "ad", "af", "sa", "ss"]);
         assert_eq!(text(16).len(), 16);
         assert!(text(16).iter().all(|l| l.len() == 2));
         assert_eq!(
-            text(17)[0],
-            "aa",
-            "past size^2, the first letter becomes a prefix too"
+            &text(17)[15..],
+            ["aaa", "aas"],
+            "past size^2, the easiest two-letter label becomes a prefix"
         );
     }
 
-    /// Five targets over four letters: a s d fa fs. Bare tags left-click.
+    /// Five targets over four letters: s d f aa as. Bare tags left-click.
     fn five() -> Selector {
         Selector::new(5, 4, Action::Left)
     }
@@ -438,19 +449,19 @@ mod tests {
     #[test]
     fn typing_a_label_picks_it() {
         let mut s = five();
-        assert_eq!(s.press(letter(3)), Step::Typing, "f is a prefix");
-        assert!(s.matches(&[3, 0]) && !s.matches(&[0]));
-        assert_eq!(s.press(letter(1)), picked(4, Action::Left), "fs");
+        assert_eq!(s.press(letter(0)), Step::Typing, "a is a prefix");
+        assert!(s.matches(&[0, 0]) && !s.matches(&[1]));
+        assert_eq!(s.press(letter(1)), picked(4, Action::Left), "as");
         assert_eq!(s.typed(), [0; 0], "a pick starts over");
     }
 
     #[test]
     fn backspace_steps_back_and_escape_leaves() {
         let mut s = five();
-        s.press(letter(3));
+        s.press(letter(0));
         assert_eq!(s.press(Input::Backspace), Step::Typing);
         assert_eq!(s.typed(), [0; 0]);
-        s.press(letter(3));
+        s.press(letter(0));
         assert_eq!(s.press(Input::Escape), Step::Exit, "with a letter typed");
     }
 
@@ -459,21 +470,21 @@ mod tests {
         let mut s = five();
         s.press(verb(Action::Right));
         assert_eq!(s.armed(), Some(Action::Right));
-        assert_eq!(s.press(letter(0)), picked(0, Action::Right));
+        assert_eq!(s.press(letter(1)), picked(0, Action::Right));
         assert_eq!(s.armed(), None, "the next tag is a bare one again");
-        assert_eq!(s.press(letter(0)), picked(0, Action::Left));
+        assert_eq!(s.press(letter(1)), picked(0, Action::Left));
     }
 
     #[test]
     fn a_verb_can_come_between_letters() {
         let mut s = five();
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(verb(Action::Right));
-        assert_eq!((s.armed(), s.typed()), (Some(Action::Right), &[3][..]));
+        assert_eq!((s.armed(), s.typed()), (Some(Action::Right), &[0][..]));
         assert_eq!(
             s.press(letter(1)),
             picked(4, Action::Right),
-            "f r s is r fs"
+            "a r s is r as"
         );
     }
 
@@ -481,9 +492,9 @@ mod tests {
     fn a_second_verb_replaces_the_first_and_keeps_letters() {
         let mut s = five();
         s.press(verb(Action::Right));
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(verb(Action::Double));
-        assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[3][..]));
+        assert_eq!((s.armed(), s.typed()), (Some(Action::Double), &[0][..]));
     }
 
     #[test]
@@ -498,7 +509,7 @@ mod tests {
         assert_eq!(s.press(verb(Action::ScrollDown)), Step::Again(again));
         assert_eq!(s.armed(), None, "a whole command: nothing is left armed");
         s.press(verb(Action::ScrollDown));
-        s.press(letter(3));
+        s.press(letter(0));
         assert_eq!(
             s.press(verb(Action::ScrollDown)),
             Step::Typing,
@@ -510,17 +521,17 @@ mod tests {
     fn backspace_takes_back_the_last_letter_or_verb() {
         let mut s = five();
         s.press(verb(Action::Hover));
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(Input::Backspace);
         assert_eq!(s.armed(), Some(Action::Hover), "the letter went first");
         s.press(Input::Backspace);
         assert_eq!(s.armed(), None);
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(verb(Action::Hover));
         s.press(Input::Backspace);
         assert_eq!(
             (s.armed(), s.typed()),
-            (None, &[3][..]),
+            (None, &[0][..]),
             "the verb came last"
         );
         s.press(verb(Action::Hover));
@@ -548,12 +559,12 @@ mod tests {
     fn arrows_add_up_and_go_with_the_pick() {
         let mut s = five();
         s.press(RIGHT);
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(RIGHT);
         s.press(UP);
         assert_eq!(s.nudge(), Point::new(28, -14), "around a half-typed tag");
         let Step::Picked { index: 4, act } = s.press(letter(1)) else {
-            panic!("fs picks the fifth target");
+            panic!("as picks the fifth target");
         };
         assert_eq!(act.nudge, Point::new(28, -14));
         assert_eq!(
@@ -587,7 +598,7 @@ mod tests {
     #[test]
     fn modifiers_on_the_last_letter_go_with_the_pick() {
         let mut s = five();
-        s.press(Input::Letter(3, CTRL));
+        s.press(Input::Letter(0, CTRL));
         let step = s.press(Input::Letter(1, SHIFT));
         assert_eq!(
             step,
@@ -608,14 +619,14 @@ mod tests {
             ..SHIFT
         };
         assert_eq!(
-            s.press(Input::Letter(0, both)),
+            s.press(Input::Letter(1, both)),
             Step::Picked {
                 index: 0,
                 act: act(Action::Double, CTRL)
             }
         );
         assert_eq!(
-            s.press(Input::Letter(0, SHIFT)),
+            s.press(Input::Letter(1, SHIFT)),
             Step::Picked {
                 index: 0,
                 act: act(Action::Left, SHIFT)
@@ -646,7 +657,7 @@ mod tests {
     fn repeat_drops_what_was_typed() {
         let mut s = five();
         s.press(verb(Action::Right));
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(RIGHT);
         assert_eq!(s.press(Input::Repeat), Step::Repeat);
         assert_eq!((s.armed(), s.typed()), (None, &[][..]));
@@ -657,7 +668,7 @@ mod tests {
     fn the_text_key_drops_half_a_tag_and_keeps_the_verb_and_nudge() {
         let mut s = five();
         s.press(verb(Action::Double));
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(RIGHT);
         assert_eq!(s.press(Input::Text), Step::Text);
         assert_eq!(s.typed(), [0usize; 0]);
@@ -676,33 +687,33 @@ mod tests {
 
     #[test]
     fn a_rescan_says_when_keys_on_their_way_could_land_elsewhere() {
-        // a s d fa fs, all found again, and a sixth target under `fd`: no
+        // s d f aa as, all found again, and a sixth target under `ad`: no
         // key typed for the old tags reaches it.
         let mut s = five();
         assert!(!s.relabel(&[Some(0), Some(1), Some(2), Some(3), Some(4), None], 4));
-        // `fs` left and a new target took its label.
+        // `as` left and a new target took its label.
         let mut s = five();
         assert!(s.relabel(&[Some(0), Some(1), Some(2), Some(3), None], 4));
-        // `fs` left: four targets are a s d f, and `f` alone picks what
-        // was `fa`.
+        // `as` left: four targets are a s d f, and `a` alone picks what
+        // was `aa`.
         let mut s = five();
         assert!(s.relabel(&[Some(0), Some(1), Some(2), Some(3)], 4));
-        // a s d fa fs fd ff, and `a` left: the rest keep theirs, and keys
-        // for `a` land nowhere.
+        // s d f aa as ad af, and `s` left: the rest keep theirs, and keys
+        // for `s` land nowhere.
         let mut s = Selector::new(7, 4, Action::Left);
         assert!(!s.relabel(&[Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)], 4));
         // Letters typed and dropped: the next key starts from nothing.
         let mut s = five();
-        s.press(letter(3));
+        s.press(letter(0));
         assert!(s.relabel(&[Some(0), Some(1), Some(2)], 4));
     }
 
     #[test]
     fn a_letter_no_label_continues_is_ignored() {
         let mut s = five();
-        s.press(letter(3));
-        assert_eq!(s.press(letter(3)), Step::Ignored, "no ff with 5 targets");
-        assert_eq!(s.typed(), [3], "the prefix stays");
+        s.press(letter(0));
+        assert_eq!(s.press(letter(3)), Step::Ignored, "no af with 5 targets");
+        assert_eq!(s.typed(), [0], "the prefix stays");
     }
 
     // Property tests: proptest makes up thousands of (count, size) pairs and
@@ -736,10 +747,10 @@ mod tests {
 
     #[test]
     fn one_more_target_moves_one_label() {
-        // a s d f, then a fifth: f splits into fa fs fd ff.
+        // a s d f, then a fifth: a splits into aa as ad af.
         let mut kept = vec![Some("a"), Some("s"), Some("d"), Some("f")];
         kept.insert(2, None);
-        assert_eq!(relabelled(&kept), ["a", "s", "fa", "d", "fs"]);
+        assert_eq!(relabelled(&kept), ["aa", "s", "as", "d", "f"]);
     }
 
     #[test]
@@ -753,14 +764,14 @@ mod tests {
     fn a_rescan_keeps_letters_that_still_lead_somewhere() {
         let mut s = five();
         s.press(verb(Action::Right));
-        s.press(letter(3));
-        // `fs`, `a` and `fa` are still there, in another order, and two
-        // new targets came: fs a fa s d.
+        s.press(letter(0));
+        // `as`, `s` and `aa` are still there, in another order, and two
+        // new targets came: as s aa d f.
         s.relabel(&[Some(4), Some(0), Some(3), None, None], 4);
-        assert_eq!(s.typed(), [3]);
+        assert_eq!(s.typed(), [0]);
         assert_eq!(s.press(letter(0)), picked(2, Action::Right));
-        s.press(letter(3));
-        // Every `f…` target left: the letters go, the verb stays.
+        s.press(letter(0));
+        // Every `a…` target left: the letters go, the verb stays.
         s.press(verb(Action::Right));
         s.relabel(&[Some(1), Some(3), None], 4);
         assert_eq!((s.typed(), s.armed()), (&[][..], Some(Action::Right)));
@@ -770,40 +781,40 @@ mod tests {
 
     #[test]
     fn a_rescan_drops_letters_one_key_from_a_new_tag() {
-        // a ba bb over two letters, `b` typed, and both `b…` targets left:
-        // the two new ones take `ba` and `bb`, and must not be picked by
+        // b aa ab over two letters, `a` typed, and both `a…` targets left:
+        // the two new ones take `aa` and `ab`, and must not be picked by
         // the letter that finishes what was typed for the old ones.
         let mut s = Selector::new(3, 2, Action::Left);
-        s.press(letter(1));
+        s.press(letter(0));
         s.relabel(&[Some(0), None, None], 2);
-        assert_eq!(s.labels(), [vec![0], vec![1, 0], vec![1, 1]]);
+        assert_eq!(s.labels(), [vec![1], vec![0, 0], vec![0, 1]]);
         assert_eq!(s.typed(), [0usize; 0]);
-        // a s d fa fs, `f` typed: `fa` is still there, but a new target
-        // took `fs`, so one key could still land on it.
+        // s d f aa as, `a` typed: `aa` is still there, but a new target
+        // took `as`, so one key could still land on it.
         let mut s = five();
-        s.press(letter(3));
+        s.press(letter(0));
         s.relabel(&[Some(0), Some(1), Some(2), Some(3), None], 4);
         assert_eq!(s.typed(), [0usize; 0]);
     }
 
     #[test]
     fn a_rescan_keeps_letters_new_tags_need_two_more_keys_for() {
-        // aa aba abb baa bab bba bbb, `b` typed, and every `b…` target
-        // left: the new ones under `b` are two keys away, so no key
+        // bb aaa aab aba abb baa bab, `a` typed, and every `a…` target
+        // left: the new ones under `a` are two keys away, so no key
         // already typed can pick one.
         let mut s = Selector::new(7, 2, Action::Left);
-        s.press(letter(1));
-        s.relabel(&[Some(0), Some(1), Some(2), None, None, None, None], 2);
-        assert_eq!(s.labels()[3], [1, 0, 0]);
-        assert_eq!(s.typed(), [1]);
+        s.press(letter(0));
+        s.relabel(&[Some(0), None, None, None, None, Some(5), Some(6)], 2);
+        assert_eq!(s.labels()[1], [0, 0, 0]);
+        assert_eq!(s.typed(), [0]);
     }
 
     #[test]
     fn backspace_takes_back_a_verb_typed_between_a_blocks_letters() {
-        // `f r` then the block's `a`: `pick` reopens what was typed before
-        // that last letter, which still has `f` in it.
+        // `a r` then the block's `s`: `pick` reopens what was typed before
+        // that last letter, which still has `a` in it.
         let mut s = five();
-        s.press(letter(3));
+        s.press(letter(0));
         s.press(verb(Action::Right));
         s.reopen(2, 4);
         s.press(Input::Backspace);
@@ -811,6 +822,26 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn adding_a_target_changes_at_most_one_surviving_label(
+            size in 2usize..23,
+            count in 0usize..600,
+            position in any::<usize>(),
+        ) {
+            let old = labels(count, size);
+            let inserted = position % (count + 1);
+            let mut kept: Vec<Option<&[usize]>> = old
+                .iter()
+                .map(|label| Some(label.as_slice()))
+                .collect();
+            kept.insert(inserted, None);
+            let fresh = relabel(&kept, size);
+            let changed = fresh.iter().zip(&kept)
+                .filter(|(label, was)| was.is_some_and(|was| label.as_slice() != was))
+                .count();
+            prop_assert!(changed <= 1, "size {size}, count {count}: {changed} labels changed");
+        }
+
         #[test]
         fn relabels_stay_prefix_free_and_keep_what_they_can(
             size in 2usize..8,

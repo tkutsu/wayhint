@@ -7,7 +7,7 @@
 //!      ^                         |                                     |
 //!      +---- another workspace --+                                     |
 //!      +---------------------------------------------------------------+
-//! Esc, Ctrl+C, --once or a click that may take typing -> clean up -> exit
+//! Close key, Ctrl+C, --once or a click that may take typing -> clean up -> exit
 //! ```
 //!
 //! Every window the focused monitor shows gets tags, not just the focused
@@ -36,7 +36,7 @@
 //!
 //! The text key hides the tags and searches the windows' text instead
 //! (`search.rs`); `Enter` acts on the current match as on a tag, after
-//! its text is read again and found unchanged, and `Esc` ends the run.
+//! its text is read again and found unchanged, and the close key ends the run.
 //! `--text` starts there.
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
@@ -149,7 +149,7 @@ pub fn run(
         &config.info,
         monitor,
     )?;
-    overlay.listen_for_toggle(toggle)?;
+    overlay.listen_for_toggle(toggle, &config.verbs)?;
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(
             "wayhint: the tags won't follow workspace changes: {e:#}"

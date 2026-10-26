@@ -166,7 +166,7 @@ pub trait Source {
 /// the same tags back.
 ///
 /// While a hold keeps a button down (`start.holding`), whatever is picked
-/// is where it's let go, and `Esc` lets go where it is.
+/// is where it's let go, and the close key lets go where it is.
 ///
 /// The input box's second line says `no targets` while nothing has a tag,
 /// names a letter no tag goes on with for `[info] duration`, and shows
@@ -263,6 +263,14 @@ pub fn pick(
             continue;
         };
         let (key, mods, ticks) = match event {
+            Event::Escape => (
+                Key {
+                    code: KeyCode::ESC,
+                    shift: false,
+                },
+                Mods::NONE,
+                0,
+            ),
             Event::Key(key, mods) => (key, mods, 0),
             Event::Held(key, mods, ticks) => (key, mods, ticks),
             // Only text mode types, and it reads its own keys.
@@ -404,10 +412,12 @@ fn rescan(
 /// arrow moves the command `[pointer] nudge` px its way, whatever is held,
 /// and held down it goes on, faster at each of its `ticks` (see `speed`).
 fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> {
+    if config.verbs.is_close(key) {
+        return Some(Input::Escape);
+    }
     let step = config.nudge * speed(ticks);
     let nudge = |x, y| Some(Input::Nudge(Point::new(x * step, y * step)));
     match key.code {
-        KeyCode::ESC => Some(Input::Escape),
         KeyCode::BACKSPACE => Some(Input::Backspace),
         KeyCode::SPACE => Some(Input::Here(mods)),
         KeyCode::UP => nudge(0, -1),
@@ -474,7 +484,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .collect();
     let spot = |target: &Target| {
         if target.role == "terminal" {
-            return Position::BottomRight.on(target.shown());
+            return target.hit;
         }
         let [x, y] = style.offset;
         style.position.on(target.shown()).offset(Point::new(x, y))
@@ -486,7 +496,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
             at: spot(target),
             target: Some(target.hit),
             position: if target.role == "terminal" {
-                Position::BottomRight
+                Position::Center
             } else {
                 style.position
             },
@@ -659,8 +669,8 @@ mod tests {
     fn a_refresh_of_the_same_controls_keeps_hint_input_live() {
         let (config, mut shown, mut selector) = refresh_scene();
         let mut fresh = shown.clone();
-        // An animated control moves while the user presses the first b
-        // of ba/bb. Resetting the gate here loses its release entirely.
+        // An animated control moves while the user presses the first a
+        // of aa/ab. Resetting the gate here loses its release entirely.
         fresh.targets[1].rect.x += 1;
         fresh.targets[1].visible.x += 1;
         fresh.targets[1].hit.x += 1;
@@ -669,14 +679,14 @@ mod tests {
             Some(Refresh::Redraw),
             "a redraw must keep queued keys and presses awaiting release"
         );
-        assert_eq!(selector.press(Input::Letter(1, Mods::NONE)), Step::Typing);
-        assert_eq!(selector.typed(), [1]);
+        assert_eq!(selector.press(Input::Letter(0, Mods::NONE)), Step::Typing);
+        assert_eq!(selector.typed(), [0]);
     }
 
     #[test]
     fn obstacle_changes_and_target_reordering_keep_partial_hints() {
         let (config, mut shown, mut selector) = refresh_scene();
-        assert_eq!(selector.press(Input::Letter(1, Mods::NONE)), Step::Typing);
+        assert_eq!(selector.press(Input::Letter(0, Mods::NONE)), Step::Typing);
         let mut fresh = shown.clone();
         fresh.obstacles.push(Rect::new(200, 200, 20, 20));
         assert_eq!(
@@ -688,7 +698,7 @@ mod tests {
             rescan(&config, &mut shown, &mut selector, &mut fresh, &mut || {}).unwrap(),
             Some(Refresh::Redraw)
         );
-        assert_eq!(selector.typed(), [1]);
+        assert_eq!(selector.typed(), [0]);
         assert!(matches!(
             selector.press(Input::Letter(0, Mods::NONE)),
             Step::Picked { index: 1, .. }
@@ -824,6 +834,31 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_close_key_replaces_escape_and_overrides_built_ins() {
+        let layout = crate::keys::Layout::named("us", "");
+        for name in ["q", "Space", "Up", "Enter"] {
+            let config = Config::parse(&format!("[keys]\nclose = {name:?}"), &layout).unwrap();
+            let code = crate::keys::named(name).unwrap_or(KeyCode::from_evdev(16));
+            assert_eq!(
+                input_of(Key { code, shift: false }, Mods::NONE, 0, &config),
+                Some(Input::Escape)
+            );
+            assert_eq!(
+                input_of(
+                    Key {
+                        code: KeyCode::ESC,
+                        shift: false
+                    },
+                    Mods::NONE,
+                    0,
+                    &config
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn a_held_arrow_speeds_up_to_a_top_speed() {
         let speeds: Vec<i32> = [0, 7, 8, 16, 24, 32, 1000].map(speed).into();
         assert_eq!(speeds, [1, 1, 2, 3, 4, 4, 4]);
@@ -893,7 +928,7 @@ mod tests {
 
     #[test]
     fn dots_thin_out_as_letters_are_typed() {
-        // Two letters, three targets: labels a, ba, bb.
+        // Two letters, three targets: labels b, aa, ab.
         let config = Config::parse(
             "[keys]\nalphabet = \"ab\"\nleft = \"\"",
             &crate::keys::Layout::named("us", ""),
@@ -932,8 +967,8 @@ mod tests {
         selector.press(Input::Nudge(Point::new(0, 14)));
         // Lines start at the tags, in the boxes' bottom-right corners.
         assert_eq!(froms(&selector), [120, 220, 320], "nudged before typing");
-        selector.press(Input::Letter(1, Mods::NONE));
-        assert_eq!(froms(&selector), [220, 320], "b leaves ba and bb");
+        selector.press(Input::Letter(0, Mods::NONE));
+        assert_eq!(froms(&selector), [220, 320], "a leaves aa and ab");
         selector.press(Input::Nudge(Point::new(14, 0)));
         let dots = frame(&selector, &config, &scene, &Said::Nothing).dots;
         assert_eq!(
@@ -996,23 +1031,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_hint_keeps_its_corner_inset_despite_general_style_offsets() {
+    fn terminal_hint_is_centered_on_the_cursor_despite_general_style_offsets() {
         let config = Config::parse(
             "[style]\nposition = \"top-left\"\noffset = [5, 2]",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
         let mut targets = three_buttons();
-        let patch = crate::pixels::terminal_patch(800, 600).offset(Point::new(100, 50));
-        targets[0].rect = patch;
-        targets[0].visible = patch;
-        targets[0].hit = patch.center();
+        let cell = Rect::new(153, 237, 8, 18);
+        targets[0].rect = cell;
+        targets[0].visible = cell;
+        targets[0].hit = cell.center();
         targets[0].role = "terminal".into();
         let scene = Scene::new(&targets, Rect::new(0, 0, 1920, 1080), None, false);
         let selector = Selector::new(targets.len(), config.alphabet.len(), Action::Left);
         let frame = frame(&selector, &config, &scene, &Said::Nothing);
-        assert_eq!(frame.tags[0].position, Position::BottomRight);
-        assert_eq!(frame.tags[0].at, Point::new(890, 640));
+        assert_eq!(frame.tags[0].position, Position::Center);
+        assert_eq!(frame.tags[0].at, Point::new(157, 246));
+        assert_eq!(frame.tags[0].target, Some(Point::new(157, 246)));
         assert!(
             frame.tags[0].pixels,
             "keep the existing terminal hint style"
@@ -1021,7 +1057,7 @@ mod tests {
         assert_eq!(frame.tags[1].at, Point::new(185, 92));
     }
 
-    /// Three buttons in a row, labelled a, ba and bb.
+    /// Three buttons in a row.
     fn three_buttons() -> Vec<Target> {
         (1..=3)
             .map(|i| Target {
@@ -1055,7 +1091,7 @@ mod tests {
             )
             .unwrap();
             let mut selector = Selector::new(3, 2, Action::Left);
-            selector.press(Input::Letter(1, Mods::NONE));
+            selector.press(Input::Letter(0, Mods::NONE));
             selector.press(Input::Verb(Action::Right, Mods::NONE));
             let frame = frame(&selector, &config, &scene(holding), &Said::Nothing);
             let tags: Vec<(String, usize)> =
@@ -1066,18 +1102,18 @@ mod tests {
         let owned = |text: &str, typed| (text.to_owned(), typed);
         let (tags, input) = shown("", false);
         assert_eq!(tags, [owned("A", 0), owned("B", 0)], "only what's left");
-        assert_eq!(input, Some(owned("right B", 6)), "the verb dimmed");
+        assert_eq!(input, Some(owned("right A", 6)), "the verb dimmed");
         let (tags, input) = shown("[input]\nhints = false", false);
         assert_eq!(
             tags,
-            [owned("rBA", 2), owned("rBB", 2)],
+            [owned("rAA", 2), owned("rAB", 2)],
             "the whole command, typed keys dimmed"
         );
         assert_eq!(input, Some(owned("right", 5)));
         let (_, input) = shown("", true);
         assert_eq!(
             input,
-            Some(owned("drop B", 5)),
+            Some(owned("drop A", 5)),
             "a hold's drop beats a verb"
         );
     }

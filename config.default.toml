@@ -20,8 +20,8 @@
 # written here as that layout prints them. The defaults below are what a US
 # layout prints; on another layout they are the same positions.
 
-# Tag letters, in priority order: earlier letters are used more, and short
-# tags come first. The default is your home row.
+# Tag letters, easiest to press first. Easy letters carry repeated prefixes;
+# short tags come first. The default is your home row.
 # alphabet = "asdfghjkl"
 
 # The verbs. Type one anywhere before a tag's last letter to do it there
@@ -41,15 +41,19 @@
 # forward = "n"             # the mouse's forward button
 # scroll_up = "PageUp"      # the wheel up, [pointer] scroll notches
 # scroll_down = "PageDown"  # the wheel down, [pointer] scroll notches
-# hold = ","                # press and keep down; the next tag or Space lets go there (a drag), Esc lets go in place
+# hold = ","                # press and keep down; the next tag or Space lets go there (a drag), the close key lets go in place
 
 # Commands of their own.
 # repeat = ""               # the last command again, on the same target; "" for none
 # text = "/"                # text mode: type text on screen, Enter acts on it; "" for none
 # help = "?"                # every key and what it does, in the info box; "" for none
+# close = "Esc"             # leave wayhint, from tags or text mode; while holding, release in place first
+# The close key takes its letter out of the alphabet. It can be a character
+# ("q", "?") or a name ("Esc", "F1" through "F24", "Space", "Home"). It
+# overrides a built-in key and also closes text mode, so its character
+# cannot be searched there. The launch shortcut always closes wayhint too.
 
-# Built in, never bindable: Esc leaves (from text mode too; while a hold is
-# down it lets go first), Backspace takes back the last key, Space acts at
+# Built in, unless chosen as the close key: Backspace takes back the last key, Space acts at
 # the pointer, Enter and Tab work in text mode, and the arrows move where a
 # click lands, held for faster.
 
@@ -148,7 +152,7 @@
 [text]
 # Text mode: the tags go, typing finds text on screen, Enter acts on the
 # current match, Tab and the arrows move between matches. Backspace with
-# nothing typed goes back to the tags; Esc leaves wayhint.
+# nothing typed goes back to the tags; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
@@ -183,6 +187,8 @@
 # Windows with no accessibility tree get tags found in their pixels.
 # detector = "full"         # "full", "fast" for slower CPUs, or "off"
 # One focus tag per terminal, independent of detector, including when it is off.
+# Kitty uses its active text cursor through remote control; other terminals
+# use a patch near the bottom-right corner.
 # terminal_hint = true
 # Programs read as terminals (input areas, not buttons). Setting it replaces
 # the whole list; [] turns terminal detection off.
