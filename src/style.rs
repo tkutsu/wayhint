@@ -163,8 +163,131 @@ pub struct Style {
     pub position: Position,
     /// Moves every tag from its position, right then down, in px.
     pub offset: [i32; 2],
+    /// The letters' case on the tags.
+    pub case: Case,
     /// The line from a tag to its dot, and the dot: `[style.leader]`.
     pub leader: Leader,
+    /// How tags found in a window's pixels differ: `[style.pixels]`.
+    pub pixels: PixelLook,
+}
+
+/// Which case tags are drawn in: `[style] case`. The keys are the same
+/// either way.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Case {
+    #[default]
+    Upper,
+    Lower,
+}
+
+impl Case {
+    /// `letter` in this case, when that's one character (`ß` upper is
+    /// `SS`, which would make a tag longer than the keys that type it).
+    pub fn of(self, letter: char) -> char {
+        fn one(letter: char, mut cased: impl Iterator<Item = char>) -> char {
+            match (cased.next(), cased.next()) {
+                (Some(c), None) => c,
+                _ => letter,
+            }
+        }
+        match self {
+            Self::Upper => one(letter, letter.to_uppercase()),
+            Self::Lower => one(letter, letter.to_lowercase()),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Upper => "upper",
+            Self::Lower => "lower",
+        }
+    }
+}
+
+/// `[style.pixels]`: the look of tags found in a window's pixels, which
+/// are guesses and miss more often than tags from the accessibility tree.
+/// Unset fields are `[style]`'s; by default only the letters differ, in
+/// teal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PixelLook {
+    pub font: Option<String>,
+    pub size: Option<f32>,
+    pub text: Option<Color>,
+    pub dimmed: Option<Color>,
+    pub background: Option<Color>,
+    pub border: Option<Color>,
+    pub border_width: Option<f32>,
+    pub radius: Option<f32>,
+    pub padding: Option<[f32; 2]>,
+}
+
+impl Default for PixelLook {
+    fn default() -> Self {
+        Self {
+            font: None,
+            size: None,
+            text: Some(Color::rgba(0x94, 0xe2, 0xd5, 0xff)),
+            dimmed: None,
+            background: None,
+            border: None,
+            border_width: None,
+            radius: None,
+            padding: None,
+        }
+    }
+}
+
+impl PixelLook {
+    /// The table as TOML, for `wayhint config`. An unset field is written
+    /// commented out, as `[style]`'s value it is now.
+    fn render(&self, style: &Style) -> String {
+        let pixels = style.for_pixels();
+        let mut out = String::from(
+            "\n[style.pixels]   # tags found in a window's pixels: guesses; unset fields are [style]'s\n",
+        );
+        let quote = crate::config::quote;
+        let [pad_y, pad_x] = pixels.padding;
+        for (name, set, now) in [
+            ("font", self.font.is_some(), quote(&pixels.font)),
+            ("size", self.size.is_some(), pixels.size.to_string()),
+            ("text", self.text.is_some(), format!("\"{}\"", pixels.text)),
+            (
+                "dimmed",
+                self.dimmed.is_some(),
+                format!("\"{}\"", pixels.dimmed),
+            ),
+            (
+                "background",
+                self.background.is_some(),
+                format!("\"{}\"", pixels.background),
+            ),
+            (
+                "border",
+                self.border.is_some(),
+                format!("\"{}\"", pixels.border),
+            ),
+            (
+                "border_width",
+                self.border_width.is_some(),
+                pixels.border_width.to_string(),
+            ),
+            ("radius", self.radius.is_some(), pixels.radius.to_string()),
+            (
+                "padding",
+                self.padding.is_some(),
+                format!("[{pad_y}, {pad_x}]"),
+            ),
+        ] {
+            let _ = if set {
+                writeln!(out, "{name} = {now}")
+            } else {
+                writeln!(out, "# {name} = {now}   # unset: [style]'s")
+            };
+        }
+        out
+    }
 }
 
 /// `[style.leader]`: the line from a tag to where it clicks, and the dot
@@ -270,7 +393,9 @@ impl Default for Style {
             padding: [2.0, 5.0],
             position: Position::default(),
             offset: [0, 0],
+            case: Case::default(),
             leader: Leader::default(),
+            pixels: PixelLook::default(),
         }
     }
 }
@@ -278,7 +403,26 @@ impl Default for Style {
 impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
-        self.validate_table("style")
+        self.validate_table("style")?;
+        self.for_pixels().validate_table("style.pixels")
+    }
+
+    /// The look of tags found in pixels: this one, with `[style.pixels]`
+    /// over it.
+    pub fn for_pixels(&self) -> Self {
+        let p = &self.pixels;
+        Self {
+            font: p.font.clone().unwrap_or_else(|| self.font.clone()),
+            size: p.size.unwrap_or(self.size),
+            text: p.text.unwrap_or(self.text),
+            dimmed: p.dimmed.unwrap_or(self.dimmed),
+            background: p.background.unwrap_or(self.background),
+            border: p.border.unwrap_or(self.border),
+            border_width: p.border_width.unwrap_or(self.border_width),
+            radius: p.radius.unwrap_or(self.radius),
+            padding: p.padding.unwrap_or(self.padding),
+            ..self.clone()
+        }
     }
 
     /// Validate a tag or input style, naming the table that supplied it.
@@ -308,9 +452,16 @@ impl Style {
         self.leader.validate()
     }
 
-    /// The table as TOML, `[style.leader]` too, for `wayhint config`.
+    /// The table as TOML, `[style.leader]` and `[style.pixels]` too, for
+    /// `wayhint config`.
     pub fn render(&self) -> String {
-        self.render_table("style", "on the target") + &self.leader.render(self)
+        format!(
+            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
+            self.render_table("style", "on the target"),
+            self.case.name(),
+            self.leader.render(self),
+            self.pixels.render(self),
+        )
     }
 
     /// A complete look under its owning table, for `wayhint config`.
@@ -617,6 +768,40 @@ impl Mark {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_case_keeps_one_character() {
+        assert_eq!(Case::Upper.of('a'), 'A');
+        assert_eq!(Case::Upper.of('α'), 'Α');
+        assert_eq!(Case::Upper.of(';'), ';');
+        assert_eq!(Case::Upper.of('ß'), 'ß', "SS would be two");
+        assert_eq!(Case::Lower.of('A'), 'a');
+        assert_eq!(Case::Lower.of('a'), 'a');
+    }
+
+    #[test]
+    fn pixel_tags_differ_only_where_set() {
+        let style = Style {
+            size: 17.0,
+            ..Style::default()
+        };
+        let pixels = style.for_pixels();
+        assert_eq!(pixels.text, Color::rgba(0x94, 0xe2, 0xd5, 0xff), "teal");
+        assert_eq!(
+            Style {
+                text: style.text,
+                ..pixels.clone()
+            },
+            style,
+            "the rest is [style]'s"
+        );
+        let mut bordered = style.clone();
+        bordered.pixels.border = Some(Color::rgba(0xff, 0, 0, 0xff));
+        bordered.pixels.border_width = Some(2.0);
+        let pixels = bordered.for_pixels();
+        assert_eq!((pixels.border.r, pixels.border_width), (0xff, 2.0));
+        assert_eq!(pixels.size, 17.0);
+    }
 
     #[test]
     fn matches_are_yellow_and_the_current_one_orange_by_default() {

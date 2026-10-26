@@ -106,6 +106,8 @@ pub struct Tag {
     pub typed: usize,
     /// The click point; absent for a box. Placement never changes it.
     pub target: Option<Point>,
+    /// Found in its window's pixels: drawn in `[style.pixels]`.
+    pub pixels: bool,
 }
 
 /// A rasterized letter: where it sits relative to the pen, and its pixels.
@@ -130,6 +132,8 @@ struct Row {
 /// glyphs.
 pub struct Painter {
     tags: TextPainter,
+    /// Tags found in pixels: `[style.pixels]`.
+    pixels: TextPainter,
     input: TextPainter,
     /// The messages' icons: `[info] icon_font`, at the input box's size.
     icons: TextPainter,
@@ -163,6 +167,7 @@ impl Painter {
         };
         Ok(Self {
             tags: TextPainter::new(style, scale)?,
+            pixels: TextPainter::new(&style.for_pixels(), scale)?,
             input: TextPainter::new(input, scale)?,
             icons: TextPainter::new(&icons, scale)?,
             marks: *marks,
@@ -172,6 +177,12 @@ impl Painter {
             regions: Vec::new(),
             placed: HashMap::new(),
         })
+    }
+
+    /// The font and look `tag` is drawn in: `[style]`, or `[style.pixels]`
+    /// for a tag found in pixels.
+    const fn look(&self, tag: &Tag) -> &TextPainter {
+        if tag.pixels { &self.pixels } else { &self.tags }
     }
 
     /// A fresh scan invalidates placement; typing keeps the same positions.
@@ -188,7 +199,8 @@ impl Painter {
             .tags
             .iter()
             .map(|tag| {
-                let rect = place(tag.at, tag.position, self.tags.size(&tag.text), area).unwrap();
+                let rect =
+                    place(tag.at, tag.position, self.look(tag).size(&tag.text), area).unwrap();
                 BoxRect::new(
                     rect.x() as i32,
                     rect.y() as i32,
@@ -267,11 +279,12 @@ impl Painter {
         let mut lines = Vec::new();
         for &dot in &tags.dots {
             let from = if let Some(tag) = dot.tag.and_then(|i| tags.tags.get(i)) {
-                let Some(rect) = place(tag.at, tag.position, self.tags.size(&tag.text), area)
+                let Some(rect) = place(tag.at, tag.position, self.look(tag).size(&tag.text), area)
                 else {
                     continue;
                 };
-                let Some(from) = nearest_edge(rect, self.tags.style.radius, centre(dot.at)) else {
+                let Some(from) = nearest_edge(rect, self.look(tag).style.radius, centre(dot.at))
+                else {
                     continue;
                 };
                 from
@@ -282,7 +295,12 @@ impl Painter {
         }
         paint_layer(pixmap, &lines, self.scale);
         for tag in &tags.tags {
-            self.tags.paint_tag(pixmap, tag, area);
+            let look = if tag.pixels {
+                &mut self.pixels
+            } else {
+                &mut self.tags
+            };
+            look.paint_tag(pixmap, tag, area);
         }
         let dots: Vec<Part> = tags.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
         paint_layer(pixmap, &dots, self.scale);
@@ -1123,6 +1141,7 @@ offset = [20, 20]
                 text: "AB".into(),
                 typed: 0,
                 target: None,
+                pixels: false,
             }],
             highlights: vec![Highlight {
                 rect: BoxRect::new(20, 100, 40, 20),
@@ -1367,6 +1386,43 @@ offset = [20, 20]
     }
 
     #[test]
+    fn a_tag_found_in_pixels_has_its_own_look() {
+        let style = Style {
+            text: Color::rgba(255, 0, 0, 255),
+            background: Color::rgba(0, 0, 0, 255),
+            position: Position::TopLeft,
+            ..Style::default()
+        };
+        let teal = style.for_pixels().text;
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
+        let tag = |x, pixels| Tag {
+            at: Point::new(x, 20),
+            position: Position::TopLeft,
+            text: "WW".into(),
+            typed: 0,
+            target: None,
+            pixels,
+        };
+        let frame = Frame {
+            tags: vec![tag(20, false), tag(120, true)],
+            ..Frame::default()
+        };
+        let mut pixmap = Pixmap::new(200, 60).unwrap();
+        painter.paint(&mut pixmap, &frame);
+        let is = |c: Color| {
+            move |p: PremultipliedColorU8| (p.red(), p.green(), p.blue()) == (c.r, c.g, c.b)
+        };
+        let red = bounds(&pixmap, is(style.text));
+        let pixels = bounds(&pixmap, is(teal));
+        assert!(red[2] <= 100, "[style] letters only on the first: {red:?}");
+        assert!(
+            pixels[0] >= 120,
+            "teal letters only on the second: {pixels:?}"
+        );
+    }
+
+    #[test]
     fn tags_put_their_position_on_their_point() {
         let at = |position| {
             let r = place(Point::new(100, 50), position, (20.0, 10.0), (800.0, 600.0)).unwrap();
@@ -1430,6 +1486,7 @@ offset = [20, 20]
                 text: "AA".into(),
                 typed: 0,
                 target: None,
+                pixels: false,
             }],
             dots: vec![Dot {
                 from: Point::new(100, 80),
@@ -1562,6 +1619,7 @@ mod collision_tests {
                 position: Position::BottomRight,
                 text: text.into(),
                 typed: 0,
+                pixels: false,
             })
             .collect(),
             dots: vec![],
@@ -1726,9 +1784,10 @@ mod capture_replay {
                 position: config.style.position,
                 target: Some(target.hit.offset(shift)),
                 typed: 0,
+                pixels: target.in_pixels(),
                 text: label
                     .iter()
-                    .map(|&i| config.alphabet.letters()[i].label.to_ascii_uppercase())
+                    .map(|&i| config.style.case.of(config.alphabet.letters()[i].label))
                     .collect(),
             })
             .collect();
