@@ -142,19 +142,20 @@ fn keys(
         if stale && (!edit || !overlay.has_events()?) {
             find(&mut search, shown, source);
             stale = false;
-            let dropped = key.code != KeyCode::BACKSPACE
-                && drop_unmatched(&mut search, shown, source).is_some_and(|tried| {
-                    if config.info.no_match {
-                        let until = Instant::now() + config.info.duration;
-                        missed = Some((format!("no text has \"{tried}\""), until));
-                    }
-                    true
-                });
-            // Typed into one match, not backed into it or left there by
-            // a miss. An Enter that comes after the typing acts below,
-            // with its own Ctrl, Shift and Alt.
+            // A character that leaves nothing to match stays typed, to
+            // edit or take back; the info line names the query.
+            if config.info.no_match
+                && key.code != KeyCode::BACKSPACE
+                && !search.query().is_empty()
+                && search.matches().is_empty()
+            {
+                let until = Instant::now() + config.info.duration;
+                missed = Some((format!("no text has \"{}\"", search.query()), until));
+            }
+            // Typed into one match, not backed into it. An Enter that
+            // comes after the typing acts below, with its own Ctrl, Shift
+            // and Alt.
             if config.pick_unique
-                && !dropped
                 && edit
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
@@ -179,21 +180,6 @@ fn keys(
         let said = missed.as_ref().map(|m| m.0.as_str());
         overlay.update(&frame(Some(&search), stale, verb, input, said))?;
     }
-}
-
-/// Takes back the characters at the query's end that leave nothing to
-/// match, as typed with the keys that matched nothing: a fast typist's
-/// keys after a miss go with it. The query as typed if any went.
-fn drop_unmatched(
-    search: &mut Search,
-    shown: &Snapshot,
-    source: &mut dyn Source,
-) -> Option<String> {
-    let tried = search.query().to_owned();
-    while search.matches().is_empty() && search.pop() {
-        find(search, shown, source);
-    }
-    (search.query() != tried).then_some(tried)
 }
 
 /// Whether the query is long enough, `UNIQUE` characters, and has just one
@@ -334,11 +320,7 @@ fn frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        geometry::Rect,
-        style::Style,
-        text::{Span, Text},
-    };
+    use crate::{geometry::Rect, style::Style, text::Text};
 
     fn search(contents: &[&str]) -> Search {
         let texts = contents
@@ -377,66 +359,6 @@ mod tests {
 
     fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>) -> Frame {
         super::frame(search, stale, verb, &Input::new(&Style::default()), None)
-    }
-
-    /// Apps that place every span on its text's row, 10 px a character,
-    /// all in view.
-    struct Rows;
-
-    impl Source for Rows {
-        fn rescan(&mut self, _: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
-            unreachable!("text mode never scans")
-        }
-
-        fn keep(&self, _: &mut Snapshot) {
-            unreachable!("text mode opens no block")
-        }
-
-        fn read_text(&mut self, _: &Snapshot) -> Vec<Text> {
-            unreachable!("the texts are given")
-        }
-
-        #[allow(clippy::cast_possible_wrap)]
-        fn locate(&mut self, _: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
-            spans
-                .iter()
-                .map(|s| {
-                    let y = texts[s.text].rect.y;
-                    let x = s.start as i32 * 10;
-                    vec![Rect::new(x, y, (s.end - s.start) as i32 * 10, 20)]
-                })
-                .collect()
-        }
-
-        fn shows(&self, _: &Snapshot, _: usize, _: Point) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn characters_that_match_nothing_are_dropped_together() {
-        let shown = Snapshot::build(1, 0, std::iter::empty());
-        let mut found = search(&["contact", "falcon"]);
-        "con".chars().for_each(|c| found.push(c));
-        find(&mut found, &shown, &mut Rows);
-        assert_eq!(drop_unmatched(&mut found, &shown, &mut Rows), None);
-        // Typed fast: t matches contact, then x and y match nothing.
-        "txy".chars().for_each(|c| found.push(c));
-        find(&mut found, &shown, &mut Rows);
-        assert_eq!(
-            drop_unmatched(&mut found, &shown, &mut Rows).as_deref(),
-            Some("contxy")
-        );
-        assert_eq!(found.query(), "cont");
-        assert_eq!(found.matches().len(), 1, "contact is still found");
-        let mut nothing = search(&["contact"]);
-        nothing.push('q');
-        find(&mut nothing, &shown, &mut Rows);
-        assert_eq!(
-            drop_unmatched(&mut nothing, &shown, &mut Rows).as_deref(),
-            Some("q")
-        );
-        assert_eq!(nothing.query(), "", "nothing left to match");
     }
 
     #[test]
