@@ -188,7 +188,8 @@ pub fn pick(
         shown.targets.len(),
         config.alphabet.len(),
         config.verbs.default_action(),
-    );
+    )
+    .with_auto_accept(config.hint_auto_accept);
     if let Some(action) = start.verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
@@ -443,6 +444,7 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
     let nudge = |x, y| Some(Input::Nudge(Point::new(x * step, y * step)));
     match key.code {
         KeyCode::BACKSPACE => Some(Input::Backspace),
+        KeyCode::ENTER => Some(Input::Confirm(mods)),
         KeyCode::SPACE => Some(Input::Here(mods)),
         KeyCode::UP => nudge(0, -1),
         KeyCode::DOWN => nudge(0, 1),
@@ -510,6 +512,12 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
     let tags: Vec<Tag> = open
         .iter()
         .map(|(label, target)| {
+            // Keep a completed tag visible while Enter is still needed.
+            let (skip, dimmed) = if selector.typed() == label.as_slice() {
+                (0, prefix.chars().count() + label.len())
+            } else {
+                (skip, dimmed)
+            };
             let text = prefix.chars().chain(label[skip..].iter().map(letter));
             tag(target, text.collect(), dimmed, config)
         })
@@ -830,6 +838,7 @@ mod tests {
             ..Mods::NONE
         };
         assert_eq!(input(57, false), Some(Input::Here(Mods::NONE)));
+        assert_eq!(input(28, true), Some(Input::Confirm(shift)));
         assert_eq!(
             input(19, false),
             Some(Input::Verb(Action::Right, Mods::NONE))
@@ -1145,6 +1154,24 @@ mod tests {
             Some(owned("drop A", 5)),
             "a hold's drop beats a verb"
         );
+    }
+
+    #[test]
+    fn a_completed_hint_stays_visible_while_waiting_for_enter() {
+        let config = Config::parse(
+            "[hints]\nauto_accept = false",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let targets = three_buttons();
+        let mut selector = Selector::new(3, config.alphabet.len(), Action::Left)
+            .with_auto_accept(config.hint_auto_accept);
+        assert_eq!(selector.press(Input::Letter(0, Mods::NONE)), Step::Typing);
+        let scene = Scene::new(&targets, Rect::new(0, 0, 1920, 1080), None, false);
+        let frame = frame(&selector, &config, &scene, &Said::Nothing);
+        assert_eq!(frame.tags.len(), 1);
+        assert_eq!((frame.tags[0].text.as_str(), frame.tags[0].typed), ("A", 1));
+        assert_eq!(frame.tags[0].target, Some(targets[0].hit));
     }
 
     #[test]

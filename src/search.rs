@@ -8,7 +8,7 @@
 //!                 Backspace with nothing typed: back to the tags
 //!                 close key: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
-//!                 one match left (with [text] pick_unique): as Enter
+//!                 one match left (with [text] auto_accept): as Enter
 //!                 a whole tag typed (with [text] hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
 //! ```
@@ -43,7 +43,7 @@ use crate::{
     text::{Check, Place, Search},
 };
 
-/// How many characters `[text] pick_unique` waits for before acting on
+/// How many characters `[text] auto_accept` waits for before acting on
 /// the only match: fewer match too much by chance.
 pub const UNIQUE: usize = 3;
 
@@ -128,6 +128,18 @@ impl Hints {
             .filter(|_| !search.starts_a_word(search.query()))
     }
 
+    /// A completed hint acts on Enter, or while typing with autoaccept.
+    fn choice(
+        &self,
+        pressed: &[Option<usize>],
+        search: &Search,
+        config: &Config,
+        enter: bool,
+    ) -> Option<usize> {
+        self.typed(pressed, search)
+            .filter(|_| enter || config.hint_auto_accept)
+    }
+
     /// Whether a label goes on from `pressed`.
     fn open(&self, pressed: &[Option<usize>]) -> bool {
         self.0.iter().any(|(_, label)| opens(label, pressed))
@@ -147,6 +159,11 @@ impl Hints {
             .iter()
             .filter(|(_, label)| opens(label, pressed))
             .map(|(index, label)| {
+                let (skip, dimmed) = if done == label.len() {
+                    (0, done)
+                } else {
+                    (skip, dimmed)
+                };
                 let text = spell(label, config);
                 let text = text.chars().skip(skip).map(|c| config.style.case.of(c));
                 pick::tag(&shown.targets[*index], text.collect(), dimmed, config)
@@ -262,10 +279,18 @@ fn keys(
                         let Some(index) = hints.picked(&last) else {
                             continue;
                         };
-                        return Ok(Some(Pick::Target {
-                            index,
-                            act: selector.act(mods),
-                        }));
+                        if config.hint_auto_accept {
+                            return Ok(Some(Pick::Target {
+                                index,
+                                act: selector.act(mods),
+                            }));
+                        }
+                        // Ctrl/Alt may type no character. Keep the tag's
+                        // letter so it can be edited or confirmed later.
+                        let Some(letter) = letter else { continue };
+                        search.push(config.alphabet.letters()[letter].label);
+                        pressed.push(Some(letter));
+                        true
                     }
                     _ => continue,
                 }
@@ -274,7 +299,7 @@ fn keys(
         stale |= edit;
         if edit
             && key.code != KeyCode::BACKSPACE
-            && let Some(index) = hints.typed(&pressed, &search)
+            && let Some(index) = hints.choice(&pressed, &search, config, false)
         {
             let act = selector.act(mods);
             return Ok(Some(Pick::Target { index, act }));
@@ -298,7 +323,7 @@ fn keys(
             // Typed into one match, not backed into it. An Enter that
             // comes after the typing acts below, with its own Ctrl, Shift
             // and Alt.
-            if config.pick_unique
+            if config.text_auto_accept
                 && edit
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
@@ -310,6 +335,12 @@ fn keys(
         }
         match key.code {
             KeyCode::ENTER => {
+                if let Some(index) = hints.choice(&pressed, &search, config, true) {
+                    return Ok(Some(Pick::Target {
+                        index,
+                        act: selector.act(mods),
+                    }));
+                }
                 if let Some(chosen) = choose(&search, shown, selector.act(mods), cursor) {
                     return Ok(Some(Pick::Text(Box::new(chosen))));
                 }
@@ -804,6 +835,27 @@ mod tests {
         let (_, mut latin) = buttons("Save add");
         latin.push('δ');
         assert_eq!(hints.typed(&[Some(2)], &latin), Some(1), "no word: the tag");
+    }
+
+    #[test]
+    fn text_modes_hints_wait_for_enter_independently_of_text_autoaccept() {
+        let (shown, mut found) = buttons("Save add");
+        typed(&mut found, "d");
+        let pressed = [Some(2)];
+        for text in [false, true] {
+            let config = config(&format!(
+                "[hints]\nauto_accept = false\n[text]\nauto_accept = {text}"
+            ));
+            let hints = Hints::new(&found, &shown, &config);
+            assert_eq!(hints.choice(&pressed, &found, &config, false), None);
+            assert_eq!(hints.choice(&pressed, &found, &config, true), Some(1));
+            assert_eq!(hints.choice(&[], &found, &config, true), None);
+            let tags = hints.tags(&pressed, &shown, &config);
+            assert_eq!((tags[0].text.as_str(), tags[0].typed), ("D", 1));
+        }
+        let config = config("");
+        let hints = Hints::new(&found, &shown, &config);
+        assert_eq!(hints.choice(&pressed, &found, &config, false), Some(1));
     }
 
     #[test]

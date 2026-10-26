@@ -309,16 +309,34 @@ whose label wasn't read, and windows tagged from their pixels. A control
 whose own text was read (a button's label, a link's words) loses its tag,
 since typing the text finds it. These tags use letters that no word on
 screen starts with, so a whole tag is never also a query. Typing a whole
-tag acts on its target at once, as in tag mode. Until then, what you type
-counts for both, and the tags that no longer fit go away. `hints = false`
-under `[text]` hides them all again.
+tag acts on its target according to `[hints] auto_accept`, as in tag mode.
+Until then, what you type counts for both, and the tags that no longer fit
+go away. `hints = false` under `[text]` hides them all again.
 
 `[text] cursor` picks where in the match `Enter` acts. The default,
 `"center"`, is the middle of the first visible line. `"start"` is that
 line's left edge, and `"end"` the rightmost pixel of the last visible
 line, each halfway down its line and inside the match's box. With
-`pick_unique = true`, a query of 3 or more characters that leaves one
-match acts on it without `Enter`.
+`auto_accept = true` under `[text]`, a query of 3 or more characters that
+leaves one match acts on it without `Enter`. The former name,
+`pick_unique`, still works.
+
+Hints and text have separate acceptance settings. These are the defaults:
+
+```toml
+[hints]
+auto_accept = true
+
+[text]
+auto_accept = false
+```
+
+With `[hints] auto_accept = false`, type a whole tag, then press `Enter`
+to act on it. This also applies to tags in text mode and tags that open
+paragraphs into lines. Until Enter, `Backspace` can correct the tag; in
+tag mode, verbs and arrows can still change its action and position.
+Hold `Shift`, `Ctrl` or `Alt` on `Enter` to apply that modifier to the
+action. Enter does nothing for an incomplete tag.
 
 A lower-case query ignores case; one capital letter makes it exact.
 Accents are ignored both ways (`cafe` finds "café", `α` finds "άλλο"). A
@@ -446,7 +464,8 @@ The sections:
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
 | `[input]` | The box for what you type: whether it's drawn, look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
 | `[info]` | The messages under the input box: whether they're drawn, which show, for how long, their icons and colours |
-| `[text]` | Where `Enter` acts on a match, `pick_unique`, tags on targets with no text, and OCR (`eng` or `off`, the default) |
+| `[hints]` | `auto_accept`: act on a completed tag immediately, or wait for `Enter`, in either mode |
+| `[text]` | Where `Enter` acts on a match, `auto_accept`, tags on targets with no text, and OCR (`eng` or `off`, the default) |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
 | `[pixels]` | The pixel detector (`full`, `fast` or `off`), the terminal focus tag, and which programs count as terminals |
