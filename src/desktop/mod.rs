@@ -109,9 +109,17 @@ enum Seen {
     /// With its picture, shrunk, and the picture's pixels per logical
     /// pixel: `layout` reads the same one.
     Pixels(Window, Found, (Frame, f64), Stats),
+    Untagged(Window),
 }
 
 impl Seen {
+    fn address(&self) -> &str {
+        match self {
+            Self::Tree(tree, ..) => &tree.window.address,
+            Self::Pixels(window, ..) | Self::Untagged(window) => &window.address,
+        }
+    }
+
     fn read(&self) -> Read<'_> {
         match self {
             Self::Tree(tree, filtered, stats) => Read::Tree(tree, filtered, stats),
@@ -121,6 +129,7 @@ impl Seen {
                 scale: *scale,
                 stats,
             },
+            Self::Untagged(window) => Read::Untagged(window),
         }
     }
 }
@@ -216,8 +225,10 @@ impl Desktop {
     /// accessibility bus, or no frame clearly its own) is tagged from its
     /// pixels with `pixels`, or gets no tags when that's `None`; a layer or
     /// popup that can't be read gets none, since Hyprland's window export
-    /// only takes pictures of clients. Why comes back next to the
-    /// snapshot, with any frames `stack` couldn't place.
+    /// only takes pictures of clients. kitty's surfaces left without tags
+    /// (its windows with no pixels, its dropdown layer) are kept untagged,
+    /// for text mode to ask kitty what they show. Why comes back next to
+    /// the snapshot, with any frames `stack` couldn't place.
     pub fn scan(
         &mut self,
         stack: &Stack,
@@ -263,6 +274,17 @@ impl Desktop {
                 }
             }
         }
+        let untagged: Vec<Seen> = stack
+            .windows
+            .iter()
+            .filter(|w| w.kind != Kind::Popup && is_kitty(w))
+            .filter(|w| !seen.iter().any(|s| s.address() == w.address))
+            .map(|w| Seen::Untagged(w.clone()))
+            .collect();
+        seen.extend(untagged);
+        // Back to bottom to top: a tag stays within the topmost window
+        // around it (`Painter::arrange`).
+        seen.sort_by_key(|s| stack.windows.iter().position(|w| w.address == s.address()));
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
         keep_visible(&mut snapshot, stack, monitor);
@@ -270,7 +292,7 @@ impl Desktop {
             .iter()
             .filter_map(|s| match s {
                 Seen::Pixels(window, _, picture, _) => Some((window.address.as_str(), picture)),
-                Seen::Tree(..) => None,
+                Seen::Tree(..) | Seen::Untagged(_) => None,
             })
             .collect();
         self.layout(&mut snapshot, monitor, stack, &pictures);

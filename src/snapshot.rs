@@ -163,6 +163,9 @@ pub enum Read<'a> {
         scale: f64,
         stats: &'a Stats,
     },
+    /// Nothing to tag, but text to read: kitty, which text mode asks
+    /// itself what it shows.
+    Untagged(&'a Window),
 }
 
 /// The roles pixel tags carry, for `dump` and whoever reads a snapshot:
@@ -195,6 +198,14 @@ impl Snapshot {
                         window: seen.clone(),
                         stats: stats.clone(),
                         pixels: true,
+                    });
+                    continue;
+                }
+                Read::Untagged(seen) => {
+                    windows.push(Scanned {
+                        window: seen.clone(),
+                        stats: Stats::default(),
+                        pixels: false,
                     });
                     continue;
                 }
