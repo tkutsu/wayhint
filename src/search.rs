@@ -63,8 +63,24 @@ pub struct Chosen {
 }
 
 /// Text mode's tags: each tagged target, by its index in the snapshot, and
-/// its label as the letters that type it, lower case.
-struct Hints(Vec<(usize, String)>);
+/// its label, as indices into the alphabet. They're typed as the tags are,
+/// by the keys' positions, aliases too; what those keys type is the query.
+struct Hints(Vec<(usize, Vec<usize>)>);
+
+/// A label as drawn, lower case.
+fn spell(label: &[usize], config: &Config) -> String {
+    let letters = config.alphabet.letters();
+    label
+        .iter()
+        .flat_map(|&i| letters[i].label.to_lowercase())
+        .collect()
+}
+
+/// Whether `label` goes on from `pressed`: the tag letter each key typed
+/// so far is, if any.
+fn opens(label: &[usize], pressed: &[Option<usize>]) -> bool {
+    pressed.len() <= label.len() && label.iter().zip(pressed).all(|(&l, &p)| p == Some(l))
+}
 
 impl Hints {
     /// Tags for `shown`'s targets that no text of `search` is on, in
@@ -91,44 +107,37 @@ impl Hints {
                     .is_none_or(|o| !found.contains(o))
             })
             .collect();
-        let letters = config.alphabet.letters();
-        let spell = |label: &[usize]| -> String {
-            label
-                .iter()
-                .flat_map(|&i| letters[i].label.to_lowercase())
-                .collect()
-        };
-        let free = |label: &[usize]| !search.starts_a_word(&spell(label));
-        let labels = free_labels(untyped.len(), letters.len(), &free);
-        Self(
-            untyped
-                .into_iter()
-                .zip(labels.iter().map(|l| spell(l)))
-                .collect(),
-        )
+        let free = |label: &[usize]| !search.starts_a_word(&spell(label, config));
+        let labels = free_labels(untyped.len(), config.alphabet.len(), &free);
+        Self(untyped.into_iter().zip(labels).collect())
     }
 
-    /// The target whose whole label is `typed`.
-    fn picked(&self, typed: &str) -> Option<usize> {
-        let typed = typed.to_lowercase();
+    /// The target whose whole label `pressed` is.
+    fn picked(&self, pressed: &[Option<usize>]) -> Option<usize> {
         self.0
             .iter()
-            .find(|(_, label)| *label == typed)
+            .find(|(_, label)| label.len() == pressed.len() && opens(label, pressed))
             .map(|t| t.0)
     }
 
-    /// Whether a label goes on from `typed`.
-    fn open(&self, typed: &str) -> bool {
-        let typed = typed.to_lowercase();
-        self.0.iter().any(|(_, label)| label.starts_with(&typed))
+    /// The target whose whole label `pressed` is, typed into `search`. A
+    /// label starts no word, but what an alias or another layout types
+    /// for it may: then it's text.
+    fn typed(&self, pressed: &[Option<usize>], search: &Search) -> Option<usize> {
+        self.picked(pressed)
+            .filter(|_| !search.starts_a_word(search.query()))
     }
 
-    /// The tags still open after `typed`, drawn as `pick` draws its own:
+    /// Whether a label goes on from `pressed`.
+    fn open(&self, pressed: &[Option<usize>]) -> bool {
+        self.0.iter().any(|(_, label)| opens(label, pressed))
+    }
+
+    /// The tags still open after `pressed`, drawn as `pick` draws its own:
     /// with `[input] hints`, only the letters left to type; without, the
     /// whole label with what's typed dimmed.
-    fn tags(&self, typed: &str, shown: &Snapshot, config: &Config) -> Vec<Tag> {
-        let typed = typed.to_lowercase();
-        let done = typed.chars().count();
+    fn tags(&self, pressed: &[Option<usize>], shown: &Snapshot, config: &Config) -> Vec<Tag> {
+        let done = pressed.len();
         let (skip, dimmed) = if config.input.hints {
             (done, 0)
         } else {
@@ -136,9 +145,10 @@ impl Hints {
         };
         self.0
             .iter()
-            .filter(|(_, label)| label.starts_with(&typed))
+            .filter(|(_, label)| opens(label, pressed))
             .map(|(index, label)| {
-                let text = label.chars().skip(skip).map(|c| config.style.case.of(c));
+                let text = spell(label, config);
+                let text = text.chars().skip(skip).map(|c| config.style.case.of(c));
                 pick::tag(&shown.targets[*index], text.collect(), dimmed, config)
             })
             .collect()
@@ -180,11 +190,13 @@ fn keys(
     overlay.update(&frame(None, false, verb, input, None))?;
     let mut search = Search::new(source.read_text(shown));
     let hints = Hints::new(&search, shown, config);
-    let draw = |search: &Search, stale, missed: Option<&str>| Frame {
-        tags: hints.tags(search.query(), shown, config),
+    // For each character of the query, the tag letter its key is, if any.
+    let mut pressed: Vec<Option<usize>> = Vec::new();
+    let draw = |search: &Search, pressed: &[_], stale, missed: Option<&str>| Frame {
+        tags: hints.tags(pressed, shown, config),
         ..frame(Some(search), stale, verb, input, missed)
     };
-    overlay.update(&draw(&search, false, None))?;
+    overlay.update(&draw(&search, &pressed, false, None))?;
     // The query changed since the matches were found.
     let mut stale = false;
     // What was typed that matched nothing, and until when it's named.
@@ -192,7 +204,7 @@ fn keys(
     loop {
         let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
             missed = None;
-            overlay.update(&draw(&search, stale, None))?;
+            overlay.update(&draw(&search, &pressed, stale, None))?;
             continue;
         };
         let (key, mods, typed) = match event {
@@ -224,6 +236,7 @@ fn keys(
                 if !search.pop() {
                     return Ok(None);
                 }
+                pressed.pop();
                 true
             }
             KeyCode::ENTER
@@ -234,19 +247,34 @@ fn keys(
             | KeyCode::TAB
             | KeyCode::HOME
             | KeyCode::END => false,
-            // Ctrl and Alt type nothing; AltGr isn't Alt.
-            _ => match typed {
-                Some(c) if !mods.ctrl && !mods.alt => {
-                    search.push(c);
-                    true
+            // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
+            // tag, as a Ctrl- or Alt-click, as with the tags.
+            _ => {
+                let letter = config.alphabet.index_of(key.code);
+                match typed {
+                    Some(c) if !mods.ctrl && !mods.alt => {
+                        search.push(c);
+                        pressed.push(letter);
+                        true
+                    }
+                    _ if mods.ctrl || mods.alt => {
+                        let last = [pressed.as_slice(), &[letter]].concat();
+                        let Some(index) = hints.picked(&last) else {
+                            continue;
+                        };
+                        return Ok(Some(Pick::Target {
+                            index,
+                            act: selector.act(mods),
+                        }));
+                    }
+                    _ => continue,
                 }
-                _ => continue,
-            },
+            }
         };
         stale |= edit;
         if edit
             && key.code != KeyCode::BACKSPACE
-            && let Some(index) = hints.picked(search.query())
+            && let Some(index) = hints.typed(&pressed, &search)
         {
             let act = selector.act(mods);
             return Ok(Some(Pick::Target { index, act }));
@@ -262,7 +290,7 @@ fn keys(
                 && key.code != KeyCode::BACKSPACE
                 && !search.query().is_empty()
                 && search.matches().is_empty()
-                && !hints.open(search.query())
+                && !hints.open(&pressed)
             {
                 let until = Instant::now() + config.info.duration;
                 missed = Some((format!("no text has \"{}\"", search.query()), until));
@@ -274,7 +302,7 @@ fn keys(
                 && edit
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
-                && !hints.open(search.query())
+                && !hints.open(&pressed)
                 && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
             {
                 return Ok(Some(Pick::Text(Box::new(chosen))));
@@ -294,7 +322,7 @@ fn keys(
             _ => {}
         }
         let said = missed.as_ref().map(|m| m.0.as_str());
-        overlay.update(&draw(&search, stale, said))?;
+        overlay.update(&draw(&search, &pressed, stale, said))?;
     }
 }
 
@@ -747,16 +775,35 @@ mod tests {
         let (shown, found) = buttons("Save add");
         let hints = Hints::new(&found, &shown, &config(""));
         // s and a start Save and add: the icon and the pixel tag get d and f.
-        assert_eq!(hints.0, [(1, "d".to_owned()), (2, "f".to_owned())]);
-        assert_eq!(hints.picked("D"), Some(1), "Shift types the same tag");
-        assert_eq!(hints.picked("s"), None);
-        assert!(hints.open("") && hints.open("f") && !hints.open("s"));
-        let tags = hints.tags("", &shown, &config(""));
+        assert_eq!(hints.0, [(1, vec![2]), (2, vec![3])]);
+        assert_eq!(hints.picked(&[Some(2)]), Some(1));
+        assert_eq!(hints.picked(&[Some(1)]), None);
+        assert!(hints.open(&[]) && hints.open(&[Some(3)]) && !hints.open(&[Some(1)]));
+        assert!(!hints.open(&[None]), "a key that's no tag letter");
+        let tags = hints.tags(&[], &shown, &config(""));
         let texts: Vec<&str> = tags.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, ["D", "F"]);
         assert_eq!(tags[0].target, Some(shown.targets[1].hit));
         let off = Hints::new(&found, &shown, &config("[text]\nhints = false"));
-        assert_eq!(off.0, Vec::<(usize, String)>::new());
+        assert_eq!(off.0, Vec::<(usize, Vec<usize>)>::new());
+    }
+
+    #[test]
+    fn a_tag_is_typed_by_its_keys_aliases_too_unless_their_text_is_found() {
+        let config = config("[keys.aliases]\n\";\" = \"d\"");
+        let (shown, mut found) = buttons("Save add");
+        let hints = Hints::new(&found, &shown, &config);
+        let semicolon = crate::keys::KeyCode::from_evdev(39);
+        let pressed = [config.alphabet.index_of(semicolon)];
+        found.push(';');
+        assert_eq!(hints.typed(&pressed, &found), Some(1), "; is d's alias");
+        // Another layout: the d key types δ, which starts a word here.
+        let (_, mut greek) = buttons("Save δέντρο");
+        greek.push('δ');
+        assert_eq!(hints.typed(&[Some(2)], &greek), None, "δ is text");
+        let (_, mut latin) = buttons("Save add");
+        latin.push('δ');
+        assert_eq!(hints.typed(&[Some(2)], &latin), Some(1), "no word: the tag");
     }
 
     #[test]
@@ -769,18 +816,19 @@ mod tests {
 
     #[test]
     fn unmatched_text_stays_typed_and_can_be_edited_back_to_a_tag() {
-        let hints = Hints(vec![(0, "xa".into())]);
+        // A tag `xa`, with x and a the alphabet's letters 0 and 1.
+        let hints = Hints(vec![(0, vec![0, 1])]);
         let mut found = search(&["contact"]);
+        let mut pressed = vec![Some(0)];
         typed(&mut found, "x");
-        assert!(hints.open(found.query()));
+        assert!(hints.open(&pressed));
         typed(&mut found, "q");
+        pressed.push(None);
         assert_eq!(found.matches(), []);
-        assert!(!hints.open(found.query()));
+        assert!(!hints.open(&pressed));
         assert_eq!(found.query(), "xq", "unmatched text stays typed");
         assert!(found.pop());
-        assert!(
-            hints.open(found.query()),
-            "Backspace restores the tag prefix"
-        );
+        pressed.pop();
+        assert!(hints.open(&pressed), "Backspace restores the tag prefix");
     }
 }
