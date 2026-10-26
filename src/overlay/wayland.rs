@@ -21,6 +21,7 @@ use smithay_client_toolkit::{
             Connection, Proxy, QueueHandle, WEnum,
             protocol::{wl_callback, wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
         },
+        protocols::wp::viewporter::client::wp_viewport::WpViewport,
         protocols_misc::zwp_input_method_v2::client::{
             zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
             zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
@@ -83,8 +84,13 @@ pub struct State {
     /// another input method (fcitx, IBus) turned out to hold the seat's slot.
     pub input_methods: Option<ZwpInputMethodManagerV2>,
     pub layer: Option<LayerSurface>,
-    /// The size the compositor gave the overlay, once it has.
+    /// The size the compositor gave the overlay, once it has, in logical px.
     pub size: Option<(u32, u32)>,
+    /// Buffer px per logical px: what the popup's buffer is drawn at.
+    pub scale: f64,
+    /// Shows the popup's buffer at its logical size, whatever its scale.
+    /// `None` without `wp_viewporter`.
+    pub viewport: Option<WpViewport>,
     /// The layer's popup, which the tags are drawn on, and whether the
     /// compositor has placed it yet.
     pub popup: Option<Popup>,
@@ -190,13 +196,20 @@ impl State {
         Ok(())
     }
 
+    /// The popup's buffer size, in buffer px, once the compositor has given
+    /// the overlay its size.
+    pub fn buffer_size(&self) -> Option<(u32, u32)> {
+        self.size.map(|size| buffer_size(size, self.scale))
+    }
+
     /// Draws a finished pixmap on the overlay's popup.
     pub fn present(&mut self, pixmap: &Pixmap) -> anyhow::Result<()> {
-        let (Some(popup), Some((w, h)), Some(pool)) = (&self.popup, self.size, &mut self.pool)
+        let (Some(popup), Some((w, h)), Some(pool)) =
+            (&self.popup, self.buffer_size(), &mut self.pool)
         else {
             anyhow::bail!("the overlay isn't configured yet");
         };
-        // The pixmap is copied row after row with the surface's width: a
+        // The pixmap is copied row after row with the buffer's width: a
         // pixmap of another size would come out sheared.
         if (pixmap.width(), pixmap.height()) != (w, h) {
             anyhow::bail!("the monitor changed size; run wayhint again");
@@ -419,9 +432,30 @@ impl LayerShellHandler for State {
         }
         if self.size != Some(size) {
             self.size = Some(size);
-            let bytes = size.0 as usize * size.1 as usize * 4;
+            let (w, h) = buffer_size(size, self.scale);
+            let bytes = w as usize * h as usize * 4;
             self.pool = SlotPool::new(bytes, &self.shm).ok();
         }
+    }
+}
+
+/// A buffer for a surface `size` logical px big, at `scale` buffer px each.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // monitor sizes fit a u32
+pub fn buffer_size((w, h): (u32, u32), scale: f64) -> (u32, u32) {
+    let scaled = |n: u32| (f64::from(n) * scale).round() as u32;
+    (scaled(w), scaled(h))
+}
+
+/// The scale the overlay draws at, for a monitor at `scale`: all of it
+/// with a viewport to show the buffer at the logical size, else only a
+/// whole scale, which `set_buffer_scale` takes, else 1. A fractional scale
+/// drawn at 1 is blurred up by the compositor, as before.
+pub fn drawn_scale(scale: f64, viewport: bool) -> f64 {
+    let whole = scale >= 1.0 && scale.fract() == 0.0;
+    if (viewport && scale > 0.0) || whole {
+        scale
+    } else {
+        1.0
     }
 }
 
@@ -624,3 +658,19 @@ impl ProvidesRegistryState for State {
 
 smithay_client_toolkit::delegate_registry!(State);
 smithay_client_toolkit::delegate_dispatch2!(State);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scaled_monitor_gets_its_physical_pixels() {
+        assert_eq!(drawn_scale(1.5, true), 1.5, "a viewport takes any scale");
+        assert_eq!(drawn_scale(1.5, false), 1.0, "else a fraction is blurred");
+        assert_eq!(drawn_scale(2.0, false), 2.0, "a whole scale needs none");
+        assert_eq!(drawn_scale(1.0, false), 1.0);
+        // 2560x1440 at 1.5 is 1707x960 logical.
+        assert_eq!(buffer_size((1707, 960), 1.5), (2561, 1440));
+        assert_eq!(buffer_size((1920, 1080), 2.0), (3840, 2160));
+    }
+}
