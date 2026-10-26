@@ -96,7 +96,7 @@ pub struct Desktop {
     /// Made the first time a window has no tree: most runs never need it.
     camera: Option<Camera>,
     /// Each client's picture for placing labels, by address, until
-    /// [`Desktop::forget_pictures`].
+    /// [`Desktop::new_round`].
     pictures: HashMap<String, Picture>,
     /// The apps' open menus, once a run starts following them.
     menus: Option<Menus>,
@@ -399,7 +399,7 @@ impl Desktop {
     /// unreadable window stays fully protected instead of guessing it is blank.
     /// The same picture puts each document body's tag in its clearest spot
     /// that no surface in `stack` may cover. A client's picture is taken
-    /// once until [`Desktop::forget_pictures`], or again if it resized;
+    /// once a round ([`Desktop::new_round`]), or again if it resized;
     /// one in `unpictured` (by address) gets none, as a terminal cursor or
     /// fixed fallback hint needs none.
     pub fn layout(
@@ -635,10 +635,12 @@ impl Desktop {
             .or_insert(picture))
     }
 
-    /// Lets go of the pictures kept for placing labels, so the next scan
-    /// takes new ones: a round's first scan does, its refreshes don't.
-    pub fn forget_pictures(&mut self) {
+    /// Lets go of what the last round's scans kept, the windows' pictures
+    /// and what each object is, so the next scan reads them afresh: a
+    /// round's first scan does, its refreshes don't.
+    pub fn new_round(&mut self) {
         self.pictures.clear();
+        self.scanner.forget();
     }
 
     /// The text of every object in `snapshot.texts` that shows some, and

@@ -26,14 +26,14 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     future::Future,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
 use atspi::{
-    CoordType, Granularity, Interface, ObjectRefOwned, State, StateSet,
+    CoordType, Granularity, Interface, InterfaceSet, ObjectRefOwned, State, StateSet,
     proxy::{
         accessible::AccessibleProxy, action::ActionProxy, application::ApplicationProxy,
         component::ComponentProxy, text::TextProxy,
@@ -88,6 +88,20 @@ pub struct Stats {
 /// An open connection to the accessibility bus.
 pub struct Scanner {
     a11y: AccessibilityConnection,
+    /// What each object read so far is, until [`Scanner::forget`].
+    known: RefCell<HashMap<ObjectId, Known>>,
+}
+
+/// What an object is, which apps rarely change while it exists: its role,
+/// its interfaces and its actions' names. A refresh asks for its states,
+/// name, box and children again, but not these: they are most of a scan's
+/// requests (a Chromium window's 8,064, measured 2026-10-26).
+#[derive(Debug, Clone)]
+struct Known {
+    role: String,
+    interfaces: InterfaceSet,
+    /// Read for candidates only (`Walk::details`).
+    actions: Option<Vec<String>>,
 }
 
 impl Scanner {
@@ -97,7 +111,23 @@ impl Scanner {
         let a11y = AccessibilityConnection::new()
             .await
             .context("connecting to the accessibility bus (is at-spi-bus-launcher running?)")?;
-        Ok(Self { a11y })
+        Ok(Self {
+            a11y,
+            known: RefCell::default(),
+        })
+    }
+
+    /// Lets go of what the objects read so far are, so the next scan asks
+    /// again: a round's first scan does, its refreshes don't. An object
+    /// that changed its role meanwhile (a page's ARIA role) is read right
+    /// by the next round.
+    pub fn forget(&self) {
+        self.known.borrow_mut().clear();
+    }
+
+    /// A walk that ends at `deadline`.
+    fn walk(&self, deadline: Instant) -> Walk<'_> {
+        Walk::new(self.a11y.connection(), &self.known, deadline)
     }
 
     /// Reads one client's tree within `bounds`, from the frame with its
@@ -105,7 +135,7 @@ impl Scanner {
     /// several at once.
     pub async fn scan(&self, window: &Window, bounds: Bounds) -> Result<(Tree, Stats)> {
         let started = Instant::now();
-        let walk = Walk::new(self.a11y.connection(), started + bounds.time);
+        let walk = self.walk(started + bounds.time);
         let frame = walk
             .find_frame(&self.a11y, window)
             .await
@@ -122,7 +152,7 @@ impl Scanner {
         bounds: Bounds,
     ) -> (Tree, Stats) {
         let started = Instant::now();
-        let mut walk = Walk::new(self.a11y.connection(), started + bounds.time);
+        let mut walk = self.walk(started + bounds.time);
         if window.kind == Kind::Menu
             && let Err(e) = walk.enter_menu(frame).await
         {
@@ -141,7 +171,7 @@ impl Scanner {
     /// answer. On Wayland an app's screen is its window: Qt and Firefox
     /// both put the window's corner at 0,0 there.
     pub async fn menus(&self, open: &[ObjectId], timeout: Duration) -> Vec<Option<Menu>> {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let walk = self.walk(Instant::now() + timeout);
         let read = |object: &ObjectId| {
             let walk = &walk;
             let object = object.clone();
@@ -173,7 +203,7 @@ impl Scanner {
         pids: &BTreeSet<u32>,
         timeout: Duration,
     ) -> Vec<(u32, Result<Vec<Frame>>)> {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let walk = self.walk(Instant::now() + timeout);
         let mut all = Vec::new();
         for &pid in pids {
             let frames = async {
@@ -195,7 +225,7 @@ impl Scanner {
         menu: Option<&ObjectId>,
         timeout: Duration,
     ) -> Result<Fresh> {
-        let mut walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let mut walk = self.walk(Instant::now() + timeout);
         if let Some(menu) = menu {
             walk.enter_menu(menu).await?;
         }
@@ -212,7 +242,7 @@ impl Scanner {
         objects: &[(&ObjectId, Rect, bool)],
         timeout: Duration,
     ) -> (Vec<Option<TextRead>>, Option<String>) {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let walk = self.walk(Instant::now() + timeout);
         let reads = stream::iter(objects)
             .map(|&(object, area, named)| {
                 let walk = &walk;
@@ -232,7 +262,7 @@ impl Scanner {
         spans: &[Option<(&ObjectId, u32, u32)>],
         timeout: Duration,
     ) -> Vec<Vec<Rect>> {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let walk = self.walk(Instant::now() + timeout);
         stream::iter(spans)
             .map(|&span| {
                 let walk = &walk;
@@ -256,7 +286,7 @@ impl Scanner {
         end: u32,
         timeout: Duration,
     ) -> Result<String> {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let walk = self.walk(Instant::now() + timeout);
         let text: TextProxy = walk.proxy(object).await?;
         walk.call(text.get_text(offset(start), offset(end))).await
     }
@@ -288,6 +318,7 @@ fn offset(at: u32) -> i32 {
 /// all run on this one thread, so no lock is needed.
 struct Walk<'c> {
     conn: &'c zbus::Connection,
+    known: &'c RefCell<HashMap<ObjectId, Known>>,
     deadline: Instant,
     requests: Cell<usize>,
     incomplete: RefCell<Option<String>>,
@@ -307,9 +338,14 @@ struct Pending {
 }
 
 impl<'c> Walk<'c> {
-    fn new(conn: &'c zbus::Connection, deadline: Instant) -> Self {
+    fn new(
+        conn: &'c zbus::Connection,
+        known: &'c RefCell<HashMap<ObjectId, Known>>,
+        deadline: Instant,
+    ) -> Self {
         Self {
             conn,
+            known,
             deadline,
             requests: Cell::new(0),
             incomplete: RefCell::new(None),
@@ -556,26 +592,21 @@ impl<'c> Walk<'c> {
         nodes
     }
 
-    /// One node: role, states and interfaces (three requests at once), its
-    /// box when the walk rule needs it, and its children if worth entering.
+    /// One node: its states, and its role and interfaces unless known, all
+    /// at once; its box when the walk rule needs it; and its children if
+    /// worth entering.
     async fn read_node(
         &self,
         pending: Pending,
         window: Rect,
     ) -> Result<(Node, Vec<ObjectId>, bool)> {
         let proxy: AccessibleProxy = self.proxy(&pending.object).await?;
-        let (role, states, interfaces) = tokio::join!(
-            self.call(proxy.get_role()),
+        let (states, known) = tokio::join!(
             self.call(proxy.get_state()),
-            self.call(proxy.get_interfaces())
+            self.known(&proxy, &pending.object)
         );
-        let role = match role {
-            Ok(role) => role.name().to_string(),
-            // atspi 0.30's Role stops at 129; GTK4's switch is 130. Ask for
-            // the name instead.
-            Err(_) => self.call(proxy.get_role_name()).await?,
-        };
-        let (mut states, interfaces) = (states_from(states?), interfaces?);
+        let (mut states, known) = (states_from(states?), known?);
+        let (role, interfaces) = (known.role, known.interfaces);
         states.showing |= self.menu.is_some() && states.visible;
         let component = interfaces.contains(Interface::Component);
 
@@ -607,6 +638,32 @@ impl<'c> Walk<'c> {
             details: None,
         };
         Ok((node, children, pending.in_document || document))
+    }
+
+    /// `object`'s role and interfaces: as read before, else asked now.
+    async fn known(&self, proxy: &AccessibleProxy<'_>, object: &ObjectId) -> Result<Known> {
+        if let Some(known) = self.known.borrow().get(object) {
+            return Ok(known.clone());
+        }
+        let (role, interfaces) = tokio::join!(
+            self.call(proxy.get_role()),
+            self.call(proxy.get_interfaces())
+        );
+        let role = match role {
+            Ok(role) => role.name().to_string(),
+            // atspi 0.30's Role stops at 129; GTK4's switch is 130. Ask for
+            // the name instead.
+            Err(_) => self.call(proxy.get_role_name()).await?,
+        };
+        let known = Known {
+            role,
+            interfaces: interfaces?,
+            actions: None,
+        };
+        self.known
+            .borrow_mut()
+            .insert(object.clone(), known.clone());
+        Ok(known)
     }
 
     async fn extents(&self, object: &ObjectId) -> Result<Rect> {
@@ -665,6 +722,10 @@ impl<'c> Walk<'c> {
             if !node.action {
                 return Ok(Vec::new());
             }
+            let known = self.known.borrow().get(&node.object).cloned();
+            if let Some(names) = known.and_then(|known| known.actions) {
+                return Ok(names);
+            }
             // `GetActions` comes back empty or garbled through atspi 0.30
             // (Chromium, Firefox); one `GetName(i)` per action is reliable.
             let action: ActionProxy = self.proxy(&node.object).await?;
@@ -672,6 +733,9 @@ impl<'c> Walk<'c> {
             let mut names = Vec::new();
             for i in 0..count {
                 names.push(self.call(action.get_name(i)).await?);
+            }
+            if let Some(known) = self.known.borrow_mut().get_mut(&node.object) {
+                known.actions = Some(names.clone());
             }
             Ok::<_, anyhow::Error>(names)
         };
