@@ -21,7 +21,6 @@ mod hyprland;
 mod kitty;
 mod menus;
 mod notify;
-mod ocr;
 pub mod recheck;
 pub mod surfaces;
 pub mod tree;
@@ -84,10 +83,6 @@ const LOCATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// answered in a few ms.
 const KITTY_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// How long OCR may take, every window together: a full-screen sheet took
-/// 1.9 s (`ocr`).
-const OCR_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// The patch a document body's tag sits on, as a terminal's, in logical px.
 const BODY_TAG: (i32, i32) = (36, 24);
 
@@ -100,9 +95,6 @@ pub struct Desktop {
     scans: u32,
     /// Made the first time a window has no tree: most runs never need it.
     camera: Option<Camera>,
-    /// The pictures text mode's OCR last read, by window address: a match
-    /// must still show the same pixels before it's acted on.
-    pictures: Vec<(String, Frame)>,
     /// The apps' open menus, once a run starts following them.
     menus: Option<Menus>,
 }
@@ -152,7 +144,6 @@ impl Desktop {
             bounds: Bounds::default(),
             scans: 0,
             camera: None,
-            pictures: Vec::new(),
             menus: None,
         })
     }
@@ -552,77 +543,28 @@ impl Desktop {
     }
 
     /// The text of every object in `snapshot.texts` that shows some, and
-    /// of every window read from pixels, for text mode: kitty's panes from
-    /// kitty, the rest by English OCR when `ocr` is `Some("eng")`.
-    /// OCR starts first: Tesseract reads while the apps are asked.
-    pub fn read_text(&mut self, snapshot: &Snapshot, ocr: Option<&str>) -> Reading {
+    /// of every kitty window's panes, from kitty, for text mode.
+    pub fn read_text(&self, snapshot: &Snapshot) -> Reading {
         let mut others = Vec::new();
         let mut unread = Vec::new();
-        let mut jobs = Vec::new();
-        self.pictures.clear();
-        let untreed = snapshot.windows.iter().enumerate();
-        for (index, scanned) in untreed.filter(|(_, s)| s.pixels || is_kitty(&s.window)) {
+        let windows = snapshot.windows.iter().enumerate();
+        for (index, scanned) in windows.filter(|(_, s)| is_kitty(&s.window)) {
             let window = &scanned.window;
-            let mut kitty = None;
-            if is_kitty(window) {
-                match kitty::read(window, KITTY_TIMEOUT) {
-                    Ok(panes) => {
-                        others.extend(panes.into_iter().map(|pane| Text {
-                            rect: pane.cells.whole(),
-                            place: Place::Cells(pane.cells),
-                            window: index,
-                            name: pane.title,
-                            area: window.rect,
-                            start: 0,
-                            content: pane.content,
-                        }));
-                        continue;
-                    }
-                    Err(e) => kitty = Some(e),
-                }
-            }
-            let Some(languages) = ocr else {
-                unread.extend(kitty.map(|e| Unread::new(window, e.context(window.class.clone()))));
-                continue;
-            };
-            let started = self.shoot(&window.address).and_then(|frame| {
-                let job = ocr::start(&frame, window, languages)?;
-                Ok((job, frame))
-            });
-            match (started, kitty) {
-                (Ok((job, frame)), _) => {
-                    jobs.push((index, job));
-                    self.pictures.push((window.address.clone(), frame));
-                }
-                (Err(e), None) => {
-                    unread.push(Unread::new(window, e.context(window.class.clone())));
-                }
-                (Err(e), Some(kitty)) => {
-                    unread.push(Unread::new(
-                        window,
-                        anyhow!("{}: {kitty:#}, and {e:#}", window.class),
-                    ));
-                }
+            match kitty::read(window, KITTY_TIMEOUT) {
+                Ok(panes) => others.extend(panes.into_iter().map(|pane| Text {
+                    rect: pane.cells.whole(),
+                    place: Place::Cells(pane.cells),
+                    window: index,
+                    name: pane.title,
+                    area: window.rect,
+                    start: 0,
+                    content: pane.content,
+                })),
+                Err(e) => unread.push(Unread::new(window, e.context(window.class.clone()))),
             }
         }
         let (mut texts, incomplete) = self.read_objects(snapshot);
         texts.append(&mut others);
-        let until = Instant::now() + OCR_TIMEOUT;
-        for (index, job) in jobs {
-            let window = &snapshot.windows[index].window;
-            match job.finish(until) {
-                Ok((content, glyphs)) => texts.push(Text {
-                    rect: glyphs.whole(),
-                    place: Place::Glyphs(glyphs),
-                    window: index,
-                    name: window.title.clone(),
-                    area: window.rect,
-                    start: 0,
-                    content,
-                }),
-                Err(e) => unread.push(Unread::new(window, e.context(window.class.clone()))),
-            }
-        }
         Reading {
             texts,
             incomplete,
@@ -678,7 +620,7 @@ impl Desktop {
     /// Where each of `spans` of `texts` (read from `snapshot`) is on
     /// screen: a global box per line, none if the app can't say. A text
     /// that is a name has no characters to ask about; a terminal's isn't
-    /// asked, its cells say, nor is OCR's, its glyphs say.
+    /// asked, its cells say.
     pub fn locate(&self, snapshot: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
         let asks: Vec<Option<(&ObjectId, u32, u32)>> = spans
             .iter()
@@ -687,7 +629,7 @@ impl Desktop {
                     let source = &snapshot.texts[index];
                     (!source.named).then_some((&source.object, s.start, s.end))
                 }
-                Place::Cells(_) | Place::Glyphs(_) => None,
+                Place::Cells(_) => None,
             })
             .collect();
         let boxes = self
@@ -704,14 +646,8 @@ impl Desktop {
     /// says, and if not, why: the last look before acting on a match.
     /// An object's characters must also still be under `target`'s hit,
     /// since scrolling moves them inside a box that stays put; a
-    /// terminal's must still be in the same cells; OCR's can't be read
-    /// again in time, so its pixels must be the same.
-    pub fn still_reads(
-        &mut self,
-        snapshot: &Snapshot,
-        target: &Target,
-        check: &Check,
-    ) -> Result<()> {
+    /// terminal's must still be in the same cells.
+    pub fn still_reads(&self, snapshot: &Snapshot, target: &Target, check: &Check) -> Result<()> {
         let Check {
             place,
             start,
@@ -751,18 +687,6 @@ impl Desktop {
                     .take(take)
                     .collect()
             }
-            Place::Glyphs(glyphs) => {
-                let address = &snapshot.windows[window].window.address;
-                let now = self.shoot(address)?;
-                let (_, then) = self
-                    .pictures
-                    .iter()
-                    .find(|(a, _)| a == address)
-                    .context("its picture is gone")?;
-                let corners = glyphs.corners(start, end);
-                ensure!(ocr::unchanged(then, &now, &corners), "the picture changed");
-                return Ok(());
-            }
         };
         ensure!(now == *text, "the text changed");
         Ok(())
@@ -770,13 +694,12 @@ impl Desktop {
 }
 
 /// Where `span` of `text` is, global: in an object, the `parts` its app
-/// gave, window-relative; in a terminal or a picture, worked out. A name
+/// gave, window-relative; in a terminal, worked out. A name
 /// has no characters to ask about, long or short: the match is its
 /// object, as the object's tag would be.
 fn placed(snapshot: &Snapshot, text: &Text, span: &Span, parts: Vec<Rect>) -> Vec<Rect> {
     match &text.place {
         Place::Cells(cells) => cells.boxes(span.start, span.end),
-        Place::Glyphs(glyphs) => glyphs.boxes(span.start, span.end),
         Place::Object(index) if snapshot.texts[*index].named => vec![text.rect],
         Place::Object(_) => {
             let origin = snapshot.windows[text.window].window.rect.origin();

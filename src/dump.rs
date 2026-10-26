@@ -47,11 +47,10 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
     }
 
     let mut desktop = Desktop::connect()?;
-    // kitty has no tree: its text comes from kitty itself. Nor has a
-    // window read from pixels: its text comes from OCR.
+    // kitty has no tree: its text comes from kitty itself.
     let tree = desktop.read_tree(&window);
     if let Some(query) = &args.text
-        && (desktop::is_kitty(&window) || tree.is_err())
+        && desktop::is_kitty(&window)
     {
         let read = Read::Pixels {
             window: &window,
@@ -60,7 +59,7 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
             stats: &desktop::Stats::default(),
         };
         let snapshot = Snapshot::build(1, window.monitor, [read]);
-        return text(&mut desktop, &snapshot, query, config);
+        return text(&desktop, &snapshot, query);
     }
     let (tree, stats) = tree?;
     if args.raw {
@@ -78,7 +77,7 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
         desktop.layout(&mut snapshot, &monitor, &desktop::Stack::default(), &[]);
     }
     if let Some(query) = &args.text {
-        return text(&mut desktop, &snapshot, query, config);
+        return text(&desktop, &snapshot, query);
     }
     if !args.explain {
         return print(&snapshot);
@@ -225,16 +224,10 @@ struct MatchRow<'a> {
 /// `dump --text`: the text text mode would search in the scanned window,
 /// and where `query` is in it, in the order text mode goes through them.
 /// Nothing over the window is checked: that's a run's job.
-fn text(
-    desktop: &mut Desktop,
-    snapshot: &Snapshot,
-    query: &str,
-    config: Option<&std::path::Path>,
-) -> Result<()> {
-    let ocr = crate::config::ocr(config)?;
+fn text(desktop: &Desktop, snapshot: &Snapshot, query: &str) -> Result<()> {
     let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
-    let reading = desktop.read_text(snapshot, ocr.as_deref());
+    let reading = desktop.read_text(snapshot);
     let read_ms = ms(started);
     let mut search = Search::new(reading.texts);
     query.chars().for_each(|c| search.push(c));
@@ -247,7 +240,6 @@ fn text(
     let role = |text: &Text| match text.place {
         Place::Object(index) => snapshot.texts[index].role.as_str(),
         Place::Cells(_) => "terminal",
-        Place::Glyphs(_) => "picture",
     };
     print(&TextDump {
         read_ms,

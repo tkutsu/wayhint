@@ -18,8 +18,7 @@
 //! [`Search`] is the state of one text mode: the query, where its matches
 //! are, which one is current. Where a match is comes from the app, one
 //! request per match, so it's asked for only once ([`Search::wanted`]);
-//! in a terminal, from the cells its characters sit in ([`Cells`]); in a
-//! window read by OCR, from the boxes it found ([`Glyphs`]).
+//! in a terminal, from the cells its characters sit in ([`Cells`]).
 
 use std::{collections::HashMap, ops::Range};
 
@@ -70,8 +69,6 @@ pub enum Place {
     Object(usize),
     /// A terminal's cells: where a match is is arithmetic.
     Cells(Cells),
-    /// A window's picture, read by OCR: so is this.
-    Glyphs(Glyphs),
 }
 
 /// Characters `start..end` of the text at `place`, and what they held:
@@ -152,69 +149,6 @@ impl Cells {
         let right = logical(self.first.x + (x + w) * cw);
         let bottom = logical(self.first.y + (y + h) * ch);
         Rect::new(left, top, right - left, bottom - top).offset(self.window)
-    }
-}
-
-/// A window's text as OCR found it in its picture: lines of words, each
-/// character a slice of its word's box (OCR gives words, not characters).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Glyphs {
-    /// Its window's top-left, global logical px.
-    pub window: Point,
-    /// Picture px to logical px: `scale.0` of the first make `scale.1`.
-    pub scale: (i32, i32),
-    /// Each line's top and bottom, picture px.
-    pub lines: Vec<(i32, i32)>,
-    /// For each character of the text: its line, and the picture's columns
-    /// `left..right` it covers. The space between two words covers the gap
-    /// between them, so a phrase is one box; a line break covers none.
-    pub at: Vec<(u32, i32, i32)>,
-}
-
-impl Glyphs {
-    /// Where characters `start..end` are, a box per line, in picture px:
-    /// left, top, right, bottom.
-    pub fn corners(&self, start: u32, end: u32) -> Vec<[i32; 4]> {
-        let mut lines: Vec<(u32, i32, i32)> = Vec::new();
-        let chars = self.at.iter().skip(start as usize);
-        for &(line, left, right) in chars.take(end.saturating_sub(start) as usize) {
-            match lines.last_mut() {
-                _ if right <= left => {}
-                Some(last) if last.0 == line => last.2 = last.2.max(right),
-                _ => lines.push((line, left, right)),
-            }
-        }
-        lines
-            .into_iter()
-            .map(|(line, left, right)| {
-                let (top, bottom) = self.lines[line as usize];
-                [left, top, right, bottom]
-            })
-            .collect()
-    }
-
-    /// Where characters `start..end` are: a box per line, global.
-    pub fn boxes(&self, start: u32, end: u32) -> Vec<Rect> {
-        self.corners(start, end)
-            .into_iter()
-            .map(|c| self.rect(c))
-            .collect()
-    }
-
-    /// The box of every line.
-    pub fn whole(&self) -> Rect {
-        let all = u32::try_from(self.at.len()).unwrap_or(u32::MAX);
-        Rect::bounding(self.boxes(0, all)).unwrap_or_default()
-    }
-
-    /// Picture corners as a global logical box.
-    fn rect(&self, [left, top, right, bottom]: [i32; 4]) -> Rect {
-        let (picture, logical) = self.scale;
-        // Floor the start, ceiling the end: a box never shrinks off its ink.
-        let down = |px: i32| (px * logical).div_euclid(picture.max(1));
-        let up = |px: i32| (px * logical + picture - 1).div_euclid(picture.max(1));
-        let (x, y) = (down(left), down(top));
-        Rect::new(x, y, up(right) - x, up(bottom) - y).offset(self.window)
     }
 }
 
@@ -769,41 +703,5 @@ mod tests {
             "the line break has no box"
         );
         assert_eq!(cells.whole(), Rect::new(102, 53, 20, 20));
-    }
-
-    /// `ab cd` on line 0 (`ab` at columns 10..30, `cd` at 40..60), a
-    /// break, `e` on line 1: a picture at 2 px per logical px, in a window
-    /// at (100, 50).
-    fn glyphs() -> Glyphs {
-        Glyphs {
-            window: Point::new(100, 50),
-            scale: (2, 1),
-            lines: vec![(4, 24), (31, 51)],
-            at: vec![
-                (0, 10, 20),
-                (0, 20, 30),
-                (0, 30, 40),
-                (0, 40, 50),
-                (0, 50, 60),
-                (0, 60, 60),
-                (1, 10, 21),
-            ],
-        }
-    }
-
-    #[test]
-    fn glyphs_give_a_box_per_line_in_logical_px() {
-        let glyphs = glyphs();
-        assert_eq!(
-            glyphs.boxes(0, 5),
-            [Rect::new(105, 52, 25, 10)],
-            "the space joins the words"
-        );
-        assert_eq!(
-            glyphs.boxes(4, 7),
-            [Rect::new(125, 52, 5, 10), Rect::new(105, 65, 6, 11)],
-            "the break has no box; ends round outwards"
-        );
-        assert_eq!(glyphs.whole(), Rect::new(105, 52, 25, 24));
     }
 }
