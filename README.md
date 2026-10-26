@@ -65,7 +65,7 @@ Switch workspace and the tags follow.
 
 ### Text mode
 
-Press `/` and type text you see on screen instead of a tag. Matches get
+Press `q` and type text you see on screen instead of a tag. Matches get
 yellow boxes, `Tab` and the arrows move between them, and `Enter` clicks
 the current one. Controls with no text to type, such as icons, keep a
 tag, so one mode reaches both. The text comes from the accessibility tree,
@@ -167,27 +167,27 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | Key (default) | Does |
 |---|---|
 | a tag | Left-clicks that control, then shows new tags |
-| `r` then a tag | Right click |
-| `m` then a tag | Middle click |
-| `t` then a tag | Double click ("twice") |
-| `o` then a tag | Hover: moves the pointer there and leaves it |
-| `b` / `n` then a tag | The mouse's back and forward ("next") buttons |
+| `,` then a tag | Right click |
+| `/` then a tag | Middle click |
+| `.` then a tag | Double click |
+| `'` then a tag | Hover: moves the pointer there and leaves it |
+| `Home` / `End` then a tag | The mouse's back and forward buttons |
 | `PageUp` / `PageDown` then a tag | Turns the wheel 5 notches up or down there |
-| `,` then a tag | Hold: presses the left button and keeps it down; the next tag or `Space` lets go there |
+| `;` then a tag | Hold: presses the left button and keeps it down; the next tag or `Space` lets go there |
 | a verb twice | Does it again where the last command was |
 | `Shift`, `Ctrl` or `Alt` on a tag's last letter | The same click with that key held |
 | `Space` | The default action, or the verb typed before it, where the pointer is |
 | arrows, before the last letter or `Space` | Move where that one click lands, 10 px a press; held, faster |
 | the repeat key, if you set one | The last command again on the same control, even after its tag changed |
-| `/` | Text mode |
+| `q` | Text mode |
 | `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
 | close key (`Esc` by default) | Exits; while a hold is down, lets go where it is instead |
 
 ### Verbs and modifiers
 
-A verb can come anywhere before a tag's last letter: `a t s` double-clicks
-`as`, as `t a s` does. The verb's name shows in the input box. Typing
+A verb can come anywhere before a tag's last letter: `a . s` double-clicks
+`as`, as `. a s` does. The verb's name shows in the input box. Typing
 another verb replaces it. Typing the same verb again before any letter does it where
 the last command was, or at the pointer if there was none yet, so
 `PageDown PageDown` scrolls the same pane again.
@@ -290,19 +290,21 @@ follows the pointer.
 A hold keeps its button down across rounds. The tags come back with
 `drop` in the input box, and whatever you pick next (a tag,
 `Space`, a text match, a verb typed twice) is where it lets go, moving
-there in small steps so apps see a drag. `, ,` or the close key lets go where it
+there in small steps so apps see a drag. `; ;` or the close key lets go where it
 went down: a long press. A scroll never clicks, so it never ends the run.
 
 ### Text mode
 
-After `/`, every key goes into the query, spaces and verb keys included,
-so a verb goes before `/`: `t/save Enter` double-clicks "save". Each
-visible match gets a yellow box, and the current one is orange. The
-arrows, `Tab` and `Shift+Tab` move between matches and wrap; `Home` and
-`End` go to the first and last. `Enter` clicks the middle of the current
-match's first line, and `Shift`, `Ctrl` or `Alt` held on `Enter` hold that
-key through the click. `Backspace` with nothing typed goes back to the
-tags.
+After `q`, a verb comes first, before the text: `.save Enter`
+double-clicks "save", as `.q save Enter` from the tags does. Then every
+key goes into the query, spaces and punctuation included. A verb on a
+named key (`PageDown`, `Home`) works at any point, and one on a letter or
+digit is for the tags only, since that key is always text. Each visible
+match gets a yellow box, and the current one is orange. The arrows, `Tab`
+and `Shift+Tab` move between matches and wrap. `Enter` clicks the middle
+of the current match's first line, and `Shift`, `Ctrl` or `Alt` held on
+`Enter` hold that key through the click. `Backspace` with nothing typed
+takes back a verb typed there, then goes back to the tags.
 
 Targets with no text you could type keep a tag: icon buttons, controls
 whose label wasn't read, and windows tagged from their pixels. A control
@@ -327,7 +329,7 @@ word does: `con` finds "contact" and "Control" but not "falcon", and
 `save fi` goes on into the next word. Letters, digits and `_` make up
 words, and an apostrophe inside one keeps it whole, so `t` doesn't find
 "can't". A query that starts with punctuation, like `--help` or `/home`,
-is found anywhere.
+is found anywhere, unless that first key is a verb's.
 
 Before the click wayhint reads the text at that spot again, with the
 character before it, and skips the click if it changed.
