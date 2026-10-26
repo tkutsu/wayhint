@@ -242,7 +242,7 @@ fn terminal_nvim_gets_one_focus_hint_on_clear_lower_pixels() {
 }
 
 #[test]
-fn terminal_focus_is_near_the_lower_center_and_always_one_hint() {
+fn terminal_focus_is_at_the_bottom_right_and_always_one_hint() {
     for (width, height) in [(900, 650), (80, 40), (8, 8)] {
         let frame = frame(width, height, |_, _| [20; 3]);
         let found = find(&frame, Detector::Fast, true);
@@ -251,9 +251,31 @@ fn terminal_focus_is_near_the_lower_center_and_always_one_hint() {
         let [x, y, r, b] = found.bodies[0];
         assert!(x >= 0 && y >= 0 && r <= width as i32 && b <= height as i32);
         if width > 80 {
-            assert!((i32::midpoint(x, r) - width as i32 / 2).abs() <= 4);
-            assert!((height as i32 - b - 18).abs() <= 4);
+            assert_eq!(width as i32 - r, 10);
+            assert_eq!(height as i32 - b, 10);
         }
+    }
+}
+
+#[test]
+fn terminal_focus_moves_off_occupied_bottom_right_pixels() {
+    let preferred = terminal_patch(900, 650);
+    let frame = frame(900, 650, |x, y| {
+        if preferred.contains(crate::geometry::Point::new(x as i32, y as i32)) {
+            [if (x + y) % 2 == 0 { 240 } else { 20 }; 3]
+        } else {
+            [20; 3]
+        }
+    });
+    let space = crate::space::Space::pixels(&frame);
+    assert!(space.ink(preferred) > 0);
+    for detector in [Detector::Fast, Detector::Full] {
+        let found = find(&frame, detector, true);
+        let [x, y, r, b] = found.bodies[0];
+        let patch = crate::geometry::Rect::new(x, y, r - x, b - y);
+        assert_ne!(patch, preferred);
+        assert_eq!(space.ink(patch), 0);
+        assert!(x > 800 && y > 550, "stay near the bottom-right corner");
     }
 }
 

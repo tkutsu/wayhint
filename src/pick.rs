@@ -15,7 +15,7 @@ use crate::{
     search::{self, Chosen},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
-    style::Notice,
+    style::{Notice, Position},
     text::{Span, Text},
 };
 
@@ -473,6 +473,9 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .filter(|(label, _)| selector.matches(label))
         .collect();
     let spot = |target: &Target| {
+        if target.role == "terminal" {
+            return Position::BottomRight.on(target.shown());
+        }
         let [x, y] = style.offset;
         style.position.on(target.shown()).offset(Point::new(x, y))
     };
@@ -482,7 +485,11 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .map(|(label, target)| Tag {
             at: spot(target),
             target: Some(target.hit),
-            position: style.position,
+            position: if target.role == "terminal" {
+                Position::BottomRight
+            } else {
+                style.position
+            },
             text: prefix
                 .chars()
                 .chain(label[skip..].iter().map(letter))
@@ -986,6 +993,32 @@ mod tests {
         let pair = |a: &str, b: &str| [(a.to_owned(), false), (b.to_owned(), true)];
         assert_eq!(tags(""), pair("A", "B"));
         assert_eq!(tags("[style]\ncase = \"lower\""), pair("a", "b"));
+    }
+
+    #[test]
+    fn terminal_hint_keeps_its_corner_inset_despite_general_style_offsets() {
+        let config = Config::parse(
+            "[style]\nposition = \"top-left\"\noffset = [5, 2]",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let mut targets = three_buttons();
+        let patch = crate::pixels::terminal_patch(800, 600).offset(Point::new(100, 50));
+        targets[0].rect = patch;
+        targets[0].visible = patch;
+        targets[0].hit = patch.center();
+        targets[0].role = "terminal".into();
+        let scene = Scene::new(&targets, Rect::new(0, 0, 1920, 1080), None, false);
+        let selector = Selector::new(targets.len(), config.alphabet.len(), Action::Left);
+        let frame = frame(&selector, &config, &scene, &Said::Nothing);
+        assert_eq!(frame.tags[0].position, Position::BottomRight);
+        assert_eq!(frame.tags[0].at, Point::new(890, 640));
+        assert!(
+            frame.tags[0].pixels,
+            "keep the existing terminal hint style"
+        );
+        assert_eq!(frame.tags[1].position, Position::TopLeft);
+        assert_eq!(frame.tags[1].at, Point::new(185, 92));
     }
 
     /// Three buttons in a row, labelled a, ba and bb.

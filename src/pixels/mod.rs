@@ -42,7 +42,7 @@ mod runs;
 mod segment;
 mod texture;
 
-pub use group::{Block, Found};
+pub use group::{Block, Found, terminal_patch};
 
 use crate::space::Space;
 

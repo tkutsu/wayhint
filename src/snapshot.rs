@@ -136,7 +136,8 @@ impl Target {
     /// Found in its window's pixels: a guess, drawn in `[style.pixels]`.
     pub fn in_pixels(&self) -> bool {
         self.object.is_none()
-            && [PIXELS, PIXEL_BODY, PIXEL_BLOCK, PIXEL_MEDIA].contains(&self.role.as_str())
+            && [PIXELS, PIXEL_BODY, PIXEL_BLOCK, PIXEL_MEDIA, "terminal"]
+                .contains(&self.role.as_str())
     }
 
     /// The box its tag is placed on: the part in view.

@@ -275,9 +275,11 @@ A click in such a window always ends the run, since nothing says whether
 it landed in a text field. A paragraph's tag opens into a tag per line
 instead of clicking, and a verb typed before it carries over.
 
-A terminal gets one tag near its bottom centre, on empty pixels where it
-can find them. Picking it clicks there and exits, so your typing goes to
-the terminal. That tag shows even with `detector = "off"`;
+A terminal gets one tag 10 px from its bottom and right edges. With pixel
+detection on, it checks the screenshot and moves to nearby clear space if
+needed. With `detector = "off"`, it uses the fixed spot without a screenshot.
+This corner inset takes precedence over `[style] position` and `offset`.
+Picking it clicks there and exits, so your typing goes to the terminal;
 `[pixels] terminal_hint = false` hides it. An editable sheet or document
 gets one tag on the empty spot
 nearest its middle, which does the same. Links and controls around it keep
