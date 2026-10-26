@@ -42,7 +42,7 @@ pub struct Job {
 }
 
 /// Starts reading `frame`, the picture of `window`, in `languages`
-/// (Tesseract's names: `eng`, `eng+ell`).
+/// (the validated config supplies `eng` for English).
 pub fn start(frame: &Frame, window: &Window, languages: &str) -> Result<Job> {
     ensure!(frame.width > 0 && frame.height > 0, "its picture is empty");
     let scale = (i32::try_from(frame.width)?, window.rect.w.max(1));

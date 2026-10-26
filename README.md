@@ -67,7 +67,8 @@ Switch workspace and the tags follow.
 Press `/` and type text you see on screen instead of a tag. Matches get
 yellow boxes, `Tab` and the arrows move between them, and `Enter` clicks
 the current one. The text comes from the accessibility tree, from kitty's
-own remote control, or from Tesseract OCR for windows with neither.
+own remote control, or, if you turn it on, from Tesseract OCR for windows
+with neither.
 
 ### Safe clicks
 
@@ -97,7 +98,8 @@ You need:
 - Rust 1.88 or newer, libxkbcommon, and fontconfig (`fc-match`).
 - The AT-SPI bus, from `at-spi2-core`. Most desktops already run it.
 - Optional: Tesseract, for text mode in windows with no tree:
-  `pacman -S tesseract tesseract-data-eng`.
+  `pacman -S tesseract tesseract-data-eng`, then `ocr = "eng"` under
+  `[text]`.
 
 Build and install it:
 
@@ -139,7 +141,7 @@ apps are missing.
 | Qt apps (Dolphin, KDE apps, Quickshell) | Nothing on the author's setup. If one gets no tags, start it with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` set |
 | Chromium, Chrome, Electron apps | The flag `--force-renderer-accessibility`. On Arch, put it on its own line in `~/.config/chromium-flags.conf` or `~/.config/electron-flags.conf`; an app that bundles its own Electron takes it on its command line |
 | kitty | Remote control, for text mode (below). Its panes get pixel tags either way |
-| Anything else with no tree | Pixel tags, and Tesseract for text mode |
+| Anything else with no tree | Pixel tags, and with `[text] ocr = "eng"`, Tesseract for text mode |
 
 An app joins the bus when it starts. Apps started before the bus, or
 before you turned a switch on, need reopening; wayhint says so when it
@@ -230,13 +232,13 @@ inside words, so `con` finds "falcon".
 Before the click wayhint reads the text at that spot again and skips the
 click if it changed.
 
-Windows with no tree, other than kitty, are read by Tesseract when text
-mode starts. On a monitor with a scale under 2, the picture is doubled
+OCR is off by default. With `ocr = "eng"` under `[text]`, windows with
+no tree, other than kitty, are read by Tesseract when text mode starts.
+Only English is read for now. On a monitor with a scale under 2, the picture is doubled
 first, since Tesseract misreads small interface text at its real size.
 Reading took about 0.5 s for a terminal and 1.5 s for a full-screen
 spreadsheet on a Ryzen 7 7700; the query box shows `text ...` until it's
-done, and keys typed meanwhile wait. For Greek too, install
-`tesseract-data-ell` and set `ocr = "eng+ell"` under `[text]`.
+done, and keys typed meanwhile wait.
 
 ### Windows tagged from their pixels
 
@@ -251,7 +253,9 @@ instead of clicking, and a verb typed before it carries over.
 
 A terminal gets one tag near its bottom centre, on empty pixels where it
 can find them. Picking it clicks there and exits, so your typing goes to
-the terminal. An editable sheet or document gets one tag on the empty spot
+the terminal. That tag shows even with `detector = "off"`;
+`[pixels] terminal_hint = false` hides it. An editable sheet or document
+gets one tag on the empty spot
 nearest its middle, which does the same. Links and controls around it keep
 their own tags.
 
@@ -273,9 +277,17 @@ Flags for other keybinds:
 
 ### Warnings and debugging
 
-When a run started from a keybind fails or warns, the reason shows as a
-desktop notification (Hyprland's own notification if no server answers),
-one per app. From a terminal it's printed.
+When a run started from a keybind fails, or something risks a stuck key,
+a held modifier or the wrong workspace, the reason shows as a desktop
+notification (Hyprland's own notification if no server answers). From a
+terminal it's printed.
+
+Routine messages (an app with no tags or text, a slow scan, pixel tags, a
+menu that can't be watched, nothing to repeat) go to
+`~/.local/state/wayhint/wayhint.log` instead, or under `$XDG_STATE_HOME`
+when that's set, grouped by app. Serious warnings are logged too. Each
+line starts with the Unix time and a severity. The log rotates at 1 MiB
+and keeps one previous file as `wayhint.log.1`.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON;
 `--explain` adds every control it left out and why, `--surfaces` lists
@@ -330,10 +342,10 @@ The sections:
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
 | `[input]` | The box for what you type: look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
 | `[info]` | The messages under the input box: which show, for how long, their icons and colours |
-| `[text]` | Where `Enter` acts on a match, `pick_unique`, OCR languages |
+| `[text]` | Where `Enter` acts on a match, `pick_unique`, and OCR (`eng` or `off`, the default) |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
-| `[pixels]` | The pixel detector (`full`, `fast` or `off`) and which programs count as terminals |
+| `[pixels]` | The pixel detector (`full`, `fast` or `off`), the terminal focus tag, and which programs count as terminals |
 | `[scan]` | Refresh interval, and how close hints must be to share one tag |
 
 Colours are `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`, where A is opacity.
