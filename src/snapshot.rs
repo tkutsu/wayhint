@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     desktop::{
-        Stats, Window,
+        Kind, Stats, Window,
         filter::{self, Filtered},
         tree::{Node, ObjectId, Tree},
     },
@@ -238,7 +238,13 @@ impl Snapshot {
                     opens: Vec::new(),
                 }
             }));
-            texts.extend(filter::text_sources(tree).into_iter().map(|(node, area)| {
+            // A menu's items are read again in the app's own coordinates,
+            // which aren't the menu's (Firefox): text mode leaves them out.
+            let sources = match tree.window.kind {
+                Kind::Menu => Vec::new(),
+                _ => filter::text_sources(tree),
+            };
+            texts.extend(sources.into_iter().map(|(node, area)| {
                 let read = &tree.nodes[node];
                 TextSource {
                     object: read.object.clone(),

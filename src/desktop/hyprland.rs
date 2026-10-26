@@ -40,7 +40,8 @@ const MAPPED: &str = "repl local t = {} for _, l in ipairs(hl.get_layers()) do \
     return \"mapped \" .. table.concat(t, \" \")";
 
 /// A surface that can get tags, in global logical pixels: a toplevel
-/// window, a layer surface (a bar, a launcher) or a layer's popup.
+/// window, a layer surface (a bar, a launcher), a layer's popup or an
+/// app's open menu.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     /// Hyprland's handle (`0x55...`), stable while the surface lives. A
@@ -70,8 +71,8 @@ pub struct Window {
     pub frames: Vec<ObjectId>,
 }
 
-/// What a [`Window`] is. Hyprland knows the first two; popups are known only
-/// from the accessibility tree.
+/// What a [`Window`] is. Hyprland knows the first two; popups and menus are
+/// known only from the accessibility bus.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
@@ -83,6 +84,9 @@ pub enum Kind {
     Layer { level: u8 },
     /// A popup of a layer surface: a bar's menu, a settings dropdown.
     Popup,
+    /// An app's open menu, a popup of its window, right above that window
+    /// (see `surfaces::add_menus`).
+    Menu,
 }
 
 /// A monitor's place in the global layout, in logical pixels.
@@ -129,6 +133,8 @@ struct WireWindow {
     /// 0 for the focused window, then 1, 2... back through focus history.
     #[serde(rename = "focusHistoryID")]
     focus_history_id: i64,
+    #[serde(default)]
+    xwayland: bool,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +299,9 @@ pub struct Shown {
     pub corners: HashMap<i64, Point>,
     /// Every process with a client, on any workspace.
     pub client_pids: BTreeSet<u32>,
+    /// The clients run through Xwayland, by address. An X11 app's menu is
+    /// a client of its own, and boxes it in global coordinates.
+    pub xwayland: BTreeSet<String>,
 }
 
 /// What `monitor` shows, bottom to top: the order Hyprland's own hit test
@@ -390,6 +399,11 @@ fn shown_of(
         .find(|m| m.id == monitor)
         .with_context(|| format!("monitor {monitor} is gone"))?;
     let client_pids = clients.iter().map(|c| c.pid).collect();
+    let xwayland = clients
+        .iter()
+        .filter(|c| c.xwayland)
+        .map(|c| c.address.clone())
+        .collect();
     let fullscreen = clients.iter().any(|c| {
         let ws = c.workspace.id;
         c.monitor == monitor
@@ -426,6 +440,7 @@ fn shown_of(
         layers,
         corners,
         client_pids,
+        xwayland,
     })
 }
 
@@ -615,6 +630,7 @@ mod tests {
             accepts_input: true,
             allowed_over_fullscreen: true,
             focus_history_id: 1,
+            xwayland: false,
         }
     }
 
