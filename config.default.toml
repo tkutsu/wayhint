@@ -150,13 +150,15 @@
 
 
 [text]
-# Text mode: the tags go, typing finds text on screen, Enter acts on the
-# current match, Tab and the arrows move between matches. Backspace with
-# nothing typed goes back to the tags; the close key leaves wayhint.
+# Text mode: typing finds text on screen from the start of a word, Enter
+# acts on the current match, Tab and the arrows move between matches.
+# Targets with no text to type keep a tag. Backspace with nothing typed
+# goes back to the tags; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
 # pick_unique = false       # act on the only match left, once 3 characters are typed, without Enter
+# hints = true              # tags on the targets with no text to type, in letters no word on screen starts with
 # ocr = "off"               # eng for English OCR in windows with no accessibility tree; off to disable it (default)
 
 [text.matches]

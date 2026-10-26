@@ -7,7 +7,10 @@
 //! reads its targets. Plain data with `Serialize` and `Deserialize`, so
 //! every part can run alone from a saved file.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -61,6 +64,11 @@ pub struct TextSource {
     /// The scroll areas above it, nearest first, as a target's `clips`.
     #[serde(default)]
     pub clips: Vec<ObjectId>,
+    /// The target its text is on: its own object if that has a tag, else
+    /// the nearest above it that has (a button's label, a link's words).
+    /// Text mode's tags skip that target, since typing the text finds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ObjectId>,
     /// A button's name may be letters or an icon: `Desktop::layout` keeps
     /// it only where its picture shows letters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,9 +259,14 @@ impl Snapshot {
                 Kind::Menu => Vec::new(),
                 _ => filter::text_sources(tree),
             };
+            let tagged: HashSet<usize> = filtered.kept.iter().map(|kept| kept.node).collect();
             texts.extend(sources.into_iter().map(|(node, area)| {
                 let read = &tree.nodes[node];
+                let owner = std::iter::once(node)
+                    .chain(tree.ancestors(node))
+                    .find(|i| tagged.contains(i));
                 TextSource {
+                    owner: owner.map(|i| tree.nodes[i].object.clone()),
                     object: read.object.clone(),
                     window,
                     role: read.role.clone(),

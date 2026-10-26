@@ -247,12 +247,21 @@ pub fn ignores_case(query: &str) -> bool {
     !query.chars().any(char::is_uppercase)
 }
 
+/// Whether `c` is part of a word: letters, numbers and `_`. Anything else
+/// (spaces, `-`, `/`, brackets) parts words, except an apostrophe inside
+/// one: `can't` is one word.
+fn in_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// A text folded for matching, with the way back to the original.
 #[derive(Debug, Clone)]
 pub struct Folded {
     text: String,
     /// For each byte of `text`, the original character it came from.
     from: Vec<u32>,
+    /// Where each word starts in `text`, in bytes, first to last.
+    words: Vec<usize>,
 }
 
 impl Folded {
@@ -261,10 +270,22 @@ impl Folded {
         let mut folded = Self {
             text: String::with_capacity(text.len()),
             from: Vec::with_capacity(text.len()),
+            words: Vec::new(),
         };
         let mut after_space = false;
+        // Words are found in the original, before accents go: `é` is one
+        // word character, never a base letter and a separator.
+        let mut word = false;
         // `zip(0..)` counts characters as `u32`, the width AT-SPI uses.
         for (c, at) in text.chars().zip(0u32..) {
+            if in_word(c) {
+                if !word {
+                    folded.words.push(folded.text.len());
+                }
+                word = true;
+            } else if !(is_combining_mark(c) || word && matches!(c, '\'' | '’')) {
+                word = false;
+            }
             if c.is_whitespace() {
                 if !after_space {
                     folded.push(' ', at);
@@ -301,16 +322,29 @@ impl Folded {
         &self.text
     }
 
-    /// Where `query`, folded the same way, occurs: character ranges of the
-    /// original, first to last, none overlapping. None for an empty query,
-    /// which would match between every two characters.
+    /// Where `query`, folded the same way, occurs from the start of a word:
+    /// character ranges of the original, first to last, none overlapping.
+    /// `con` finds `contact` and `Control`, not `falcon`; it may go on
+    /// into a phrase (`save fi`). A query that starts with something other
+    /// than a word character (`--help`, `/home`) can't start inside a word,
+    /// so it's found anywhere. None for an empty query, which would match
+    /// between every two characters.
     pub fn find<'a>(&'a self, query: &'a str) -> impl Iterator<Item = Range<u32>> + 'a {
-        let query = Some(query).filter(|q| !q.is_empty());
-        query.into_iter().flat_map(move |query| {
-            self.text
-                .match_indices(query)
-                .map(move |(at, found)| self.from[at]..self.from[at + found.len() - 1] + 1)
-        })
+        let starts: Box<dyn Iterator<Item = usize>> = match query.chars().next() {
+            None => Box::new(std::iter::empty()),
+            Some(c) if in_word(c) => Box::new(self.words.iter().copied()),
+            Some(_) => Box::new(self.text.match_indices(query).map(|(at, _)| at)),
+        };
+        let mut free = 0;
+        starts
+            .filter(move |&at| {
+                let found = at >= free && self.text[at..].starts_with(query);
+                if found {
+                    free = at + query.len();
+                }
+                found
+            })
+            .map(move |at| self.from[at]..self.from[at + query.len() - 1] + 1)
     }
 }
 
@@ -365,6 +399,16 @@ impl Search {
     /// Takes back the last character; `false` if there was none.
     pub fn pop(&mut self) -> bool {
         self.query.pop().is_some()
+    }
+
+    /// Whether typing `typed` would find something: it starts a word of a
+    /// text, ignoring case. A tag's label that does can't be told apart
+    /// from a query, so text mode never gives it to a tag.
+    pub fn starts_a_word(&self, typed: &str) -> bool {
+        let typed = Folded::new(typed, true);
+        self.lower
+            .iter()
+            .any(|text| text.find(typed.as_str()).next().is_some())
     }
 
     /// Every occurrence of the query in the texts, in no particular order.
@@ -508,7 +552,7 @@ mod tests {
     #[test]
     fn accents_fold_both_ways() {
         assert_eq!(find("άλλο", "α"), [(0, 1)]);
-        assert_eq!(find("été", "e"), [(0, 1), (2, 3)]);
+        assert_eq!(find("été été", "e"), [(0, 1), (4, 5)]);
         assert_eq!(
             find("cafe", "café"),
             [(0, 4)],
@@ -523,10 +567,10 @@ mod tests {
 
     #[test]
     fn case_is_smart() {
-        assert_eq!(find("Control falcon", "con"), [(0, 3), (11, 14)]);
-        assert_eq!(find("Control falcon", "Con"), [(0, 3)]);
+        assert_eq!(find("contact Control", "con"), [(0, 3), (8, 11)]);
+        assert_eq!(find("contact Control", "Con"), [(8, 11)]);
         assert_eq!(find("ΑΛΛΟ", "αλλο"), [(0, 4)]);
-        assert_eq!(find("λόγος", "σ"), [(4, 5)], "a final sigma is a sigma");
+        assert_eq!(find("λόγος", "λογοσ"), [(0, 5)], "a final sigma is a sigma");
         assert_eq!(find("İstanbul", "ist"), [(0, 3)], "a dotted capital I");
     }
 
@@ -539,7 +583,39 @@ mod tests {
     #[test]
     fn an_empty_query_finds_nothing_and_matches_never_overlap() {
         assert_eq!(find("abc", ""), []);
-        assert_eq!(find("aaaa", "aa"), [(0, 2), (2, 4)]);
+        assert_eq!(find("aa aa aa", "aa aa"), [(0, 5)]);
+        assert_eq!(find("--a--a", "--a"), [(0, 3), (3, 6)]);
+    }
+
+    #[test]
+    fn a_query_starts_where_a_word_does() {
+        assert_eq!(find("contact Control falcon", "con"), [(0, 3), (8, 11)]);
+        assert_eq!(find("Save file", "fi"), [(5, 7)]);
+        assert_eq!(find("Save file", "ave"), []);
+        assert_eq!(find("Save file", "save fi"), [(0, 7)], "into a phrase");
+        assert_eq!(find("can't", "t"), [], "an apostrophe keeps the word");
+        assert_eq!(find("'quoted'", "quo"), [(1, 4)]);
+        assert_eq!(find("file-name/path", "name"), [(5, 9)]);
+        assert_eq!(find("file-name/path", "path"), [(10, 14)]);
+        assert_eq!(find("snake_case camelCase", "case"), []);
+        assert_eq!(find("άλλο", "αλ"), [(0, 2)]);
+        assert_eq!(find("e\u{301}te", "ete"), [(0, 4)], "a combining accent");
+        assert_eq!(find("x2 22", "2"), [(3, 4)], "numbers are words too");
+    }
+
+    #[test]
+    fn a_query_that_starts_with_punctuation_is_found_anywhere() {
+        assert_eq!(find("run --help", "--help"), [(4, 10)]);
+        assert_eq!(find("~/home", "/home"), [(1, 6)]);
+    }
+
+    #[test]
+    fn a_label_is_free_unless_typing_it_would_find_text() {
+        let search = Search::new(vec![text("Save add", Rect::default())]);
+        assert!(search.starts_a_word("s") && search.starts_a_word("A"));
+        assert!(search.starts_a_word("ad"));
+        assert!(!search.starts_a_word("av"), "inside a word");
+        assert!(!search.starts_a_word("d"));
     }
 
     fn text(content: &str, rect: Rect) -> Text {

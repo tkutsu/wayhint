@@ -55,6 +55,8 @@ struct FileText {
     cursor: TextCursor,
     /// Act on the only match left, without Enter.
     pick_unique: bool,
+    /// Tags on the targets typing can't find: on unless `false`.
+    hints: Option<bool>,
     /// `eng` for English OCR in windows read from pixels, `off` for none.
     ocr: Option<String>,
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
@@ -531,6 +533,9 @@ pub struct Config {
     /// Act on the only match left once the query is long enough, without
     /// Enter: `[text] pick_unique`.
     pub pick_unique: bool,
+    /// Tags, in text mode, on the targets with no text to type:
+    /// `[text] hints`.
+    pub text_hints: bool,
     /// English OCR for text mode in windows read from pixels,
     /// `None` for no OCR: `[text] ocr`.
     pub ocr: Option<String>,
@@ -1135,6 +1140,7 @@ impl Config {
             info,
             text_cursor: file.text.cursor,
             pick_unique: file.text.pick_unique,
+            text_hints: file.text.hints.unwrap_or(true),
             ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
@@ -1163,9 +1169,10 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\npick_unique = {}   # act on the only match left, once {} characters are typed, without Enter\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\npick_unique = {}   # act on the only match left, once {} characters are typed, without Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
             self.pick_unique,
             crate::search::UNIQUE,
+            self.text_hints,
             quote(self.ocr.as_deref().unwrap_or("off"))
         )
     }

@@ -67,9 +67,10 @@ Switch workspace and the tags follow.
 
 Press `/` and type text you see on screen instead of a tag. Matches get
 yellow boxes, `Tab` and the arrows move between them, and `Enter` clicks
-the current one. The text comes from the accessibility tree, from kitty's
-own remote control, or, if you turn it on, from Tesseract OCR for windows
-with neither.
+the current one. Controls with no text to type, such as icons, keep a
+tag, so one mode reaches both. The text comes from the accessibility tree,
+from kitty's own remote control, or, if you turn it on, from Tesseract OCR
+for windows with neither.
 
 ### Safe clicks
 
@@ -242,6 +243,15 @@ match's first line, and `Shift`, `Ctrl` or `Alt` held on `Enter` hold that
 key through the click. `Backspace` with nothing typed goes back to the
 tags.
 
+Targets with no text you could type keep a tag: icon buttons, controls
+whose label wasn't read, and windows tagged from their pixels. A control
+whose own text was read (a button's label, a link's words) loses its tag,
+since typing the text finds it. These tags use letters that no word on
+screen starts with, so a whole tag is never also a query. Typing a whole
+tag acts on its target at once, as in tag mode. Until then, what you type
+counts for both, and the tags that no longer fit go away. `hints = false`
+under `[text]` hides them all again.
+
 `[text] cursor` picks where in the match `Enter` acts. The default,
 `"center"`, is the middle of the first visible line. `"start"` is that
 line's left edge, and `"end"` the rightmost pixel of the last visible
@@ -251,11 +261,15 @@ match acts on it without `Enter`.
 
 A lower-case query ignores case; one capital letter makes it exact.
 Accents are ignored both ways (`cafe` finds "café", `α` finds "άλλο"). A
-space matches any run of spaces or a line break, and matches can start
-inside words, so `con` finds "falcon".
+space matches any run of spaces or a line break. A match starts where a
+word does: `con` finds "contact" and "Control" but not "falcon", and
+`save fi` goes on into the next word. Letters, digits and `_` make up
+words, and an apostrophe inside one keeps it whole, so `t` doesn't find
+"can't". A query that starts with punctuation, like `--help` or `/home`,
+is found anywhere.
 
-Before the click wayhint reads the text at that spot again and skips the
-click if it changed.
+Before the click wayhint reads the text at that spot again, with the
+character before it, and skips the click if it changed.
 
 OCR is off by default. With `ocr = "eng"` under `[text]`, windows with
 no tree, other than kitty, are read by Tesseract when text mode starts.
@@ -371,7 +385,7 @@ The sections:
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
 | `[input]` | The box for what you type: look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
 | `[info]` | The messages under the input box: which show, for how long, their icons and colours |
-| `[text]` | Where `Enter` acts on a match, `pick_unique`, and OCR (`eng` or `off`, the default) |
+| `[text]` | Where `Enter` acts on a match, `pick_unique`, tags on targets with no text, and OCR (`eng` or `off`, the default) |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
 | `[pixels]` | The pixel detector (`full`, `fast` or `off`), the terminal focus tag, and which programs count as terminals |

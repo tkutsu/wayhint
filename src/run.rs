@@ -34,8 +34,9 @@
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
 //!
-//! The text key hides the tags and searches the windows' text instead
-//! (`search.rs`); `Enter` acts on the current match as on a tag, after
+//! The text key hides the tags of targets whose text can be typed and
+//! searches the windows' text instead (`search.rs`); the other tags stay,
+//! typed as before. `Enter` acts on the current match as on a tag, after
 //! its text is read again and found unchanged, and the close key ends the run.
 //! `--text` starts there.
 //!
