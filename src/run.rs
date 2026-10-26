@@ -140,7 +140,14 @@ pub fn run(
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
     // The overlay comes first: it blocks SIGINT and SIGTERM for this thread
     // (they become events), and the threads started after it inherit that.
-    let mut overlay = Overlay::new(&conn, &config.style, &config.marks, &config.input, monitor)?;
+    let mut overlay = Overlay::new(
+        &conn,
+        &config.style,
+        &config.marks,
+        &config.input,
+        &config.info,
+        monitor,
+    )?;
     overlay.listen_for_toggle(toggle)?;
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(

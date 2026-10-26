@@ -21,9 +21,9 @@ use crate::{
     action::{Act, Action},
     config::TextCursor,
     desktop,
-    geometry::{Point, Rect},
+    geometry::Point,
     keys::KeyCode,
-    overlay::{Event, Frame, Highlight, Overlay, Tag},
+    overlay::{Event, Frame, Highlight, Note, Overlay},
     pick::{Pick, Source},
     selection::Selector,
     snapshot::{Snapshot, Target},
@@ -76,12 +76,11 @@ fn keys(
     input: &Input,
     cursor: TextCursor,
 ) -> Result<Option<Pick>> {
-    let screen = overlay.monitor().rect;
     let verb = selector.armed().map(Action::name);
     // The tags go before the text is read: none is left to be typed.
-    overlay.update(&frame(None, false, verb, screen, input))?;
+    overlay.update(&frame(None, false, verb, input))?;
     let mut search = Search::new(source.read_text(shown));
-    overlay.update(&frame(Some(&search), false, verb, screen, input))?;
+    overlay.update(&frame(Some(&search), false, verb, input))?;
     // The query changed since the matches were found.
     let mut stale = false;
     loop {
@@ -146,7 +145,7 @@ fn keys(
             KeyCode::END => search.last(),
             _ => {}
         }
-        overlay.update(&frame(Some(&search), stale, verb, screen, input))?;
+        overlay.update(&frame(Some(&search), stale, verb, input))?;
     }
 }
 
@@ -225,13 +224,7 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
 /// for the count then, and nothing is marked. The pill names the armed
 /// `verb`, dimmed, before the query; with no query yet, it shows
 /// `[text.input] placeholder`, dimmed too.
-fn frame(
-    search: Option<&Search>,
-    stale: bool,
-    verb: Option<&str>,
-    screen: Rect,
-    input: &Input,
-) -> Frame {
+fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, input: &Input) -> Frame {
     let prefix = verb.map(|v| format!("{v} ")).unwrap_or_default();
     let (status, placeholder) = match search {
         None => (format!("{} ...", input.placeholder), true),
@@ -268,27 +261,19 @@ fn frame(
         })
         .unwrap_or_default();
     Frame {
-        tags: Vec::new(),
-        dots: Vec::new(),
         highlights,
-        input: Some(Tag {
-            at: input
-                .style
-                .position
-                .on(screen)
-                .offset(Point::new(input.style.offset[0], input.style.offset[1])),
-            position: input.style.position,
+        input: Some(Note {
             text: format!("{prefix}{status}"),
             typed,
-            target: None,
         }),
+        ..Frame::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{style::Style, text::Text};
+    use crate::{geometry::Rect, style::Style, text::Text};
 
     fn search(contents: &[&str]) -> Search {
         let texts = contents
@@ -325,23 +310,17 @@ mod tests {
         search.update(&|_, _: Point| true);
     }
 
-    const SCREEN: Rect = Rect::new(0, 0, 1920, 1080);
-
-    fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, screen: Rect) -> Frame {
-        super::frame(search, stale, verb, screen, &Input::new(&Style::default()))
+    fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>) -> Frame {
+        super::frame(search, stale, verb, &Input::new(&Style::default()))
     }
 
     #[test]
     fn the_tags_go_and_the_pill_says_what_is_typed() {
-        let loading = frame(None, false, None, SCREEN);
+        let loading = frame(None, false, None);
         assert!(loading.tags.is_empty(), "target tags are hidden");
         assert_eq!(loading.input.unwrap().text, "text ...");
         let mut found = search(&["contact", "falcon"]);
-        let pill = |found: &Search, stale| {
-            frame(Some(found), stale, Some("double"), SCREEN)
-                .input
-                .unwrap()
-        };
+        let pill = |found: &Search, stale| frame(Some(found), stale, Some("double")).input.unwrap();
         assert_eq!(pill(&found, false).text, "double text");
         assert_eq!(
             pill(&found, false).typed,
@@ -368,7 +347,7 @@ mod tests {
             ..Input::new(&Style::default())
         };
         let display = |stale| {
-            super::frame(Some(&found), stale, Some("double"), SCREEN, &input)
+            super::frame(Some(&found), stale, Some("double"), &input)
                 .input
                 .unwrap()
         };
@@ -380,36 +359,10 @@ mod tests {
             placeholder: "find…".into(),
             ..input
         };
-        let waiting = super::frame(Some(&search(&["x"])), false, None, SCREEN, &empty);
+        let waiting = super::frame(Some(&search(&["x"])), false, None, &empty);
         assert_eq!(waiting.input.unwrap().text, "find…");
-        let reading = super::frame(None, false, None, SCREEN, &empty);
+        let reading = super::frame(None, false, None, &empty);
         assert_eq!(reading.input.unwrap().text, "find… ...");
-    }
-
-    #[test]
-    fn query_positions_use_the_monitor_and_signed_offsets() {
-        use crate::style::Position;
-        let screen = Rect::new(-1920, 100, 1920, 1080);
-        for (position, at) in [
-            (Position::TopLeft, Point::new(-1920, 100)),
-            (Position::Top, Point::new(-960, 100)),
-            (Position::TopRight, Point::new(0, 100)),
-            (Position::Left, Point::new(-1920, 640)),
-            (Position::Center, Point::new(-960, 640)),
-            (Position::Right, Point::new(0, 640)),
-            (Position::BottomLeft, Point::new(-1920, 1180)),
-            (Position::Bottom, Point::new(-960, 1180)),
-            (Position::BottomRight, Point::new(0, 1180)),
-        ] {
-            let mut input = Input::new(&Style::default());
-            input.style.position = position;
-            input.style.offset = [-17, 23];
-            let tag = super::frame(None, false, None, screen, &input)
-                .input
-                .unwrap();
-            assert_eq!(tag.at, at.offset(Point::new(-17, 23)));
-            assert_eq!(tag.position, position);
-        }
     }
 
     #[test]
@@ -417,7 +370,7 @@ mod tests {
         let mut found = search(&["contact", "falcon"]);
         typed(&mut found, "con");
         found.next();
-        let shown = frame(Some(&found), false, None, SCREEN);
+        let shown = frame(Some(&found), false, None);
         let marks: Vec<(i32, bool)> = shown
             .highlights
             .iter()
@@ -425,14 +378,12 @@ mod tests {
             .collect();
         assert_eq!(marks, [(0, false), (20, true)]);
         assert!(
-            frame(Some(&found), true, None, SCREEN)
-                .highlights
-                .is_empty(),
+            frame(Some(&found), true, None).highlights.is_empty(),
             "stale: none"
         );
         while found.pop() {}
         found.update(&|_, _| true);
-        let cleared = frame(Some(&found), false, None, SCREEN);
+        let cleared = frame(Some(&found), false, None);
         assert!(
             cleared.highlights.is_empty(),
             "nothing typed, nothing marked"

@@ -55,7 +55,7 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 
-pub use self::draw::{Dot, Frame, Highlight, Tag};
+pub use self::draw::{Dot, Frame, Highlight, Note, Tag};
 use self::{
     draw::Painter,
     typing::Typist,
@@ -67,7 +67,7 @@ use crate::{
     geometry::Point,
     keyboard::{self, Keyboard, Locks},
     keys::{Key, KeyCode},
-    style::{Input, Marks, Style},
+    style::{Info, Input, Marks, Style},
 };
 
 /// Something the run loop has to react to.
@@ -128,10 +128,11 @@ impl Overlay {
         style: &Style,
         marks: &Marks,
         input: &Input,
+        info: &Info,
         monitor: &Monitor,
     ) -> Result<Self> {
-        // The font first: a bad `[style] font` fails before any grab.
-        let painter = Painter::new(style, marks, input)?;
+        // The fonts first: a bad `[style] font` fails before any grab.
+        let painter = Painter::new(style, marks, &input.style, &info.style, 1.0)?;
 
         let (globals, mut queue) =
             registry_queue_init::<State>(conn).context("connecting to Wayland")?;
@@ -415,10 +416,8 @@ impl Overlay {
                     current: h.current,
                 })
                 .collect(),
-            input: frame.input.as_ref().map(|t| Tag {
-                at: to_local(t.at),
-                ..t.clone()
-            }),
+            input: frame.input.clone(),
+            info: frame.info.clone(),
         };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;

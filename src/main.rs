@@ -146,7 +146,14 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
             )
         })?;
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
-    let mut overlay = Overlay::new(&conn, &config.style, &config.marks, &config.input, &monitor)?;
+    let mut overlay = Overlay::new(
+        &conn,
+        &config.style,
+        &config.marks,
+        &config.input,
+        &config.info,
+        &monitor,
+    )?;
     eprintln!(
         "wayhint: {} tags, keys through the {}; Esc leaves",
         snapshot.targets.len(),

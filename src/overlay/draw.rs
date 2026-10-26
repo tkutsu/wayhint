@@ -6,6 +6,11 @@
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
 //! CPU draws that in well under a millisecond. Dots, for where a nudged
 //! command lands, are two filled circles, each on a line back to its tag.
+//!
+//! Everything is laid out in logical px, as the rest of wayhint counts,
+//! and drawn at the monitor's scale: shapes through a scaling transform,
+//! letters rasterized at their size times the scale. So a tag is the same
+//! size on every monitor, and sharp on a scaled one.
 
 use std::collections::HashMap;
 
@@ -20,7 +25,7 @@ use crate::{
     overlay::font,
     placement::{self, Label},
     space::Space,
-    style::{Color, Input, Mark, Marks, Position, Style},
+    style::{Color, Mark, Marks, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -35,8 +40,45 @@ pub struct Frame {
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
-    /// Text mode's query, drawn independently of target placement.
-    pub input: Option<Tag>,
+    /// The input box: an armed verb, `drop`, text mode's query.
+    pub input: Option<Note>,
+    /// The info box: scanning, no targets, a dropped key, the key legend.
+    pub info: Option<Note>,
+}
+
+impl Frame {
+    /// Whether the tags, lines, dots and marks are all gone: the boxes
+    /// aside, a blank screen.
+    pub fn is_bare(&self) -> bool {
+        self.tags.is_empty() && self.dots.is_empty() && self.highlights.is_empty()
+    }
+}
+
+/// What a box on the screen says. Where it goes is its table's: `[input]`
+/// or `[info]`. Lines are split at `\n`, and a line's columns at `\t`,
+/// lined up across lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    pub text: String,
+    /// How many leading characters are drawn dimmed: a verb's name, a
+    /// placeholder.
+    pub typed: usize,
+}
+
+impl Note {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            typed: 0,
+        }
+    }
+}
+
+/// The boxes apart from the tags, each with its own look and spot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    Input,
+    Info,
 }
 
 /// A translucent box over one line of a match in text mode.
@@ -68,7 +110,7 @@ pub struct Tag {
     pub text: String,
     /// How many leading letters are already typed (drawn dimmed).
     pub typed: usize,
-    /// The click point; absent for the status pill. Placement never changes it.
+    /// The click point; absent for a box. Placement never changes it.
     pub target: Option<Point>,
 }
 
@@ -79,11 +121,15 @@ struct Glyph {
     pixmap: Option<Pixmap>,
 }
 
-/// Draws tags, matches and the query, caching each font's rasterized glyphs.
+/// Draws tags, matches and the boxes, caching each font's rasterized
+/// glyphs.
 pub struct Painter {
     tags: TextPainter,
     input: TextPainter,
+    info: TextPainter,
     marks: Marks,
+    /// Buffer px per logical px: the monitor's scale.
+    scale: f32,
     space: Option<Space>,
     regions: Vec<BoxRect>,
     /// How far each tag was moved off its own box, keyed by its anchor and
@@ -93,11 +139,21 @@ pub struct Painter {
 }
 
 impl Painter {
-    pub fn new(style: &Style, marks: &Marks, input: &Input) -> Result<Self> {
+    /// The tags in `style`, text mode's marks in `marks`, the boxes in
+    /// `input` and `info`, drawn at `scale` buffer px per logical px.
+    pub fn new(
+        style: &Style,
+        marks: &Marks,
+        input: &Style,
+        info: &Style,
+        scale: f32,
+    ) -> Result<Self> {
         Ok(Self {
-            tags: TextPainter::new(style)?,
-            input: TextPainter::new(&input.style)?,
+            tags: TextPainter::new(style, scale)?,
+            input: TextPainter::new(input, scale)?,
+            info: TextPainter::new(info, scale)?,
             marks: *marks,
+            scale,
             space: None,
             regions: Vec::new(),
             placed: HashMap::new(),
@@ -176,17 +232,39 @@ impl Painter {
         result
     }
 
-    /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
+    /// `pixmap`'s size in logical px.
+    #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
+    fn area(&self, pixmap: &Pixmap) -> (f32, f32) {
+        (
+            pixmap.width() as f32 / self.scale,
+            pixmap.height() as f32 / self.scale,
+        )
+    }
+
+    /// Draws `frame` on a cleared `pixmap`, boxes and all, at full
+    /// opacity.
+    pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
+        self.paint_board(pixmap, frame);
+        if let Some(note) = &frame.input {
+            self.paint_note(pixmap, Panel::Input, note, 1.0);
+        }
+        if let Some(note) = &frame.info {
+            self.paint_note(pixmap, Panel::Info, note, 1.0);
+        }
+    }
+
+    /// Clears `pixmap` and draws `frame`'s tags, lines, dots and marks on
+    /// it, in overlay coordinates; not its boxes.
     ///
     /// Highlights go first, under everything. Lines start at their tags'
-    /// nearest edges and go under the tags. Dots follow, then the query.
-    pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
+    /// nearest edges and go under the tags. Dots follow.
+    pub fn paint_board(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
+        let scaled = Transform::from_scale(self.scale, self.scale);
         for highlight in &frame.highlights {
-            self.paint_highlight(pixmap, *highlight);
+            self.paint_highlight(pixmap, *highlight, scaled);
         }
-        #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
-        let area = (pixmap.width() as f32, pixmap.height() as f32);
+        let area = self.area(pixmap);
         let arranged = self.arrange(frame, area);
         let frame = &arranged;
         let mut lines = Vec::new();
@@ -205,15 +283,36 @@ impl Painter {
             };
             lines.extend(self.line(from, centre(dot.at)));
         }
-        paint_layer(pixmap, &lines);
+        paint_layer(pixmap, &lines, self.scale);
         for tag in &frame.tags {
-            self.tags.paint_tag(pixmap, tag, area);
+            self.tags.paint_tag(pixmap, tag, area, 1.0);
         }
         let dots: Vec<Part> = frame.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
-        paint_layer(pixmap, &dots);
-        if let Some(tag) = &frame.input {
-            self.input.paint_tag(pixmap, tag, area);
-        }
+        paint_layer(pixmap, &dots, self.scale);
+    }
+
+    /// Draws one box over `pixmap` at `opacity`, where its table puts it:
+    /// its position on the screen, moved by its offset.
+    #[allow(clippy::cast_possible_truncation)] // logical sizes fit an i32
+    pub fn paint_note(&mut self, pixmap: &mut Pixmap, panel: Panel, note: &Note, opacity: f32) {
+        let (w, h) = self.area(pixmap);
+        let painter = match panel {
+            Panel::Input => &mut self.input,
+            Panel::Info => &mut self.info,
+        };
+        let style = &painter.style;
+        let [x, y] = style.offset;
+        let tag = Tag {
+            at: style
+                .position
+                .on(BoxRect::new(0, 0, w as i32, h as i32))
+                .offset(Point::new(x, y)),
+            position: style.position,
+            text: note.text.clone(),
+            typed: note.typed,
+            target: None,
+        };
+        painter.paint_tag(pixmap, &tag, (w, h), opacity);
     }
 
     /// The line from a tag to where it clicks, inside its outline, so it
@@ -282,7 +381,7 @@ impl Painter {
     /// One line of a match: its box grown by the mark's padding, filled
     /// and bordered as a tag is, with no letters.
     #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
-    fn paint_highlight(&self, pixmap: &mut Pixmap, highlight: Highlight) {
+    fn paint_highlight(&self, pixmap: &mut Pixmap, highlight: Highlight, scaled: Transform) {
         let mark = if highlight.current {
             self.marks.current
         } else {
@@ -298,15 +397,18 @@ impl Painter {
         ) else {
             return;
         };
-        paint_box(pixmap, rect, &mark);
+        paint_box(pixmap, rect, &mark, scaled);
     }
 }
 
-/// A font and glyph cache for one look; tags and the query have separate ones.
+/// A font and glyph cache for one look; tags and each box have their own.
 struct TextPainter {
     style: Style,
     font: fontdue::Font,
-    /// Distance from a line's top to its baseline, and its full height.
+    /// Buffer px per logical px: glyphs are rasterized this much bigger.
+    scale: f32,
+    /// Distance from a line's top to its baseline, and its full height,
+    /// in logical px.
     ascent: f32,
     line_height: f32,
     /// Keyed by letter and whether it's drawn in the typed colour.
@@ -314,8 +416,8 @@ struct TextPainter {
 }
 
 impl TextPainter {
-    fn new(style: &Style) -> Result<Self> {
-        let font = font::load(&style.font, style.size)?;
+    fn new(style: &Style, scale: f32) -> Result<Self> {
+        let font = font::load(&style.font, style.size * scale)?;
         let (ascent, line_height) = font
             .horizontal_line_metrics(style.size)
             .map_or((style.size, style.size * 1.2), |m| {
@@ -324,33 +426,102 @@ impl TextPainter {
         Ok(Self {
             style: style.clone(),
             font,
+            scale,
             ascent,
             line_height,
             glyphs: HashMap::new(),
         })
     }
 
-    /// The tag's box size: its text plus padding on every side.
+    /// How far a letter moves the pen, in logical px.
+    fn advance(&self, letter: char) -> f32 {
+        self.font.metrics(letter, self.style.size).advance_width
+    }
+
+    /// Each column's width, the widest of its cells in every line.
+    fn columns(&self, text: &str) -> Vec<f32> {
+        let mut widths: Vec<f32> = Vec::new();
+        for line in text.split('\n') {
+            for (i, cell) in line.split('\t').enumerate() {
+                let width = cell.chars().map(|c| self.advance(c)).sum();
+                match widths.get_mut(i) {
+                    Some(widest) => *widest = widest.max(width),
+                    None => widths.push(width),
+                }
+            }
+        }
+        widths
+    }
+
+    /// The gap between two columns: the box's side padding, twice.
+    fn gap(&self) -> f32 {
+        2.0 * self.style.padding[1]
+    }
+
+    /// The box's size: its text plus padding on every side.
+    #[allow(clippy::cast_precision_loss)] // a box has a few lines
     fn size(&self, text: &str) -> (f32, f32) {
         let [pad_y, pad_x] = self.style.padding;
-        let width: f32 = text
-            .chars()
-            .map(|c| self.font.metrics(c, self.style.size).advance_width)
-            .sum();
+        let columns = self.columns(text);
+        let gaps = columns.len().saturating_sub(1) as f32 * self.gap();
+        let width: f32 = columns.iter().sum::<f32>() + gaps;
+        let lines = text.split('\n').count() as f32;
         (
             (width + 2.0 * pad_x).ceil(),
-            (self.line_height + 2.0 * pad_y).ceil(),
+            (self.line_height * lines + 2.0 * pad_y).ceil(),
         )
     }
 
-    fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
+    /// Draws `tag` on `pixmap` at `opacity`. A box fading in or out is
+    /// drawn alone first, then laid over at that opacity, so its letters
+    /// don't show its background through them.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32), opacity: f32) {
         let size = self.size(&tag.text);
         let Some(rect) = place(tag.at, tag.position, size, area) else {
             return;
         };
+        if opacity >= 1.0 {
+            self.draw(pixmap, rect, &tag.text, tag.typed, (0.0, 0.0));
+            return;
+        }
+        let s = self.scale;
+        let (left, top) = ((rect.left() * s).floor(), (rect.top() * s).floor());
+        let (right, bottom) = ((rect.right() * s).ceil(), (rect.bottom() * s).ceil());
+        let Some(mut layer) = Pixmap::new((right - left) as u32 + 1, (bottom - top) as u32 + 1)
+        else {
+            return;
+        };
+        self.draw(&mut layer, rect, &tag.text, tag.typed, (left, top));
+        let paint = PixmapPaint {
+            opacity: opacity.clamp(0.0, 1.0),
+            ..PixmapPaint::default()
+        };
+        pixmap.draw_pixmap(
+            left as i32,
+            top as i32,
+            layer.as_ref(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    /// The box at `rect` (logical px) and its letters, on `target`, whose
+    /// top-left corner is `shift` buffer px into the overlay.
+    fn draw(
+        &mut self,
+        target: &mut Pixmap,
+        rect: Rect,
+        text: &str,
+        typed: usize,
+        shift: (f32, f32),
+    ) {
+        let s = self.scale;
+        let transform = Transform::from_scale(s, s).post_translate(-shift.0, -shift.1);
         let style = &self.style;
         paint_box(
-            pixmap,
+            target,
             rect,
             &Mark {
                 background: style.background,
@@ -359,44 +530,62 @@ impl TextPainter {
                 radius: style.radius,
                 padding: style.padding,
             },
+            transform,
         );
-
-        // The letters, on a baseline `ascent` below the padding.
+        // The letters, on a baseline `ascent` below the padding, a line
+        // height further for each line; each column starts past the
+        // widest cell of the one before.
         let [pad_y, pad_x] = style.padding;
-        let baseline = rect.top() + pad_y + self.ascent;
-        let mut pen = rect.left() + pad_x;
-        for (i, letter) in tag.text.chars().enumerate() {
-            let glyph = self.glyph(letter, i < tag.typed);
-            let m = glyph.metrics;
-            if let Some(ink) = &glyph.pixmap {
-                // fontdue measures `ymin` up from the baseline to the glyph's
-                // bottom edge; pixmaps count down from the top.
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                let (x, y) = (
-                    (pen + m.xmin as f32).round() as i32,
-                    (baseline - m.ymin as f32 - m.height as f32).round() as i32,
-                );
-                pixmap.draw_pixmap(
-                    x,
-                    y,
-                    ink.as_ref(),
-                    &PixmapPaint::default(),
-                    Transform::identity(),
-                    None,
-                );
+        let columns = self.columns(text);
+        let gap = self.gap();
+        let mut index = 0;
+        let mut baseline = rect.top() + pad_y + self.ascent;
+        for line in text.split('\n') {
+            let mut start = rect.left() + pad_x;
+            for (cell, width) in line.split('\t').zip(&columns) {
+                let mut pen = start;
+                for letter in cell.chars() {
+                    let advance = self.advance(letter);
+                    let glyph = self.glyph(letter, index < typed);
+                    let m = glyph.metrics;
+                    if let Some(ink) = &glyph.pixmap {
+                        // fontdue measures `ymin` up from the baseline to the
+                        // glyph's bottom edge; pixmaps count down from the top.
+                        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                        let (x, y) = (
+                            (pen * s - shift.0 + m.xmin as f32).round() as i32,
+                            (baseline * s - shift.1 - m.ymin as f32 - m.height as f32).round()
+                                as i32,
+                        );
+                        target.draw_pixmap(
+                            x,
+                            y,
+                            ink.as_ref(),
+                            &PixmapPaint::default(),
+                            Transform::identity(),
+                            None,
+                        );
+                    }
+                    pen += advance;
+                    index += 1;
+                }
+                // The tab or line break counts as a character typed.
+                index += 1;
+                start += width + gap;
             }
-            pen += m.advance_width;
+            baseline += self.line_height;
         }
     }
 
-    /// A letter in the text or typed colour, rasterized on first use.
+    /// A letter in the text or typed colour, rasterized on first use at
+    /// the buffer's size.
     fn glyph(&mut self, letter: char, typed: bool) -> &Glyph {
         let color = if typed {
             self.style.dimmed
         } else {
             self.style.text
         };
-        let (font, size) = (&self.font, self.style.size);
+        let (font, size) = (&self.font, self.style.size * self.scale);
         // `entry().or_insert_with` looks the key up once and runs the closure
         // only when it's missing: the cache in one line.
         self.glyphs.entry((letter, typed)).or_insert_with(|| {
@@ -431,15 +620,16 @@ fn place(
 
 /// A box filled and bordered in `look`'s colours: the fill, then the border
 /// stroked half a width inside, so the whole line stays within the box.
-/// Its padding is the caller's business.
-fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark) {
+/// Its padding is the caller's business. `rect` is in logical px, which
+/// `transform` takes to the buffer's.
+fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark, transform: Transform) {
     let inset = look.border_width / 2.0;
     if let Some(path) = rounded_rect(rect, look.radius) {
         pixmap.fill_path(
             &path,
             &paint(look.background),
             FillRule::Winding,
-            Transform::identity(),
+            transform,
             None,
         );
     }
@@ -456,13 +646,7 @@ fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark) {
             width: look.border_width,
             ..Stroke::default()
         };
-        pixmap.stroke_path(
-            &path,
-            &paint(look.border),
-            &stroke,
-            Transform::identity(),
-            None,
-        );
+        pixmap.stroke_path(&path, &paint(look.border), &stroke, transform, None);
     }
 }
 
@@ -537,17 +721,18 @@ struct Part {
 
 /// Paints `parts` on a layer of their own, each replacing what's under it,
 /// then lays the layer over `pixmap`. A translucent line or dot then shows
-/// the window behind it, not the outline it sits in.
-fn paint_layer(pixmap: &mut Pixmap, parts: &[Part]) {
+/// the window behind it, not the outline it sits in. The parts are in
+/// logical px, drawn at `scale` buffer px each.
+fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
     let corners: Vec<_> = parts
         .iter()
         .flat_map(|part| {
-            // Half the stroke, and a pixel for the anti-aliased edge.
-            let grow = part.width.unwrap_or(0.0) / 2.0 + 1.0;
+            // Half the stroke, and a buffer pixel for the anti-aliased edge.
+            let grow = part.width.unwrap_or(0.0) / 2.0 + 1.0 / scale;
             let b = part.path.bounds();
             [
-                tiny_skia::Point::from_xy(b.left() - grow, b.top() - grow),
-                tiny_skia::Point::from_xy(b.right() + grow, b.bottom() + grow),
+                tiny_skia::Point::from_xy((b.left() - grow) * scale, (b.top() - grow) * scale),
+                tiny_skia::Point::from_xy((b.right() + grow) * scale, (b.bottom() + grow) * scale),
             ]
         })
         .collect();
@@ -562,7 +747,8 @@ fn paint_layer(pixmap: &mut Pixmap, parts: &[Part]) {
         return;
     };
     #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
-    let shift = Transform::from_translate(-area.left() as f32, -area.top() as f32);
+    let shift =
+        Transform::from_scale(scale, scale).post_translate(-area.left() as f32, -area.top() as f32);
     for part in parts {
         let mut paint = paint(part.color);
         paint.blend_mode = BlendMode::Source;
@@ -655,18 +841,24 @@ border = "#ffff00"
 border_width = 2
 radius = 0
 padding = [8, 12]
+position = "top-left"
+offset = [20, 20]
 "##,
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
-        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
+        let mut painter = Painter::new(
+            &config.style,
+            &config.marks,
+            &config.input.style,
+            &config.info.style,
+            1.0,
+        )
+        .unwrap();
         let mut pixmap = Pixmap::new(300, 160).unwrap();
-        let tag = Tag {
-            at: Point::new(20, 20),
-            position: Position::TopLeft,
+        let tag = Note {
             text: "AB".into(),
             typed: 1,
-            target: None,
         };
         assert!(painter.input.size("AB").0 > painter.tags.size("AB").0);
         let mut frame = Frame {
@@ -716,12 +908,8 @@ padding = [8, 12]
     }
 
     #[test]
-    fn query_box_keeps_its_screen_alignment_as_the_query_grows() {
+    fn a_box_sits_at_its_position_and_signed_offset_as_its_text_grows() {
         let style = Style::default();
-        let mut input = Input::new(&style);
-        input.style.radius = 0.0;
-        input.style.background = Color::rgba(30, 30, 30, 255);
-        let mut painter = Painter::new(&style, &Marks::new(&style), &input).unwrap();
         let mut pixmap = Pixmap::new(800, 600).unwrap();
         for position in [
             Position::TopLeft,
@@ -739,15 +927,18 @@ padding = [8, 12]
                 if across == 2 { -12 } else { 12 },
                 if down == 2 { -16 } else { 16 },
             );
+            let input = Style {
+                radius: 0.0,
+                background: Color::rgba(30, 30, 30, 255),
+                position,
+                offset: [offset.x, offset.y],
+                ..style.clone()
+            };
+            let mut painter =
+                Painter::new(&style, &Marks::new(&style), &input, &style, 1.0).unwrap();
             for text in ["a", "a longer query  1/2"] {
                 let frame = Frame {
-                    input: Some(Tag {
-                        at: position.on(BoxRect::new(0, 0, 800, 600)).offset(offset),
-                        position,
-                        text: text.into(),
-                        typed: 0,
-                        target: None,
-                    }),
+                    input: Some(Note::new(text)),
                     ..Frame::default()
                 };
                 painter.paint(&mut pixmap, &frame);
@@ -783,6 +974,194 @@ padding = [8, 12]
                 );
             }
         }
+    }
+
+    /// The smallest box around the pixels `keep` picks, as left, top,
+    /// right, bottom; right and bottom one past the last.
+    fn bounds(pixmap: &Pixmap, keep: impl Fn(PremultipliedColorU8) -> bool) -> [i32; 4] {
+        let width = pixmap.width() as usize;
+        let mut out = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for (i, &p) in pixmap.pixels().iter().enumerate() {
+            if keep(p) {
+                let (x, y) = (
+                    i32::try_from(i % width).unwrap(),
+                    i32::try_from(i / width).unwrap(),
+                );
+                out = [
+                    out[0].min(x),
+                    out[1].min(y),
+                    out[2].max(x + 1),
+                    out[3].max(y + 1),
+                ];
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn a_scaled_monitor_shows_the_same_picture_bigger() {
+        let style = Style {
+            text: Color::rgba(240, 20, 30, 255),
+            background: Color::rgba(30, 30, 30, 255),
+            radius: 0.0,
+            border_width: 0.0,
+            padding: [4.0, 6.0],
+            ..Style::default()
+        };
+        let mut marks = Marks::new(&style);
+        marks.all.background = Color::rgba(0, 0, 255, 255);
+        marks.all.border_width = 0.0;
+        marks.all.radius = 0.0;
+        marks.all.padding = [0.0, 0.0];
+        let frame = Frame {
+            tags: vec![Tag {
+                at: Point::new(20, 20),
+                position: Position::TopLeft,
+                text: "AB".into(),
+                typed: 0,
+                target: None,
+            }],
+            highlights: vec![Highlight {
+                rect: BoxRect::new(20, 100, 40, 20),
+                current: false,
+            }],
+            dots: vec![Dot {
+                from: Point::new(150, 20),
+                at: Point::new(150, 100),
+                tag: None,
+            }],
+            ..Frame::default()
+        };
+        let render = |scale: f32| {
+            let mut painter = Painter::new(&style, &marks, &style, &style, scale).unwrap();
+            let mut pixmap = Pixmap::new((200.0 * scale) as u32, (150.0 * scale) as u32).unwrap();
+            painter.paint(&mut pixmap, &frame);
+            pixmap
+        };
+        let (one, big) = (render(1.0), render(1.5));
+        let rgba = |p: PremultipliedColorU8| (p.red(), p.green(), p.blue(), p.alpha());
+        let colour = |rgb: (u8, u8, u8)| {
+            move |p: PremultipliedColorU8| rgba(p) == (rgb.0, rgb.1, rgb.2, 255)
+        };
+
+        let mark = |m: &Pixmap| bounds(m, colour((0, 0, 255)));
+        assert_eq!(mark(&one), [20, 100, 60, 120]);
+        assert_eq!(mark(&big), [30, 150, 90, 180], "logical px times 1.5");
+
+        let tag = |m: &Pixmap| bounds(m, colour((30, 30, 30)));
+        for (small, large) in tag(&one).into_iter().zip(tag(&big)) {
+            assert!(
+                (small as f32 * 1.5 - large as f32).abs() <= 1.0,
+                "{small} {large}"
+            );
+        }
+        // The letters are rasterized at 1.5 times their size: as tall again
+        // and a half, not stretched pixels.
+        let letters = |m: &Pixmap| {
+            let [left, top, right, bottom] = tag(m);
+            let ink = bounds(m, |p| p.red() > 120 && p.green() < 60);
+            assert!(ink[0] >= left && ink[2] <= right && ink[1] >= top && ink[3] <= bottom);
+            (ink[3] - ink[1]) as f32
+        };
+        assert!((letters(&one) * 1.5 - letters(&big)).abs() <= 2.0);
+
+        // The line and the dot land on the same spots, scaled.
+        for ((x, y), what) in [((150, 60), "the line"), ((150, 100), "the dot")] {
+            let small = rgba(one.pixel(x, y).unwrap());
+            let large = rgba(big.pixel(x * 3 / 2, y * 3 / 2).unwrap());
+            assert_eq!(small.3, 255, "{what}");
+            assert_eq!(small, large, "{what}");
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn a_fading_box_is_the_whole_box_at_part_opacity() {
+        let style = Style {
+            text: Color::rgba(240, 20, 30, 255),
+            background: Color::rgba(30, 90, 30, 255),
+            border: Color::rgba(200, 200, 0, 255),
+            border_width: 2.0,
+            position: Position::Center,
+            ..Style::default()
+        };
+        for scale in [1.0, 1.5] {
+            let mut painter =
+                Painter::new(&style, &Marks::new(&style), &style, &style, scale).unwrap();
+            let size = ((300.0 * scale) as u32, (100.0 * scale) as u32);
+            let note = Note {
+                text: "fade me".into(),
+                typed: 2,
+            };
+            let mut at = |opacity| {
+                let mut pixmap = Pixmap::new(size.0, size.1).unwrap();
+                painter.paint_note(&mut pixmap, Panel::Info, &note, opacity);
+                pixmap
+            };
+            let (full, half, gone) = (at(1.0), at(0.5), at(0.0));
+            assert!(gone.pixels().iter().all(|p| p.alpha() == 0), "opacity 0");
+            assert!(full.pixels().iter().any(|p| p.alpha() == 255));
+            // Each pixel is half the opaque box's: the letters cover the
+            // background, so none of it shows through them.
+            for (f, h) in full.pixels().iter().zip(half.pixels()) {
+                for (f, h) in [
+                    (f.red(), h.red()),
+                    (f.green(), h.green()),
+                    (f.blue(), h.blue()),
+                    (f.alpha(), h.alpha()),
+                ] {
+                    assert!(
+                        (i16::from(f) - 2 * i16::from(h)).abs() <= 2,
+                        "scale {scale}: {f} at full is {h} at half"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_lines_up_its_columns_across_lines() {
+        let style = Style {
+            text: Color::rgba(240, 20, 30, 255),
+            background: Color::rgba(0, 0, 0, 0),
+            border_width: 0.0,
+            position: Position::TopLeft,
+            offset: [10, 10],
+            ..Style::default()
+        };
+        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
+        let legend = "a\tx\nlonger\tx";
+        let (_, one_line) = painter.info.size("a");
+        let (_, two_lines) = painter.info.size(legend);
+        assert!(two_lines > one_line + painter.info.line_height - 1.0);
+        let mut pixmap = Pixmap::new(400, 200).unwrap();
+        painter.paint_note(&mut pixmap, Panel::Info, &Note::new(legend), 1.0);
+        // Each line ends in the same letter, in the same column: the same
+        // right edge, though "a" is far shorter than "longer".
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let split = (10.0 + style.padding[0] + painter.info.line_height).round() as u32;
+        let right = |rows: std::ops::Range<u32>| {
+            let mut band = Pixmap::new(400, rows.end - rows.start).unwrap();
+            band.draw_pixmap(
+                0,
+                -i32::try_from(rows.start).unwrap(),
+                pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            bounds(&band, |p| p.alpha() > 128)[2]
+        };
+        assert_eq!(right(0..split), right(split..200));
     }
 
     #[test]
@@ -839,7 +1218,7 @@ padding = [8, 12]
             radius: 6.0,
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
         let mut pixmap = Pixmap::new(240, 200).unwrap();
         let mut frame = Frame {
             tags: vec![Tag {
@@ -856,6 +1235,7 @@ padding = [8, 12]
             }],
             highlights: vec![],
             input: None,
+            info: None,
         };
         for (dot, (x, y)) in [
             (Point::new(60, 90), (90, 90)),
@@ -897,7 +1277,7 @@ padding = [8, 12]
         style.leader.line = Some(Color::rgba(255, 0, 0, 128));
         style.leader.dot = Some(Color::rgba(0, 255, 0, 128));
         style.leader.outline = Some(Color::rgba(0, 0, 255, 255));
-        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
         let mut pixmap = Pixmap::new(200, 200).unwrap();
         let frame = Frame {
             dots: vec![Dot {
@@ -955,7 +1335,7 @@ mod collision_tests {
             offset: [3, 3],
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
+        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
         let mut pixmap = Pixmap::new(300, 600).unwrap();
         painter.set_space(
             BoxRect::new(0, 0, 300, 600),
@@ -982,6 +1362,7 @@ mod collision_tests {
             dots: vec![],
             highlights: vec![],
             input: None,
+            info: None,
         };
         painter.paint(&mut pixmap, &frame);
         let arranged = painter.arrange(&frame, (300.0, 600.0));
@@ -1076,7 +1457,14 @@ mod capture_replay {
             highlights,
             ..Frame::default()
         };
-        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
+        let mut painter = Painter::new(
+            &config.style,
+            &config.marks,
+            &config.input.style,
+            &config.info.style,
+            1.0,
+        )
+        .unwrap();
         let mut marks = Pixmap::new(picture.width(), picture.height()).unwrap();
         painter.paint(&mut marks, &frame);
         picture.draw_pixmap(
@@ -1097,7 +1485,8 @@ mod capture_replay {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_possible_wrap,
-        clippy::cast_precision_loss
+        clippy::cast_precision_loss,
+        clippy::too_many_lines
     )]
     fn render_layout_capture() {
         let snapshot = std::env::var("WAYHINT_LAYOUT_SNAPSHOT").unwrap();
@@ -1142,7 +1531,14 @@ mod capture_replay {
             tags,
             ..Frame::default()
         };
-        let mut painter = Painter::new(&config.style, &config.marks, &config.input).unwrap();
+        let mut painter = Painter::new(
+            &config.style,
+            &config.marks,
+            &config.input.style,
+            &config.info.style,
+            1.0,
+        )
+        .unwrap();
         let obstacles: Vec<_> = snapshot.obstacles.iter().map(|r| r.offset(shift)).collect();
         painter.set_space(area, &obstacles, vec![area]);
         let size = (area.w as f32, area.h as f32);
