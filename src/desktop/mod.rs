@@ -19,6 +19,7 @@ mod capture;
 pub mod filter;
 mod hyprland;
 mod kitty;
+mod menus;
 mod notify;
 mod ocr;
 pub mod recheck;
@@ -39,7 +40,8 @@ use futures::future;
 use self::{
     atspi::Bounds,
     capture::Camera,
-    surfaces::{above, place, popup, uncovered, unknown},
+    menus::Menus,
+    surfaces::{above, add_menus, place, popup, uncovered, unknown},
     tree::ObjectId,
 };
 pub use self::{
@@ -101,6 +103,8 @@ pub struct Desktop {
     /// The pictures text mode's OCR last read, by window address: a match
     /// must still show the same pixels before it's acted on.
     pictures: Vec<(String, Frame)>,
+    /// The apps' open menus, once a run starts following them.
+    menus: Option<Menus>,
 }
 
 /// One window as the scan saw it, until the snapshot is built from it.
@@ -149,7 +153,15 @@ impl Desktop {
             scans: 0,
             camera: None,
             pictures: Vec::new(),
+            menus: None,
         })
+    }
+
+    /// Follows the menus apps open from now on, so [`Desktop::stack`] has
+    /// them: a run's right click opens one.
+    pub fn watch_menus(&mut self) -> Result<()> {
+        self.menus = Some(Menus::watch()?);
+        Ok(())
     }
 
     /// Reads `window`'s tree, unfiltered: what `dump --raw` prints.
@@ -160,8 +172,9 @@ impl Desktop {
 
     /// What `monitor` shows, bottom to top: Hyprland's clients and layers
     /// (see `hyprland::shown`), each layer with the frames that may be its
-    /// own, then the popups. Frames are read only for the apps that have a
-    /// layer and no client: an app's own menus are left out, as before.
+    /// own, then the popups, and each open menu right above its window
+    /// (once [`Desktop::watch_menus`] is on). Frames are read only for the
+    /// apps that have a layer and no client.
     /// An app whose popups can't be placed, or whose frames didn't answer,
     /// covers the whole monitor (`surfaces::unknown`), whichever monitor its
     /// layers are on: a popup can reach past its layer's output.
@@ -215,6 +228,13 @@ impl Desktop {
                 ));
                 stack.windows.push(unknown(pid, monitor, shown.screen));
             }
+        }
+        let open = self.menus.as_ref().map(Menus::open).unwrap_or_default();
+        if !open.is_empty() {
+            let read = self.scanner.menus(&open, FRAMES_TIMEOUT);
+            // A menu that didn't answer has just closed, most likely.
+            let menus: Vec<_> = self.runtime.block_on(read).into_iter().flatten().collect();
+            add_menus(&mut stack, &menus, &shown.xwayland, shown.screen, monitor);
         }
         Ok(stack)
     }
@@ -479,7 +499,12 @@ impl Desktop {
         let Some(object) = &target.object else {
             return Ok(recheck::unread(scanned.rect, window));
         };
-        let read = self.scanner.read(object, &target.clips, RECHECK_TIMEOUT);
+        let menu = (scanned.kind == Kind::Menu)
+            .then(|| scanned.frames.first())
+            .flatten();
+        let read = self
+            .scanner
+            .read(object, &target.clips, menu, RECHECK_TIMEOUT);
         let fresh = self.runtime.block_on(read).ok();
         Ok(recheck::verdict(target, fresh.as_ref(), window))
     }
