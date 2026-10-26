@@ -4,7 +4,10 @@
 //! holds what you change. Opacity is each colour's alpha: a translucent
 //! background with solid text is `background = "#1e1e2ef0"`.
 
-use std::fmt::{self, Write as _};
+use std::{
+    fmt::{self, Write as _},
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -136,6 +139,8 @@ impl Position {
 
 /// The farthest `[style] offset` moves a tag, either way, in px.
 const OFFSET: i32 = 500;
+/// The longest fade, in ms: past this it reads as lag.
+const FADE: u32 = 1000;
 
 /// The `[style]` table. `#[serde(default)]` fills every missing field from
 /// `Style::default()`, and `deny_unknown_fields` rejects `colour = ...`.
@@ -160,6 +165,8 @@ pub struct Style {
     pub position: Position,
     /// Moves every tag from its position, right then down, in px.
     pub offset: [i32; 2],
+    /// Ms to fade in as it appears, and out as it goes; 0 for no fade.
+    pub fade: u32,
     /// The line from a tag to its dot, and the dot: `[style.leader]`.
     pub leader: Leader,
 }
@@ -267,6 +274,7 @@ impl Default for Style {
             padding: [2.0, 5.0],
             position: Position::default(),
             offset: [0, 0],
+            fade: 100,
             leader: Leader::default(),
         }
     }
@@ -301,6 +309,9 @@ impl Style {
         }
         if self.font.trim().is_empty() {
             bail!("[{table}] font: empty");
+        }
+        if self.fade > FADE {
+            bail!("[{table}] fade: {} ms is over {FADE}", self.fade);
         }
         self.leader.validate()
     }
@@ -348,11 +359,18 @@ impl Style {
             "offset = [{}, {}]   # px from there, right and down",
             self.offset[0], self.offset[1]
         );
+        let _ = writeln!(
+            out,
+            "fade = {}   # ms to fade in and out; 0 for none",
+            self.fade
+        );
         out
     }
 }
 
-/// The typed query's decorations and look, resolved from `[text.input]`.
+/// The input box, resolved from `[input]`: what's typed that isn't a tag
+/// letter. An armed verb's name, `drop` while a hold is down, and text
+/// mode's query with its decorations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
     pub prefix: String,
@@ -377,19 +395,71 @@ impl Input {
         }
     }
 
-    /// The resolved query settings as editable TOML.
+    /// The resolved box as editable TOML.
     pub fn render(&self) -> String {
-        let look = self.style.render_table("text.input", "on the screen");
+        let look = self.style.render_table("input", "on the screen");
         let (header, fields) = look.split_once('\n').unwrap();
         let quote = crate::config::quote;
         format!(
-            "\n{header}   # the query you type, apart from the tags\n\
-             placeholder = {}   # shown while nothing is typed\n\
+            "\n{header}   # an armed verb, drop, and text mode's query\n\
+             placeholder = {}   # shown while nothing is typed in text mode\n\
              prefix = {}   # before the query, as \"find: \"\n\
              suffix = {}   # after the query, before the match count\n{fields}",
             quote(&self.placeholder),
             quote(&self.prefix),
             quote(&self.suffix),
+        )
+    }
+}
+
+/// The info box, resolved from `[info]`: what wayhint has to say while
+/// the tags are up, each kind of message on or off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Info {
+    /// `scanning`, while the windows are read: after the keybind, and
+    /// after each click.
+    pub scanning: bool,
+    /// `no targets`, while nothing on the monitor has a tag.
+    pub no_targets: bool,
+    /// A key that matches no tag, or a character no text: the key is
+    /// dropped, and the box says so.
+    pub no_match: bool,
+    /// How long a dropped key's message stays.
+    pub duration: Duration,
+    pub style: Style,
+}
+
+impl Info {
+    /// Every message on, in the tags' colours and font, just above the
+    /// input box's default spot.
+    pub fn new(tags: &Style) -> Self {
+        Self {
+            scanning: true,
+            no_targets: true,
+            no_match: true,
+            duration: Duration::from_millis(1000),
+            style: Style {
+                position: Position::Bottom,
+                offset: [0, -80],
+                ..tags.clone()
+            },
+        }
+    }
+
+    /// The resolved box as editable TOML.
+    pub fn render(&self) -> String {
+        let look = self.style.render_table("info", "on the screen");
+        let (header, fields) = look.split_once('\n').unwrap();
+        format!(
+            "\n{header}   # what wayhint has to say while the tags are up\n\
+             scanning = {}   # while the windows are read\n\
+             no_targets = {}   # while nothing on the monitor has a tag\n\
+             no_match = {}   # a key that matches no tag, or a character no text\n\
+             duration = {}   # ms a dropped key's message stays\n{fields}",
+            self.scanning,
+            self.no_targets,
+            self.no_match,
+            self.duration.as_millis(),
         )
     }
 }

@@ -25,7 +25,7 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::{Color, Input, Mark, Marks, Position, Style},
+    style::{Color, Info, Input, Mark, Marks, Position, Style},
 };
 
 /// The default config, every setting explained and commented out:
@@ -44,6 +44,8 @@ struct File {
     pixels: FilePixels,
     scan: FileScan,
     text: FileText,
+    input: Option<FileInput>,
+    info: FileInfo,
 }
 
 /// `[text]`: how text mode reads windows, acts on matches and looks.
@@ -56,7 +58,8 @@ struct FileText {
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
     #[serde(alias = "style")]
     matches: FileMarks,
-    input: FileInput,
+    /// `[input]`'s old name, from when it showed only the query.
+    input: Option<FileInput>,
 }
 
 /// The OCR languages unless the file says: the one Tesseract ships with.
@@ -81,7 +84,50 @@ impl FileText {
     }
 }
 
-/// `[text.input]`: query decorations and a look independent of the tags.
+/// A box's look as a table writes it: unset fields come from elsewhere
+/// (the tags' `[style]`, with the box's own spot on the screen). Serde
+/// can't flatten a table that denies unknown fields, so `[input]` and
+/// `[info]` each list the fields and hand them over as one of these.
+struct Look {
+    font: Option<String>,
+    size: Option<f32>,
+    text: Option<Color>,
+    dimmed: Option<Color>,
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+    position: Option<Position>,
+    offset: Option<[i32; 2]>,
+    fade: Option<u32>,
+}
+
+impl Look {
+    /// `base` with what's set here, checked under `[table]`.
+    fn over(self, base: Style, table: &str) -> Result<Style> {
+        let style = Style {
+            font: self.font.unwrap_or(base.font),
+            size: self.size.unwrap_or(base.size),
+            text: self.text.unwrap_or(base.text),
+            dimmed: self.dimmed.unwrap_or(base.dimmed),
+            background: self.background.unwrap_or(base.background),
+            border: self.border.unwrap_or(base.border),
+            border_width: self.border_width.unwrap_or(base.border_width),
+            radius: self.radius.unwrap_or(base.radius),
+            padding: self.padding.unwrap_or(base.padding),
+            position: self.position.unwrap_or(base.position),
+            offset: self.offset.unwrap_or(base.offset),
+            fade: self.fade.unwrap_or(base.fade),
+            leader: base.leader,
+        };
+        style.validate_table(table)?;
+        Ok(style)
+    }
+}
+
+/// `[input]`, once `[text.input]`: the box for an armed verb, `drop` and
+/// text mode's query, with the query's decorations.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
@@ -100,34 +146,36 @@ struct FileInput {
     padding: Option<[f32; 2]>,
     position: Option<Position>,
     offset: Option<[i32; 2]>,
+    fade: Option<u32>,
 }
 
 impl FileInput {
-    /// Inherit the tags' look, with screen positioning instead of a target.
-    fn resolve(self, tags: &Style) -> Result<Input> {
+    /// Inherit the tags' look, with screen positioning instead of a
+    /// target. `table` is the name the file used.
+    fn resolve(self, tags: &Style, table: &str) -> Result<Input> {
         let base = Input::new(tags);
-        let style = Style {
-            font: self.font.unwrap_or(base.style.font),
-            size: self.size.unwrap_or(base.style.size),
-            text: self.text.unwrap_or(base.style.text),
-            dimmed: self.dimmed.unwrap_or(base.style.dimmed),
-            background: self.background.unwrap_or(base.style.background),
-            border: self.border.unwrap_or(base.style.border),
-            border_width: self.border_width.unwrap_or(base.style.border_width),
-            radius: self.radius.unwrap_or(base.style.radius),
-            padding: self.padding.unwrap_or(base.style.padding),
-            position: self.position.unwrap_or(base.style.position),
-            offset: self.offset.unwrap_or(base.style.offset),
-            leader: base.style.leader,
+        let look = Look {
+            font: self.font,
+            size: self.size,
+            text: self.text,
+            dimmed: self.dimmed,
+            background: self.background,
+            border: self.border,
+            border_width: self.border_width,
+            radius: self.radius,
+            padding: self.padding,
+            position: self.position,
+            offset: self.offset,
+            fade: self.fade,
         };
-        style.validate_table("text.input")?;
+        let style = look.over(base.style, table)?;
         let placeholder = self.placeholder.unwrap_or(base.placeholder);
         if [&placeholder, &self.prefix, &self.suffix]
             .iter()
             .any(|s| s.chars().any(char::is_control))
         {
             bail!(
-                "[text.input] placeholder, prefix and suffix must be single-line text without control characters"
+                "[{table}] placeholder, prefix and suffix must be single-line text without control characters"
             );
         }
         Ok(Input {
@@ -135,6 +183,66 @@ impl FileInput {
             suffix: self.suffix,
             placeholder,
             style,
+        })
+    }
+}
+
+/// `[info]`: which messages the info box shows, and its look.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileInfo {
+    scanning: Option<bool>,
+    no_targets: Option<bool>,
+    no_match: Option<bool>,
+    /// Ms a dropped key's message stays.
+    duration: Option<u32>,
+    font: Option<String>,
+    size: Option<f32>,
+    text: Option<Color>,
+    dimmed: Option<Color>,
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+    position: Option<Position>,
+    offset: Option<[i32; 2]>,
+    fade: Option<u32>,
+}
+
+/// The longest a dropped key's message may stay, in ms.
+const DURATION: u32 = 10_000;
+
+impl FileInfo {
+    fn resolve(self, tags: &Style) -> Result<Info> {
+        let base = Info::new(tags);
+        let look = Look {
+            font: self.font,
+            size: self.size,
+            text: self.text,
+            dimmed: self.dimmed,
+            background: self.background,
+            border: self.border,
+            border_width: self.border_width,
+            radius: self.radius,
+            padding: self.padding,
+            position: self.position,
+            offset: self.offset,
+            fade: self.fade,
+        };
+        let duration = match self.duration {
+            Some(ms) if !(1..=DURATION).contains(&ms) => {
+                bail!("[info] duration = {ms}: give 1-{DURATION} ms")
+            }
+            Some(ms) => Duration::from_millis(ms.into()),
+            None => base.duration,
+        };
+        Ok(Info {
+            scanning: self.scanning.unwrap_or(base.scanning),
+            no_targets: self.no_targets.unwrap_or(base.no_targets),
+            no_match: self.no_match.unwrap_or(base.no_match),
+            duration,
+            style: look.over(base.style, "info")?,
         })
     }
 }
@@ -314,6 +422,8 @@ struct FileKeys {
     /// Text mode: the tags go and typing finds text on screen. `""` for
     /// none.
     text: Option<String>,
+    /// Shows every key and what it does, in the info box. `""` for none.
+    help: Option<String>,
 }
 
 impl FileKeys {
@@ -345,6 +455,9 @@ struct FilePointer {
     nudge: Option<u16>,
     /// Wheel notches per scroll.
     scroll: Option<u16>,
+    /// Ms the app gets to react to a click before the windows are read
+    /// again.
+    settle: Option<u16>,
 }
 
 /// How far one arrow press moves a command, in px, unless the file says.
@@ -352,6 +465,12 @@ const NUDGE: u16 = 10;
 /// How many wheel notches a scroll turns, unless the file says: about half
 /// a page in most apps.
 pub const SCROLL: u16 = 5;
+/// How long the app gets to react to a click before the rescan, in ms,
+/// unless the file says: a menu's opening animation is mostly done by
+/// then. What the app changes later, the next refresh picks up.
+const SETTLE: u16 = 150;
+/// The longest settle, in ms: past this a run feels stuck between clicks.
+const SETTLE_MAX: u16 = 2000;
 
 /// Where the cursor goes after a click: `[pointer] after`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,8 +541,10 @@ pub struct Config {
     pub style: Style,
     /// How text mode marks its matches: `[text.matches]`.
     pub marks: Marks,
-    /// Text mode's query display: `[text.input]`.
+    /// The box for an armed verb, `drop` and text mode's query: `[input]`.
     pub input: Input,
+    /// The box for what wayhint has to say: `[info]`.
+    pub info: Info,
     /// Where an action lands within a text match: `[text] cursor`.
     pub text_cursor: TextCursor,
     /// Tesseract's languages for text mode in windows read from pixels,
@@ -434,6 +555,9 @@ pub struct Config {
     pub nudge: i32,
     /// Wheel notches one scroll turns: `[pointer] scroll`.
     pub scroll: u16,
+    /// How long the app gets to react to a click before the rescan:
+    /// `[pointer] settle`.
+    pub settle: Duration,
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
@@ -615,6 +739,10 @@ pub struct Verbs {
     /// none because its default is a tag key or a command's, that default.
     text: Option<(Key, String)>,
     text_unbound: Option<String>,
+    /// The help key and how it's printed, and its default if it has none
+    /// because a tag or a command has that.
+    help: Option<(Key, String)>,
+    help_unbound: Option<String>,
 }
 
 impl Verbs {
@@ -636,6 +764,37 @@ impl Verbs {
     /// Whether `key` is the text key.
     pub fn is_text(&self, key: Key) -> bool {
         self.text.as_ref().is_some_and(|(k, _)| *k == key)
+    }
+
+    /// Whether `key` is the help key.
+    pub fn is_help(&self, key: Key) -> bool {
+        self.help.as_ref().is_some_and(|(k, _)| *k == key)
+    }
+
+    /// Every bound key and what it does, one `key\twhat` line each, for
+    /// the help key's legend: the verbs, the commands, then the keys
+    /// built in.
+    pub fn legend(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!("tag\t{}", self.default.short()));
+        for (action, _, label) in &self.keys {
+            lines.push(format!("{label} tag\t{}", action.short()));
+        }
+        if let Some((_, label)) = &self.repeat {
+            lines.push(format!("{label}\tthe last command again"));
+        }
+        if let Some((_, label)) = &self.text {
+            lines.push(format!("{label}\ttext mode"));
+        }
+        for (key, what) in [
+            ("Space", "at the pointer"),
+            ("arrows", "move where the click lands"),
+            ("Backspace", "take back a key"),
+            ("Esc", "leave"),
+        ] {
+            lines.push(format!("{key}\t{what}"));
+        }
+        lines.join("\n")
     }
 
     /// The key that arms `action`, as `wayhint config` prints it (`k`,
@@ -666,6 +825,8 @@ impl Verbs {
             repeat: None,
             text: None,
             text_unbound: None,
+            help: None,
+            help_unbound: None,
         };
         let mut defaults = Vec::new();
         for (action, _) in DEFAULT_VERBS {
@@ -684,6 +845,9 @@ impl Verbs {
         }
         if let Some(text) = file.text.as_deref().filter(|t| !t.is_empty()) {
             verbs.text = Some(verbs.written("text", text, layout)?);
+        }
+        if let Some(text) = file.help.as_deref().filter(|t| !t.is_empty()) {
+            verbs.help = Some(verbs.written("help", text, layout)?);
         }
         for (action, default) in DEFAULT_VERBS {
             if file.verb(action).is_some() {
@@ -708,6 +872,24 @@ impl Verbs {
                 verbs.text_unbound = Some(label);
             } else {
                 verbs.text = Some((key, label));
+            }
+        }
+        // Help's default is Shift on the text key's spot: `?` on US. A
+        // shifted key gives way to a tag on its base key, whose Shift is a
+        // Shift-click, and to a command on exactly that key.
+        if file.help.is_none()
+            && let Some(label) = layout.shifted_char_at(TEXT_KEY)
+        {
+            let key = Key {
+                code: TEXT_KEY,
+                shift: true,
+            };
+            let commands = verbs.keys.iter().map(|v| v.1);
+            let mut commands = commands.chain(verbs.repeat.iter().chain(&verbs.text).map(|v| v.0));
+            if tag_keys.contains(&TEXT_KEY) || commands.any(|k| k == key) {
+                verbs.help_unbound = Some(label.into());
+            } else {
+                verbs.help = Some((key, label.into()));
             }
         }
         // In `Action::ALL`'s order, however they were bound, so the same
@@ -744,7 +926,8 @@ impl Verbs {
             .find(|v| v.1 == key)
             .map(|v| v.0.name())
             .or_else(|| self.is_repeat(key).then_some("repeat"))
-            .or_else(|| self.is_text(key).then_some("text"));
+            .or_else(|| self.is_text(key).then_some("text"))
+            .or_else(|| self.is_help(key).then_some("help"));
         if let Some(other) = clash {
             bail!("[keys] {other} and {command} are both {label:?}");
         }
@@ -752,9 +935,30 @@ impl Verbs {
     }
 
     /// Whether a default key at `code` must give way: it's a tag key, or a
-    /// command already has it.
+    /// command already has it. The help key counts only as exactly that
+    /// key: a `?` written for it leaves the text key its `/`.
     fn taken_by(&self, code: KeyCode, tag_keys: &[KeyCode]) -> bool {
-        tag_keys.contains(&code) || self.taken().iter().any(|t| t.0 == code)
+        let unshifted = Key { code, shift: false };
+        tag_keys.contains(&code)
+            || self.is_help(unshifted)
+            || self
+                .taken()
+                .iter()
+                .any(|t| t.0 == code && t.1 != "help")
+    }
+
+    /// The help key's line in `[keys]`, for `wayhint config`.
+    fn render_help(&self) -> String {
+        match (&self.help, &self.help_unbound) {
+            (Some((_, label)), _) => format!(
+                "help = {}   # every key and what it does\n",
+                quote(label)
+            ),
+            (None, Some(label)) => format!(
+                "# help has no key: its default, {label:?}, is on one of your tag letters or is another command's key\n"
+            ),
+            (None, None) => "help = \"\"   # no key legend\n".into(),
+        }
     }
 
     /// The text key's line in `[keys]`, for `wayhint config`.
@@ -780,6 +984,7 @@ impl Verbs {
             .map(|v| (v.1.code, v.0.name()))
             .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
             .chain(self.text.iter().map(|(key, _)| (key.code, "text")))
+            .chain(self.help.iter().map(|(key, _)| (key.code, "help")))
             .collect()
     }
 }
@@ -884,7 +1089,15 @@ impl Config {
         file.style.validate()?;
         let marks = file.text.matches.resolve(&file.style)?;
         let ocr = file.text.ocr()?;
-        let input = file.text.input.resolve(&file.style)?;
+        let input = match (file.input, file.text.input) {
+            (Some(_), Some(_)) => {
+                bail!("[input] and [text.input] are the same table; keep [input]")
+            }
+            (Some(input), None) => input.resolve(&file.style, "input")?,
+            (None, Some(old)) => old.resolve(&file.style, "text.input")?,
+            (None, None) => FileInput::default().resolve(&file.style, "input")?,
+        };
+        let info = file.info.resolve(&file.style)?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
@@ -894,6 +1107,10 @@ impl Config {
         if !(1..=50).contains(&scroll) {
             bail!("[pointer] scroll = {scroll}: give 1-50 wheel notches");
         }
+        let settle = file.pointer.settle.unwrap_or(SETTLE);
+        if settle > SETTLE_MAX {
+            bail!("[pointer] settle = {settle}: give 0-{SETTLE_MAX} ms");
+        }
         Ok(Self {
             alphabet,
             verbs,
@@ -901,11 +1118,13 @@ impl Config {
             style: file.style,
             marks,
             input,
+            info,
             text_cursor: file.text.cursor,
             ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
             scroll,
+            settle: Duration::from_millis(settle.into()),
             pixels: match file.pixels.detector {
                 Pixels::Full => Some(Detector::Full),
                 Pixels::Fast => Some(Detector::Fast),
@@ -940,9 +1159,10 @@ impl Config {
         out.push_str(&self.render_keys());
         out.push('\n');
         out.push_str(&self.style.render());
+        out.push_str(&self.input.render());
+        out.push_str(&self.info.render());
         out.push_str(&self.render_text());
         out.push_str(&self.marks.render());
-        out.push_str(&self.input.render());
         let after = match self.after {
             After::Restore => {
                 "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
@@ -960,6 +1180,11 @@ impl Config {
             out,
             "scroll = {}   # wheel notches one scroll_up or scroll_down turns",
             self.scroll
+        );
+        let _ = writeln!(
+            out,
+            "settle = {}   # ms the app gets to react to a click before the windows are read again",
+            self.settle.as_millis()
         );
         let detector = match self.pixels {
             Some(Detector::Full) => "full",
@@ -1040,6 +1265,7 @@ impl Config {
             quote(repeat)
         );
         out.push_str(&self.verbs.render_text());
+        out.push_str(&self.verbs.render_help());
         if !self.alphabet.aliases.is_empty() {
             out.push_str("\n[keys.aliases]\n");
             for alias in &self.alphabet.aliases {
@@ -1714,6 +1940,86 @@ offset = [-13, 17]
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[style.leader]\nwidth = -1").contains("[style.leader] width"));
         assert!(err("[style.leader]\ncolour = \"#ffffff\"").contains("unknown field"));
+    }
+
+    #[test]
+    fn the_input_box_is_input_and_its_old_name_still_loads() {
+        let new = Config::parse("[input]\nposition = \"top\"\nfade = 0", &us()).unwrap();
+        let old = Config::parse("[text.input]\nposition = \"top\"\nfade = 0", &us()).unwrap();
+        assert_eq!(new.input, old.input);
+        assert_eq!(new.input.style.position, Position::Top);
+        assert_eq!(new.input.style.fade, 0);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[input]\n[text.input]").contains("same table"));
+        assert!(err("[input]\nsize = 0").contains("[input] size"));
+        assert!(err("[input]\nfade = 1001").contains("[input] fade"));
+    }
+
+    #[test]
+    fn the_info_box_shows_everything_unless_told_and_round_trips() {
+        let config = Config::parse("[style]\nsize = 17", &us()).unwrap();
+        let info = &config.info;
+        assert!(info.scanning && info.no_targets && info.no_match);
+        assert_eq!(info.duration, Duration::from_millis(1000));
+        assert_eq!(info.style.size, 17.0, "the tags' look");
+        assert_eq!(info.style.position, Position::Bottom);
+        let mine = Config::parse(
+            "[info]\nscanning = false\nno_match = false\nduration = 400\nposition = \"top-right\"\nbackground = \"#000\"",
+            &us(),
+        )
+        .unwrap();
+        assert!(!mine.info.scanning && mine.info.no_targets && !mine.info.no_match);
+        assert_eq!(mine.info.duration, Duration::from_millis(400));
+        assert_eq!(mine.info.style.background, Color::rgba(0, 0, 0, 0xff));
+        let again = Config::parse(&mine.render(), &us()).unwrap();
+        assert_eq!(again.info, mine.info);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[info]\nduration = 0").contains("[info] duration"));
+        assert!(err("[info]\nnoise = true").contains("unknown field"));
+    }
+
+    #[test]
+    fn settle_is_150_ms_unless_set() {
+        assert_eq!(
+            Config::parse("", &us()).unwrap().settle,
+            Duration::from_millis(150)
+        );
+        let config = Config::parse("[pointer]\nsettle = 400", &us()).unwrap();
+        assert_eq!(config.settle, Duration::from_millis(400));
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.settle, config.settle);
+        let err = format!(
+            "{:#}",
+            Config::parse("[pointer]\nsettle = 2001", &us()).unwrap_err()
+        );
+        assert!(err.contains("settle"), "{err}");
+    }
+
+    #[test]
+    fn help_is_shift_on_the_text_key_unless_that_is_taken() {
+        let config = Config::parse("", &us()).unwrap();
+        assert!(config.verbs.is_help(key(53, true)), "?");
+        assert!(config.verbs.is_text(key(53, false)), "/ stays text's");
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.verbs, config.verbs);
+        // Written as "?", it still leaves the text key its default `/`.
+        let written = Config::parse("[keys]\nhelp = \"?\"", &us()).unwrap();
+        assert!(written.verbs.is_text(key(53, false)));
+        let none = Config::parse("[keys]\nhelp = \"\"", &us()).unwrap();
+        assert!(!none.verbs.is_help(key(53, true)));
+        // `/` as a tag letter: its Shift is a Shift-click, so no help.
+        let letter = Config::parse("[keys]\nalphabet = \"asdf/\"", &us()).unwrap();
+        assert!(!letter.verbs.is_help(key(53, true)));
+        let rendered = letter.render();
+        assert!(rendered.contains("# help has no key"), "{rendered}");
+        assert_eq!(
+            Config::parse(&rendered, &us()).unwrap().verbs,
+            letter.verbs
+        );
+        let legend = config.verbs.legend();
+        assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
+        assert!(legend.contains("r tag\tright click"), "{legend}");
+        assert!(legend.contains("/\ttext mode"), "{legend}");
     }
 
     #[test]

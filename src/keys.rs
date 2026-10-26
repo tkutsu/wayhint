@@ -210,6 +210,11 @@ impl Layout {
         self.char_at_level(code, 0)
     }
 
+    /// What a key prints with Shift: `?` for `/` on US.
+    pub fn shifted_char_at(&self, code: KeyCode) -> Option<char> {
+        self.char_at_level(code, 1)
+    }
+
     /// The main-block key that types `ch`: unshifted if any key does,
     /// otherwise shifted. `None` if this layout can't type it there.
     pub fn decode(&self, ch: char) -> Option<Key> {
