@@ -145,8 +145,8 @@ pub trait Source {
 
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
 /// `start.verb` (from `--verb`) is armed as if its key were the first one
-/// typed, and `start.text` (from `--text`) opens text mode before any tag
-/// shows. `cursor` reads where the pointer is. The overlay never sees the mouse
+/// typed, and `start.text` (from `--text`) makes it a text-mode pick
+/// ([`text`]). `cursor` reads where the pointer is. The overlay never sees the mouse
 /// move, so it's read again at every key: a dot shows where a nudged
 /// `Space` lands from the pointer as of the last key.
 ///
@@ -161,11 +161,6 @@ pub trait Source {
 /// verb, its Shift, arrows). The lines stay as they were opened: a rescan
 /// has no blocks to open. `shown` ends as the snapshot the pick was made
 /// in.
-///
-/// The text key hands the keys to text mode (`search::search`), with the
-/// verb and arrows typed before it; Backspace with nothing typed brings
-/// the same tags back. A tag typed there is picked as here, and a block's
-/// opens into its lines' tags.
 ///
 /// While a hold keeps a button down (`start.holding`), whatever is picked
 /// is where it's let go, and the close key lets go where it is.
@@ -205,39 +200,17 @@ pub fn pick(
             said,
         )
     };
-    // Text mode is next: `--text`, or the text key.
-    let mut text = start.text;
-    if text {
+    if start.text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-    } else {
-        overlay.show(&tags(&selector, shown, pointer, &said))?;
+        return text(overlay, config, shown, selector, source);
     }
+    overlay.show(&tags(&selector, shown, pointer, &said))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
     let next = || config.refresh.map(|every| Instant::now() + every);
     let mut due = next();
     loop {
-        if std::mem::take(&mut text) {
-            // `None` is Backspace with nothing typed: back to the tags of
-            // the same scan, as they were left. A block's tag typed there
-            // opens it here, as from the tags.
-            let back = search::search(overlay, shown, &selector, source, config)?;
-            due = next();
-            if let Some(Pick::Target { index, .. }) = back
-                && !shown.targets[index].opens.is_empty()
-            {
-                if open(shown, index, &*source, config) {
-                    selector.reopen(shown.targets.len(), config.alphabet.len());
-                    due = None;
-                }
-            } else if let Some(pick) = back {
-                return Ok(pick);
-            }
-            pointer = cursor().ok();
-            overlay.show(&tags(&selector, shown, pointer, &said))?;
-            continue;
-        }
         let wake = due.into_iter().chain(said.until()).min();
         let Some(event) = overlay.next_event(wake)? else {
             let now = Instant::now();
@@ -348,7 +321,6 @@ pub fn pick(
             }
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
-            Step::Text => text = true,
             // The letter is dropped, and named for `[info] duration`.
             Step::Ignored => {
                 if let Input::Letter(letter, _) = input
@@ -430,6 +402,28 @@ fn rescan(
     }))
 }
 
+/// A text run's pick: text mode (`search::search`) until a match, a tag
+/// or the close key. A block's tag opens it, as in [`pick`], and text mode
+/// goes on in its lines.
+fn text(
+    overlay: &mut Overlay,
+    config: &Config,
+    shown: &mut Snapshot,
+    mut selector: Selector,
+    source: &mut dyn Source,
+) -> Result<Pick> {
+    loop {
+        match search::search(overlay, shown, &selector, source, config)? {
+            Pick::Target { index, .. } if !shown.targets[index].opens.is_empty() => {
+                if open(shown, index, &*source, config) {
+                    selector.reopen(shown.targets.len(), config.alphabet.len());
+                }
+            }
+            pick => return Ok(pick),
+        }
+    }
+}
+
 /// What a key means: a built-in key, else a verb or repeat, else a tag
 /// letter, else nothing. The config keeps command keys out of the alphabet
 /// and apart from each other, so the order never decides anything. A tag letter matches with or
@@ -451,7 +445,6 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
         KeyCode::LEFT => nudge(-1, 0),
         KeyCode::RIGHT => nudge(1, 0),
         _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
-        _ if config.verbs.is_text(key) => Some(Input::Text),
         code => config
             .verbs
             .action_of(key)

@@ -84,8 +84,8 @@ impl Typist {
 
     /// The character a key pressed before typing started types: only the
     /// Shift held at its press is known (Shift is bit 0 of an xkb mask).
-    /// Typed fast after the text key, such keys are the query's first
-    /// letters.
+    /// Typed while the text was being read, such keys are the query's
+    /// first letters.
     pub fn press_late(&mut self, code: KeyCode, held: Mods, locks: Locks) -> Option<char> {
         self.press(code, u32::from(held.shift), locks)
     }

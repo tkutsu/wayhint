@@ -47,13 +47,13 @@
 
 # Commands of their own.
 # repeat = ""               # the last command again, on the same target; "" for none
-# text = "q"                # text mode: type text on screen, Enter acts on it; "" for none
 # help = "?"                # every key and what it does, in the info box; "" for none
 # close = "Esc"             # leave wayhint, from tags or text mode; while holding, release in place first
 # The close key takes its letter out of the alphabet. It can be a character
 # ("q", "?") or a name ("Esc", "F1" through "F24", "Space", "Home"). It
 # overrides a built-in key and also closes text mode, so its character
-# cannot be searched there. The launch shortcut always closes wayhint too.
+# cannot be searched there. Launching wayhint again in the same mode closes
+# it too; the other mode's launch closes it and starts that mode.
 
 # Built in, unless chosen as the close key: Backspace takes back the last
 # key, Space acts at the pointer, Enter confirms a completed tag or text
@@ -160,18 +160,18 @@
 
 
 [text]
-# Text mode: typing finds text on screen from the start of a word, Enter
-# acts on the current match, Tab and the arrows move between matches.
-# Targets with no text to type keep a tag. A verb goes first, before the
-# text. Backspace with nothing typed takes back that verb, then goes back
-# to the tags; the close key leaves wayhint.
+# Text mode is a run of its own, `wayhint --text`, on a compositor shortcut
+# beside plain `wayhint` for tags; launching one closes the other.
+# Typing finds text on screen from the start of a word, Enter acts on the
+# current match, Tab and the arrows move between matches. Targets with no
+# text to type keep a tag. A verb goes first, before the text, and
+# Backspace with nothing typed takes it back; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
 # auto_accept = false       # act on the only match left, once 3 characters are typed; false requires Enter
 # The former name, pick_unique, still works. Tags here use [hints] auto_accept.
 # hints = true              # tags on the targets with no text to type, in letters no word on screen starts with
-# ocr = "off"               # eng for English OCR in windows with no accessibility tree; off to disable it (default)
 
 [text.matches]
 # The box over every match. Unset radius and padding follow [style].

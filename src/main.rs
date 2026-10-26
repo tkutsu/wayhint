@@ -15,7 +15,7 @@
 //! | `text`      | text mode's matching: query in, ordered matches out (pure) |
 //! | `overlay`   | the Wayland surface: draws tags, reads keys              |
 //! | `pick`      | overlay plus selection: choose one target                |
-//! | `search`    | text mode: overlay plus text, until Enter or back to tags |
+//! | `search`    | text mode: overlay plus text, until Enter, a tag or Esc  |
 //! | `pointer`   | the virtual pointer: click, and never leave a button held |
 //! | `keyboard`  | your keymap, and modifiers held around a click           |
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
@@ -86,7 +86,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Config::load(cli.config.as_deref(), &layout)
     };
     match &cli.command {
-        None => match toggle::start_or_stop()? {
+        None => match toggle::start_or_stop(cli.text)? {
             Some(socket) => {
                 let start = pick::Start {
                     verb: cli.verb,

@@ -270,11 +270,13 @@ impl Overlay {
         self.feed = Feed::new(&self.monitor.name);
     }
 
-    /// A second launch wakes the loop and leaves through normal cleanup.
+    /// A second launch wakes the loop and leaves through normal cleanup;
+    /// it hears whether this run is in its mode (`text_run`).
     pub fn listen_for_toggle(
         &mut self,
         socket: UnixDatagram,
         verbs: &crate::config::Verbs,
+        text_run: bool,
     ) -> Result<()> {
         let (tags, text) = (verbs.uses_escape(false), verbs.uses_escape(true));
         let source = Generic::new(socket, Interest::READ, Mode::Level);
@@ -282,7 +284,7 @@ impl Overlay {
             .handle()
             .insert_source(source, move |_, socket, state: &mut State| {
                 let uses_escape = if state.typist.is_some() { text } else { tags };
-                match crate::toggle::receive(socket, uses_escape) {
+                match crate::toggle::receive(socket, uses_escape, text_run) {
                     Ok(Some(crate::toggle::Request::Stop)) => {
                         state.events.push_front(Event::Interrupted);
                     }
@@ -347,8 +349,8 @@ impl Overlay {
     pub fn start_typing(&mut self) -> Result<()> {
         let keymap = self.keymap().context("the keyboard sent no keymap yet")?;
         let mut typist = Typist::new(keymap).context("the keyboard's keymap doesn't compile")?;
-        // Keys let go since the text key came by position: read them as
-        // text too.
+        // Keys let go before typing started came by position: read them
+        // as text too.
         for event in &mut self.state.events {
             if let Event::Key(key, mods) = *event
                 && key.code != KeyCode::ENTER

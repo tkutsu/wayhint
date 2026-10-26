@@ -1,11 +1,11 @@
-//! Text mode: the tags go, typing finds text on screen, and Enter acts on
-//! the current match. The glue between `overlay` (keys and pixels), `text`
+//! Text mode, a run of its own (`--text`): typing finds text on screen,
+//! and Enter acts on the current match. The glue between `overlay` (keys and pixels), `text`
 //! (what the keys find) and the apps ([`Source`]), as `pick` is for tags.
 //!
 //! ```text
-//! text key -> tags hidden -> text read once -> keys: query edits, arrows
-//!                                                |
-//!                 Backspace with nothing typed: back to the tags
+//! --text -> text read once -> keys: query edits, arrows
+//!                                |
+//!                 Backspace with nothing typed: takes back a verb
 //!                 close key: leave wayhint
 //!                 a verb key before any text, or a named one any time: armed
 //!                 Enter: the armed verb (or the default) on the current match
@@ -97,7 +97,7 @@ impl Hints {
             .filter(|text| text.content.chars().any(char::is_alphanumeric))
             .filter_map(|text| match text.place {
                 Place::Object(index) => shown.texts[index].owner.as_ref(),
-                Place::Cells(_) | Place::Glyphs(_) => None,
+                Place::Cells(_) => None,
             })
             .collect();
         let untyped: Vec<usize> = (0..shown.targets.len())
@@ -173,23 +173,21 @@ impl Hints {
     }
 }
 
-/// Text mode, from the text key until a match is chosen or the close key leaves
-/// (`Some` pick), or until Backspace with nothing typed goes back to the
-/// tags (`None`).
-/// `selector` holds the verb and the nudge typed before the text key.
-/// A verb typed here comes first, before the text, as it comes before a
-/// tag's letters: a key that types a letter or digit is always text, so
-/// a verb on one is for the tags only.
+/// Text mode, until a match or a tag is chosen or the close key leaves.
+/// `selector` holds the verb from `--verb`, if any. A verb typed here
+/// comes first, before the text, as it comes before a tag's letters: a key
+/// that types a letter or digit is always text, so a verb on one is for
+/// tag runs only.
 pub fn search(
     overlay: &mut Overlay,
     shown: &Snapshot,
     selector: &Selector,
     source: &mut dyn Source,
     config: &Config,
-) -> Result<Option<Pick>> {
+) -> Result<Pick> {
     if let Err(e) = overlay.start_typing() {
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
-        return Ok(None);
+        return Ok(Pick::Leave);
     }
     let result = keys(overlay, shown, selector, source, config);
     overlay.stop_typing();
@@ -204,13 +202,13 @@ fn keys(
     selector: &Selector,
     source: &mut dyn Source,
     config: &Config,
-) -> Result<Option<Pick>> {
+) -> Result<Pick> {
     let (input, cursor) = (&config.input, config.text_cursor);
-    // Verbs typed here arm a copy, so going back to the tags leaves the
-    // verb typed there.
+    // The verb typed so far, on a copy: a block opened here starts its
+    // lines' text mode from `selector` again.
     let mut command = selector.clone();
     let verb = |command: &Selector| command.armed().map(Action::name);
-    // The tags go before the text is read: none is left to be typed.
+    // Nothing shows while the text is read: no tag to type yet.
     overlay.update(&frame(None, false, verb(&command), input, None))?;
     let mut search = Search::new(source.read_text(shown));
     let hints = Hints::new(&search, shown, config);
@@ -246,13 +244,13 @@ fn keys(
             Event::Key(key, mods) => (key, mods, None),
             Event::Held(..) => continue,
             Event::Interrupted | Event::Closed | Event::KeyboardLost => {
-                return Ok(Some(Pick::Leave));
+                return Ok(Pick::Leave);
             }
             Event::Resized => bail!("the monitor changed size; run wayhint again"),
-            Event::Workspace => return Ok(Some(Pick::Rescan)),
+            Event::Workspace => return Ok(Pick::Rescan),
         };
         if config.verbs.is_close(key) {
-            return Ok(Some(Pick::Leave));
+            return Ok(Pick::Leave);
         }
         // A verb: a named key (PageDown) any time; a character only before
         // any text, and only one that's no letter or digit (`,`), which
@@ -263,7 +261,7 @@ fn keys(
                 || search.query().is_empty() && typed.is_some_and(|c| !c.is_alphanumeric()))
         {
             if let Step::Again(act) = command.press(selection::Input::Verb(action, mods)) {
-                return Ok(Some(Pick::Again { act }));
+                return Ok(Pick::Again { act });
             }
             let said = missed.as_ref().map(|m| m.0.as_str());
             overlay.update(&draw(&search, &pressed, &command, stale, said))?;
@@ -271,16 +269,14 @@ fn keys(
         }
         let edit = match key.code {
             // Backspace takes back the last character; with nothing
-            // typed, a verb typed here, then it goes back to the tags.
+            // typed, the verb.
             KeyCode::BACKSPACE => {
                 if search.pop() {
                     pressed.pop();
                     true
-                } else if command.armed() != selector.armed() {
-                    command = selector.clone();
-                    false
                 } else {
-                    return Ok(None);
+                    command.press(selection::Input::Backspace);
+                    false
                 }
             }
             KeyCode::ENTER
@@ -305,10 +301,10 @@ fn keys(
                             continue;
                         };
                         if config.hint_auto_accept {
-                            return Ok(Some(Pick::Target {
+                            return Ok(Pick::Target {
                                 index,
                                 act: command.act(mods),
-                            }));
+                            });
                         }
                         // Ctrl/Alt may type no character. Keep the tag's
                         // letter so it can be edited or confirmed later.
@@ -327,7 +323,7 @@ fn keys(
             && let Some(index) = hints.choice(&pressed, &search, config, false)
         {
             let act = command.act(mods);
-            return Ok(Some(Pick::Target { index, act }));
+            return Ok(Pick::Target { index, act });
         }
         // Every key typed so far first: fast typing asks the apps once.
         // A key that moves through the matches needs them found.
@@ -355,19 +351,19 @@ fn keys(
                 && !hints.open(&pressed)
                 && let Some(chosen) = choose(&search, shown, command.act(Mods::NONE), cursor)
             {
-                return Ok(Some(Pick::Text(Box::new(chosen))));
+                return Ok(Pick::Text(Box::new(chosen)));
             }
         }
         match key.code {
             KeyCode::ENTER => {
                 if let Some(index) = hints.choice(&pressed, &search, config, true) {
-                    return Ok(Some(Pick::Target {
+                    return Ok(Pick::Target {
                         index,
                         act: command.act(mods),
-                    }));
+                    });
                 }
                 if let Some(chosen) = choose(&search, shown, command.act(mods), cursor) {
-                    return Ok(Some(Pick::Text(Box::new(chosen))));
+                    return Ok(Pick::Text(Box::new(chosen)));
                 }
             }
             KeyCode::RIGHT | KeyCode::DOWN => search.next(),
@@ -438,7 +434,6 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
             )
         }
         Place::Cells(_) => (None, "terminal".into(), false, Vec::new(), Some(check)),
-        Place::Glyphs(_) => (None, "picture".into(), false, Vec::new(), Some(check)),
     };
     Some(Chosen {
         target: Target {

@@ -65,12 +65,11 @@ Switch workspace and the tags follow.
 
 ### Text mode
 
-Press `q` and type text you see on screen instead of a tag. Matches get
-yellow boxes, `Tab` and the arrows move between them, and `Enter` clicks
-the current one. Controls with no text to type, such as icons, keep a
-tag, so one mode reaches both. The text comes from the accessibility tree,
-from kitty's own remote control, or, if you turn it on, from Tesseract OCR
-for windows with neither.
+Launch `wayhint --text` and type text you see on screen instead of a
+tag. Matches get yellow boxes, `Tab` and the arrows move between them, and
+`Enter` clicks the current one. Controls with no text to type, such as
+icons, keep a tag, so one mode reaches both. The text comes from the
+accessibility tree, or from kitty's own remote control.
 
 ### Safe clicks
 
@@ -99,9 +98,6 @@ You need:
   modifier clicks.
 - Rust 1.88 or newer, libxkbcommon, and fontconfig (`fc-match`).
 - The AT-SPI bus, from `at-spi2-core`. Most desktops already run it.
-- Optional: Tesseract, for text mode in windows with no tree:
-  `pacman -S tesseract tesseract-data-eng`, then `ocr = "eng"` under
-  `[text]`.
 
 Build and install it:
 
@@ -112,26 +108,27 @@ cargo install --locked --git https://github.com/tkutsu/wayhint
 or from a clone, `cargo build --release`, which leaves the binary in
 `target/release/wayhint`.
 
-Then bind it to a key. In `hyprland.conf`:
+Then bind each mode to a key. In `hyprland.conf`:
 
 ```
-bind = SUPER, W, exec, wayhint
-bind = SUPER CTRL, W, exec, wayhint --text
+bind = SUPER, W, exec, wayhint --text
+bind = SUPER CTRL, W, exec, wayhint
 ```
 
 or in a Lua config:
 
 ```lua
-hl.bind("SUPER + W", hl.dsp.exec_cmd("wayhint"))
-hl.bind("SUPER + CTRL + W", hl.dsp.exec_cmd("wayhint --text"))
+hl.bind("SUPER + W", hl.dsp.exec_cmd("wayhint --text"))
+hl.bind("SUPER + CTRL + W", hl.dsp.exec_cmd("wayhint"))
 ```
 
-Pressing the keybind again closes wayhint. On an empty workspace it keeps
-listening for controls to appear.
+A run stays in its mode. Pressing its keybind again closes it; pressing
+the other mode's closes it and starts that mode. On an empty workspace it
+keeps listening for controls to appear.
 
 `wayhint doctor` checks the setup: the config, Hyprland, each Wayland
-protocol above, the accessibility bus, the fonts, Tesseract when OCR is
-on, and kitty's remote control. It prints one line per check and says
+protocol above, the accessibility bus, the fonts, and kitty's remote
+control. It prints one line per check and says
 what to install or set for each one that fails.
 
 ## Getting tags in every app
@@ -148,7 +145,7 @@ apps are missing.
 | Qt apps (Dolphin, KDE apps, Quickshell) | Nothing on the author's setup. If one gets no tags, start it with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` set |
 | Chromium, Chrome, Electron apps | The flag `--force-renderer-accessibility`. On Arch, put it on its own line in `~/.config/chromium-flags.conf` or `~/.config/electron-flags.conf`; an app that bundles its own Electron takes it on its command line |
 | kitty | Remote control, for text mode (below). Its panes get pixel tags either way |
-| Anything else with no tree | Pixel tags, and with `[text] ocr = "eng"`, Tesseract for text mode |
+| Anything else with no tree | Pixel tags; text mode finds no text there, only tags |
 
 An app joins the bus when it starts. Apps started before the bus, or
 before you turned a switch on, need reopening; wayhint says so when it
@@ -179,7 +176,6 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | `Space` | The default action, or the verb typed before it, where the pointer is |
 | arrows, before the last letter or `Space` | Move where that one click lands, 10 px a press; held, faster |
 | the repeat key, if you set one | The last command again on the same control, even after its tag changed |
-| `q` | Text mode |
 | `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
 | close key (`Esc` by default) | Exits; while a hold is down, lets go where it is instead |
@@ -295,16 +291,16 @@ went down: a long press. A scroll never clicks, so it never ends the run.
 
 ### Text mode
 
-After `q`, a verb comes first, before the text: `.save Enter`
-double-clicks "save", as `.q save Enter` from the tags does. Then every
+A verb comes first, before the text: `.save Enter` double-clicks
+"save". Then every
 key goes into the query, spaces and punctuation included. A verb on a
 named key (`PageDown`, `Home`) works at any point, and one on a letter or
-digit is for the tags only, since that key is always text. Each visible
+digit is for tag runs only, since that key is always text. Each visible
 match gets a yellow box, and the current one is orange. The arrows, `Tab`
 and `Shift+Tab` move between matches and wrap. `Enter` clicks the middle
 of the current match's first line, and `Shift`, `Ctrl` or `Alt` held on
 `Enter` hold that key through the click. `Backspace` with nothing typed
-takes back a verb typed there, then goes back to the tags.
+takes back the verb.
 
 Targets with no text you could type keep a tag: icon buttons, controls
 whose label wasn't read, and windows tagged from their pixels. A control
@@ -352,13 +348,6 @@ is found anywhere, unless that first key is a verb's.
 Before the click wayhint reads the text at that spot again, with the
 character before it, and skips the click if it changed.
 
-OCR is off by default. With `ocr = "eng"` under `[text]`, windows with
-no tree, other than kitty, are read by Tesseract when text mode starts.
-Only English is read for now. On a monitor with a scale under 2, the picture is doubled
-first, since Tesseract misreads small interface text at its real size.
-Reading took about 0.5 s for a terminal and 1.5 s for a full-screen
-spreadsheet on a Ryzen 7 7700; the query box shows `text ...` until it's
-done, and keys typed meanwhile wait.
 
 ### Windows tagged from their pixels
 
@@ -385,7 +374,7 @@ their own tags.
 
 ### When a run ends
 
-A run ends on the close key, on the keybind, after a click on a text field (so
+A run ends on the close key, on either keybind, after a click on a text field (so
 your typing goes to it), and after a click wayhint can't vouch for: one an
 arrow moved off its control, one made with `Space`, or one in a window
 tagged from its pixels. Hovers and scrolls never end it.
@@ -396,7 +385,7 @@ Flags for other keybinds:
 |---|---|
 | `--once` | Exits after one action |
 | `--verb right` | Starts with a verb typed, for a right-click keybind |
-| `--text` | Starts in text mode, with no tags first |
+| `--text` | Text mode, every round, with no tags first |
 | `--static` | Scans once, keeps those tags, and exits after one action or a workspace switch |
 
 ### Warnings and debugging
@@ -467,7 +456,7 @@ The sections:
 | `[input]` | The box for what you type: whether it's drawn, look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
 | `[info]` | The messages under the input box: whether they're drawn, which show, for how long, their icons and colours |
 | `[hints]` | `auto_accept`: act on a completed tag immediately, or wait for `Enter`, in either mode |
-| `[text]` | Where `Enter` acts on a match, `auto_accept`, tags on targets with no text, and OCR (`eng` or `off`, the default) |
+| `[text]` | Where `Enter` acts on a match, `auto_accept`, and tags on targets with no text |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
 | `[pixels]` | The pixel detector (`full`, `fast` or `off`), the terminal focus tag, and which programs count as terminals |
@@ -486,7 +475,7 @@ goes unbound. Set `close = "q"` under `[keys]` to close with `q` instead of
 cannot type that character in a query. Named keys such as `Esc`, `F1`
 through `F24`, `Space` or `Home` work too. `Backspace`, `Space`, `Enter`,
 `Tab` and the arrows keep their built-in behavior unless chosen as the
-close key. The launch shortcut always closes wayhint.
+close key. Launching wayhint again always closes the run (see Install).
 
 `detector = "fast"` reads pixels in one pass instead of two: about half
 the work (7 ms against 11 on the author's laptop), with 82% of controls one
@@ -506,7 +495,7 @@ Three things come from Hyprland itself:
   control's position inside its window but not where the window is on
   screen, so wayhint asks Hyprland's IPC socket.
 - Workspace switches, from Hyprland's event socket, so the tags follow.
-- Pictures of single windows for pixel tags and OCR, through
+- Pictures of single windows for pixel tags, through
   `hyprland-toplevel-export-v1`.
 
 All three live in `src/desktop/hyprland.rs` and `src/desktop/capture.rs`.
@@ -515,9 +504,6 @@ compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
 
 ## Roadmap
 
-- An ignore key: type it before a tag and that control (its app, role and
-  name) never gets a tag again, with `wayhint ignore --list` and
-  `--clear` to undo it.
 - A package for the AUR.
 - Other compositors, as above.
 
@@ -582,8 +568,9 @@ compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
 
 ### Text mode
 
-- It reads the text once, when it starts. Text that changes while you type
-  isn't found until you leave text mode and come back.
+- It reads the text once a round, when the round starts. Text that
+  changes while you type isn't found until the next round, after an
+  action.
 - It doesn't search open menus, or kitty's quick-access panel, which is a
   layer rather than a window.
 - Qt gives most labels and list items only a name, so text mode searches
@@ -591,10 +578,8 @@ compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
   headings, and boxes the whole item, not the matched letters. A button's
   name is searched only when its picture shows letters, since an icon
   button's name isn't on screen.
-- OCR misreads some words (`cmp::Ordering` and `main.rs` in one terminal
-  capture), and a misread word isn't found. With `[pixels] detector =
-  "off"` windows without a tree aren't read at all, and pictures inside a
-  window that has a tree never are.
+- Windows without a tree, other than kitty, have no text to find; their
+  pixel tags stay up in text mode.
 
 ## License
 

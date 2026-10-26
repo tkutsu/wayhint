@@ -34,11 +34,13 @@
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
 //!
-//! The text key hides the tags of targets whose text can be typed and
-//! searches the windows' text instead (`search.rs`); the other tags stay,
-//! typed as before. `Enter` acts on the current match as on a tag, after
-//! its text is read again and found unchanged, and the close key ends the run.
-//! `--text` starts there.
+//! A run is in one mode. `--text` makes it text mode, every round: the
+//! tags of targets whose text can be typed go, and typing searches the
+//! windows' text instead (`search.rs`); the other tags stay, typed as
+//! before. `Enter` acts on the current match as on a tag, after its text
+//! is read again and found unchanged, and the close key ends the run. The
+//! compositor's shortcuts switch modes: launching one stops a run in the
+//! other (`toggle.rs`).
 //!
 //! Each part was built to run alone first (`dump`, `overlay --from`,
 //! `click --at`), so a failure here is in the wiring, not in a part.
@@ -121,8 +123,8 @@ enum Done {
     Refused,
 }
 
-/// The run: `start` says how the first pick starts (`--verb`, `--text`);
-/// static mode never scans again.
+/// The run: `start` says how its picks start (`--verb` the first,
+/// `--text` every one); static mode never scans again.
 pub fn run(
     mut config: Config,
     once: bool,
@@ -151,7 +153,7 @@ pub fn run(
         &config.info,
         monitor,
     )?;
-    overlay.listen_for_toggle(toggle, &config.verbs)?;
+    overlay.listen_for_toggle(toggle, &config.verbs, start.text)?;
     overlay.start_feed();
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(
@@ -204,14 +206,15 @@ impl Session {
                 &mut slow,
             )?;
 
-            // `take` hands `--verb` and `--text` to the first pick and
-            // leaves the defaults, so later rounds start with the tags and
-            // the default action again. `snapshot` is what the pick ends
+            // `take` hands `--verb` to the first pick only, so later
+            // rounds start with the default action again; `--text` keeps
+            // every round in text mode. `snapshot` is what the pick ends
             // in: the last scan, or a block opened in it.
             let mut snapshot = scans.latest.clone();
             let first = Start {
+                verb: start.verb.take(),
+                text: start.text,
                 holding: self.held.is_some(),
-                ..std::mem::take(&mut start)
             };
             let picked = pick::pick(
                 &mut self.overlay,
@@ -320,9 +323,8 @@ impl Session {
     }
 
     /// Does a match chosen in text mode, if its text still reads the same
-    /// (in kitty, in the same cells; read by OCR, in the same pixels) and
-    /// its object passes a target's re-check (in kitty or OCR, its
-    /// window). Not kept for the repeat
+    /// (in kitty, in the same cells) and its object passes a target's
+    /// re-check (in kitty, its window). Not kept for the repeat
     /// key: that finds targets by their object, and a text's object is
     /// rarely one.
     fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
@@ -531,7 +533,7 @@ impl pick::Source for Scans<'_> {
     }
 
     fn read_text(&mut self, shown: &Snapshot) -> Vec<Text> {
-        let reading = self.desktop.read_text(shown, self.config.ocr.as_deref());
+        let reading = self.desktop.read_text(shown);
         if let Some(why) = reading.incomplete {
             desktop::log(&format!(
                 "wayhint: reading the text stopped early ({why}); some may be missing"

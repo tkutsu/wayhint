@@ -66,26 +66,11 @@ struct FileText {
     auto_accept: bool,
     /// Tags on the targets typing can't find: on unless `false`.
     hints: Option<bool>,
-    /// `eng` for English OCR in windows read from pixels, `off` for none.
-    ocr: Option<String>,
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
     #[serde(alias = "style")]
     matches: FileMarks,
     /// `[input]`'s old name, from when it showed only the query.
     input: Option<FileInput>,
-}
-
-impl FileText {
-    /// English OCR when enabled, otherwise `None`; off by default.
-    fn ocr(&self) -> Result<Option<String>> {
-        match self.ocr.as_deref().unwrap_or("off") {
-            "off" => Ok(None),
-            "eng" => Ok(Some("eng".to_owned())),
-            value => bail!(
-                "[text] ocr = {value:?}: use \"eng\" for English OCR or \"off\" to disable it"
-            ),
-        }
-    }
 }
 
 /// `[input]`, once `[text.input]`: the box for what's typed, with the
@@ -359,11 +344,6 @@ pub fn terminal_hint(explicit: Option<&Path>) -> Result<bool> {
     Ok(unkeyed(explicit)?.pixels.terminal_hint)
 }
 
-/// Text dumps use the same OCR setting, also without a keymap.
-pub fn ocr(explicit: Option<&Path>) -> Result<Option<String>> {
-    unkeyed(explicit)?.text.ocr()
-}
-
 /// The file at `explicit`, else the default one if it's there, else all
 /// defaults: undecoded, since the keys need a keymap.
 fn unkeyed(explicit: Option<&Path>) -> Result<File> {
@@ -414,9 +394,6 @@ struct FileKeys {
     /// Does the last action again, on the same target. No default key;
     /// `""` is the same as leaving it out.
     repeat: Option<String>,
-    /// Text mode: the tags go and typing finds text on screen. `""` for
-    /// none.
-    text: Option<String>,
     /// Shows every key and what it does, in the info box. `""` for none.
     help: Option<String>,
     /// Leaves wayhint, from tags and text mode alike. Defaults to Esc.
@@ -509,10 +486,6 @@ const DEFAULT_VERBS: [(Action, Option<KeyCode>); 10] = [
     (Action::Hold, Some(KeyCode::from_evdev(39))),
 ];
 
-/// The text key's default, as a position, as the verbs' are: `q` on US,
-/// for query, off the home row's tag letters.
-const TEXT_KEY: KeyCode = KeyCode::from_evdev(16);
-
 /// The help key's default is Shift on this position: `?` on US.
 const HELP_KEY: KeyCode = KeyCode::from_evdev(53);
 
@@ -556,9 +529,6 @@ pub struct Config {
     /// Tags, in text mode, on the targets with no text to type:
     /// `[text] hints`.
     pub text_hints: bool,
-    /// English OCR for text mode in windows read from pixels,
-    /// `None` for no OCR: `[text] ocr`.
-    pub ocr: Option<String>,
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
@@ -747,10 +717,6 @@ pub struct Verbs {
     /// lives with the verbs because it's checked against them: one key,
     /// one command.
     repeat: Option<(Key, String)>,
-    /// The text key and how it's printed, if it has one, and if it has
-    /// none because its default is a tag key or a command's, that default.
-    text: Option<(Key, String)>,
-    text_unbound: Option<String>,
     /// The help key and how it's printed, and its default if it has none
     /// because a tag or a command has that.
     help: Option<(Key, String)>,
@@ -772,10 +738,7 @@ impl Verbs {
         };
         self.is_close(key)
             || (!typing
-                && (self.action_of(key).is_some()
-                    || self.is_repeat(key)
-                    || self.is_text(key)
-                    || self.is_help(key)))
+                && (self.action_of(key).is_some() || self.is_repeat(key) || self.is_help(key)))
     }
 
     /// The action a bare tag (or a bare `Space`) does.
@@ -791,11 +754,6 @@ impl Verbs {
     /// Whether `key` is the repeat key.
     pub fn is_repeat(&self, key: Key) -> bool {
         self.repeat.as_ref().is_some_and(|(k, _)| *k == key)
-    }
-
-    /// Whether `key` is the text key.
-    pub fn is_text(&self, key: Key) -> bool {
-        self.text.as_ref().is_some_and(|(k, _)| *k == key)
     }
 
     /// Whether `key` is the help key.
@@ -814,9 +772,6 @@ impl Verbs {
         }
         if let Some((_, label)) = &self.repeat {
             lines.push(format!("{label}\tthe last command again"));
-        }
-        if let Some((_, label)) = &self.text {
-            lines.push(format!("{label}\ttext mode"));
         }
         for (key, what) in [
             ("Space", "at the pointer"),
@@ -843,7 +798,7 @@ impl Verbs {
             .map(|v| v.2.as_str())
     }
 
-    /// Decodes the verb, repeat and text fields, fills in the defaults,
+    /// Decodes the verb, repeat, help and close fields, fills in the defaults,
     /// checks them.
     ///
     /// The keys the file writes come first, and each must be free: not
@@ -863,8 +818,6 @@ impl Verbs {
             keys: Vec::new(),
             unbound: Vec::new(),
             repeat: None,
-            text: None,
-            text_unbound: None,
             help: None,
             help_unbound: None,
         };
@@ -882,9 +835,6 @@ impl Verbs {
         }
         if let Some(text) = file.repeat.as_deref().filter(|t| !t.is_empty()) {
             verbs.repeat = Some(verbs.written("repeat", text, layout)?);
-        }
-        if let Some(text) = file.text.as_deref().filter(|t| !t.is_empty()) {
-            verbs.text = Some(verbs.written("text", text, layout)?);
         }
         if let Some(text) = file.help.as_deref().filter(|t| !t.is_empty()) {
             verbs.help = Some(verbs.written("help", text, layout)?);
@@ -906,14 +856,6 @@ impl Verbs {
                 verbs.keys.push((action, key, label));
             }
         }
-        if file.text.is_none() {
-            let (key, label) = default_key("text", TEXT_KEY, layout)?;
-            if verbs.taken_by(TEXT_KEY, tag_keys) {
-                verbs.text_unbound = Some(label);
-            } else {
-                verbs.text = Some((key, label));
-            }
-        }
         // Help's default is Shift on its spot: `?` on US. A shifted key
         // gives way to a tag on its base key, whose Shift is a Shift-click,
         // and to a command on exactly that key.
@@ -926,7 +868,7 @@ impl Verbs {
             };
             let commands = verbs.keys.iter().map(|v| v.1);
             let mut commands = commands
-                .chain(verbs.repeat.iter().chain(&verbs.text).map(|v| v.0))
+                .chain(verbs.repeat.iter().map(|v| v.0))
                 .chain([verbs.close.0]);
             if tag_keys.contains(&HELP_KEY) || commands.any(|k| k == key) {
                 verbs.help_unbound = Some(label.into());
@@ -968,7 +910,6 @@ impl Verbs {
             .find(|v| v.1 == key)
             .map(|v| v.0.name())
             .or_else(|| self.is_repeat(key).then_some("repeat"))
-            .or_else(|| self.is_text(key).then_some("text"))
             .or_else(|| self.is_help(key).then_some("help"))
             .or_else(|| self.is_close(key).then_some("close"));
         if let Some(other) = clash {
@@ -1000,20 +941,6 @@ impl Verbs {
         }
     }
 
-    /// The text key's line in `[keys]`, for `wayhint config`.
-    fn render_text(&self) -> String {
-        match (&self.text, &self.text_unbound) {
-            (Some((_, label)), _) => format!(
-                "text = {}   # text mode: type text on screen, Enter acts on it\n",
-                quote(label)
-            ),
-            (None, Some(label)) => format!(
-                "# text has no key: its default, {label:?}, is one of your tag letters or another command's key\n"
-            ),
-            (None, None) => "text = \"\"   # no text mode\n".into(),
-        }
-    }
-
     /// The bound keys' positions and their commands' names: these leave
     /// the alphabet. A shifted key takes its base key too, because Shift on
     /// a tag letter means Shift-click.
@@ -1022,7 +949,6 @@ impl Verbs {
             .iter()
             .map(|v| (v.1.code, v.0.name()))
             .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
-            .chain(self.text.iter().map(|(key, _)| (key.code, "text")))
             .chain(self.help.iter().map(|(key, _)| (key.code, "help")))
             .chain([(self.close.0.code, "close")])
             .collect()
@@ -1128,7 +1054,6 @@ impl Config {
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
         let marks = file.text.matches.resolve(&file.style)?;
-        let ocr = file.text.ocr()?;
         let input = match (file.input, file.text.input) {
             (Some(_), Some(_)) => {
                 bail!("[input] and [text.input] are the same table; keep [input]")
@@ -1163,7 +1088,6 @@ impl Config {
             text_cursor: file.text.cursor,
             text_auto_accept: file.text.auto_accept,
             text_hints: file.text.hints.unwrap_or(true),
-            ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
             scroll,
@@ -1191,11 +1115,10 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\n",
             self.text_auto_accept,
             crate::search::UNIQUE,
             self.text_hints,
-            quote(self.ocr.as_deref().unwrap_or("off"))
         )
     }
 
@@ -1322,7 +1245,6 @@ impl Config {
             "repeat = {}   # the last command again, on the same target; \"\" for none",
             quote(repeat)
         );
-        out.push_str(&self.verbs.render_text());
         out.push_str(&self.verbs.render_help());
         let _ = writeln!(
             out,
@@ -1586,32 +1508,6 @@ mod tests {
     }
 
     #[test]
-    fn ocr_is_off_by_default_and_only_accepts_english() {
-        let read = |text: &str| Config::parse(text, &us()).unwrap().ocr;
-        assert_eq!(read(""), None);
-        assert_eq!(read("[text]\nocr = \"off\""), None);
-        assert_eq!(read("[text]\nocr = \"eng\"").as_deref(), Some("eng"));
-        for bad in ["", "ell", "eng+ell", "eng+", "eng ell", "../eng", "on"] {
-            let err = format!(
-                "{:#}",
-                Config::parse(&format!("[text]\nocr = {bad:?}"), &us()).unwrap_err()
-            );
-            assert!(err.contains("[text] ocr"), "{bad}: {err}");
-        }
-        for text in ["", "[text]\nocr = \"eng\"", "[text]\nocr = \"off\""] {
-            let config = Config::parse(text, &us()).unwrap();
-            let rendered = config.render();
-            assert!(rendered.contains(if config.ocr.is_some() {
-                "ocr = \"eng\""
-            } else {
-                "ocr = \"off\""
-            }));
-            let again = Config::parse(&rendered, &us()).unwrap();
-            assert_eq!(again.ocr, config.ocr, "{text:?} reads back the same");
-        }
-    }
-
-    #[test]
     fn text_cursor_defaults_to_center_and_round_trips() {
         assert_eq!(
             Config::parse("", &us()).unwrap().text_cursor,
@@ -1727,33 +1623,16 @@ mod tests {
     }
 
     #[test]
-    fn the_text_key_is_q_unless_a_tag_or_a_command_has_it() {
-        let text_key = key(16, false);
-        assert!(Config::parse("", &us()).unwrap().verbs.is_text(text_key));
-        let tagged = Config::parse("[keys]\nalphabet = \"asdfq\"", &us()).unwrap();
-        assert!(!tagged.verbs.is_text(text_key));
-        assert!(labels(&tagged).ends_with('q'), "the letter stays");
-        let rendered = tagged.render();
-        assert!(
-            rendered.contains("# text has no key: its default, \"q\""),
-            "{rendered}"
+    fn text_mode_has_no_key() {
+        // Text mode is a run of its own (`--text`), on a compositor
+        // shortcut, since 2026-10-26.
+        let err = format!(
+            "{:#}",
+            Config::parse("[keys]\ntext = \"q\"", &us()).unwrap_err()
         );
-        assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, tagged.verbs);
-        let repeat = Config::parse("[keys]\nrepeat = \"q\"", &us()).unwrap();
-        assert!(repeat.verbs.is_repeat(text_key) && !repeat.verbs.is_text(text_key));
-        let q = Config::parse("[keys]\nalphabet = \"asdfq\"\ntext = \"q\"", &us()).unwrap();
-        assert!(q.verbs.is_text(key(16, false)));
-        assert_eq!(labels(&q), "asdf", "a written text key leaves the alphabet");
-        let off = Config::parse("[keys]\ntext = \"\"", &us()).unwrap();
-        assert!(!off.verbs.is_text(text_key));
-        assert_eq!(
-            Config::parse(&off.render(), &us()).unwrap().verbs,
-            off.verbs
-        );
-        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[keys]\nright = \"x\"\ntext = \"x\"").contains("right and text"));
-        assert!(err("[keys]\nrepeat = \"x\"\ntext = \"x\"").contains("repeat and text"));
-        assert!(err("[keys]\ntext = \"Enter\"").contains("built in"));
+        assert!(err.contains("unknown field `text`"), "{err}");
+        let legend = Config::parse("", &us()).unwrap().verbs.legend();
+        assert!(!legend.contains("text mode"), "{legend}");
     }
 
     #[test]
@@ -2023,8 +1902,6 @@ offset = [-13, 17]
         );
         let again = Config::parse(&rendered, &us()).unwrap();
         assert_eq!(again.verbs, config.verbs);
-        let text = Config::parse("[keys]\nrepeat = \"q\"", &us()).unwrap();
-        assert_eq!(text.verbs.text, None, "text's default gives way to repeat");
     }
 
     #[test]
@@ -2208,7 +2085,6 @@ offset = [-13, 17]
         let legend = config.verbs.legend();
         assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
         assert!(legend.contains(", tag\tright click"), "{legend}");
-        assert!(legend.contains("q\ttext mode"), "{legend}");
     }
 
     #[test]

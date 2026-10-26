@@ -3,9 +3,9 @@
 //! Each check prints one line: `ok`, `warn` (a part of wayhint won't
 //! work) or `fail` (no run will). Nothing here takes the keyboard or draws:
 //! it asks Hyprland, the Wayland registry, the accessibility bus,
-//! fontconfig, tesseract and kitty, and stops there.
+//! fontconfig and kitty, and stops there.
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
 use anyhow::{Result, bail};
 use smithay_client_toolkit::reexports::client::{Connection, globals::registry_queue_init};
@@ -69,7 +69,7 @@ const PROTOCOLS: [(&str, Mark, &str); 7] = [
     (
         "hyprland_toplevel_export_manager_v1",
         Mark::Warn,
-        "pixel tags and OCR in windows with no accessibility tree",
+        "pixel tags in windows with no accessibility tree",
     ),
     (
         "wp_viewporter",
@@ -111,7 +111,6 @@ pub fn run(config: Result<Config>, explicit: Option<&Path>) -> Result<()> {
     });
     if let Some(config) = &config {
         fonts(&mut checks, config);
-        checks.push(ocr(config.ocr.as_deref()));
     }
     checks.extend(kitty());
 
@@ -231,38 +230,6 @@ fn icons(info: &Info) -> Check {
                 info.icon_font
             ),
         )
-    }
-}
-
-/// Tesseract and its language, when `[text] ocr` is on.
-fn ocr(language: Option<&str>) -> Check {
-    let what = "[text] ocr";
-    let Some(language) = language else {
-        return Check::new(Mark::Ok, what, "off");
-    };
-    let listed = Command::new("tesseract").arg("--list-langs").output();
-    match listed {
-        Err(_) => Check::new(
-            Mark::Warn,
-            what,
-            "tesseract isn't installed: pacman -S tesseract tesseract-data-eng",
-        ),
-        Ok(out) => {
-            // It prints the list to stdout, a header to stderr or stdout
-            // depending on the version.
-            let text = String::from_utf8_lossy(&out.stdout);
-            if text.lines().any(|line| line.trim() == language) {
-                Check::new(Mark::Ok, what, format!("tesseract reads {language:?}"))
-            } else {
-                Check::new(
-                    Mark::Warn,
-                    what,
-                    format!(
-                        "tesseract has no {language:?} data: pacman -S tesseract-data-{language}"
-                    ),
-                )
-            }
-        }
     }
 }
 
