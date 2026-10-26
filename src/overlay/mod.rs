@@ -65,15 +65,17 @@ use self::{
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 pub use self::{
-    draw::{Dot, Frame, Highlight, Note, Tag},
+    draw::{Dot, Frame, Highlight, Tag},
     font::load as load_font,
 };
 use crate::{
     action::Mods,
     desktop::{self, Monitor},
+    feed::Feed,
     geometry::Point,
     keyboard::{self, Keyboard, Locks},
     keys::{Key, KeyCode},
+    status::Status,
     style::{Info, Input, Marks, Style},
 };
 
@@ -125,6 +127,11 @@ pub struct Overlay {
     painter: Painter,
     pixmap: Pixmap,
     monitor: Monitor,
+    /// Where the input box goes besides the screen, once the run asks.
+    feed: Option<Feed>,
+    /// `[input] visible` and `[info] visible`: which of the input box's
+    /// lines the overlay draws.
+    visible: (bool, bool),
 }
 
 impl Overlay {
@@ -245,6 +252,8 @@ impl Overlay {
             painter,
             pixmap,
             monitor: monitor.clone(),
+            feed: None,
+            visible: (input.visible, info.visible),
         };
         overlay.clear()?;
         overlay.grab_keyboard()?;
@@ -253,6 +262,12 @@ impl Overlay {
 
     pub fn monitor(&self) -> &Monitor {
         &self.monitor
+    }
+
+    /// Sends the input box, every time it changes, to a program listening
+    /// for it (`feed.rs`), drawn or not.
+    pub fn start_feed(&mut self) {
+        self.feed = Feed::new(&self.monitor.name);
     }
 
     /// A second launch wakes the loop and leaves through normal cleanup.
@@ -414,6 +429,9 @@ impl Overlay {
     /// Redraws the same tags (a letter or an arrow was typed). Keys stay
     /// live: a fast second letter must not count as stale.
     pub fn update(&mut self, frame: &Frame) -> Result<()> {
+        if let Some(feed) = &mut self.feed {
+            feed.send(&frame.status);
+        }
         let origin = self.monitor.rect.origin();
         let to_local = |p: Point| Point::new(p.x - origin.x, p.y - origin.y);
         let local = Frame {
@@ -443,8 +461,7 @@ impl Overlay {
                     current: h.current,
                 })
                 .collect(),
-            input: frame.input.clone(),
-            info: frame.info.clone(),
+            status: frame.status.visible(self.visible.0, self.visible.1),
         };
         self.painter.paint(&mut self.pixmap, &local);
         self.state.present(&self.pixmap)?;
@@ -461,6 +478,9 @@ impl Overlay {
         self.event_loop
             .dispatch(Some(Duration::ZERO), &mut self.state)?;
         self.state.events.retain(|e| *e != Event::Workspace);
+        if let Some(feed) = &mut self.feed {
+            feed.send(&Status::default());
+        }
         self.painter.paint(&mut self.pixmap, &Frame::default());
         self.state.present(&self.pixmap)?;
         self.new_tags();

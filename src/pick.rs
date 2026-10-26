@@ -11,10 +11,11 @@ use crate::{
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Dot, Event, Frame, Note, Overlay, Tag},
+    overlay::{Dot, Event, Frame, Overlay, Tag},
     search::{self, Chosen},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
+    status::{Message, Status},
     style::{Notice, Position},
     text::{Span, Text},
 };
@@ -74,8 +75,8 @@ impl Said {
 }
 
 /// The message the second line shows while a scan is slow.
-pub fn scanning() -> (Notice, String) {
-    (Notice::Scanning, "scanning".into())
+pub fn scanning() -> Message {
+    Message::new(Notice::Scanning, "scanning")
 }
 
 /// A refresh can move tags without changing which targets their keys name.
@@ -256,9 +257,10 @@ pub fn pick(
             due = None;
             // What shows while a slow scan goes on: the tags as they are,
             // and `scanning` under what's typed.
-            let busy = config.info.scanning.then(|| Frame {
-                info: Some(scanning()),
-                ..tags(&selector, shown, pointer, &said)
+            let busy = config.info.scanning.then(|| {
+                let mut busy = tags(&selector, shown, pointer, &said);
+                busy.status.info = Some(scanning());
+                busy
             });
             let mut slowed = false;
             let mut slow = || {
@@ -534,18 +536,20 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
             .collect()
     };
     let info = match said {
-        Said::Help => Some((Notice::Help, config.verbs.legend())),
-        Said::Missed(message, _) => Some((Notice::NoMatch, message.clone())),
+        Said::Help => Some(Message::new(Notice::Help, config.verbs.legend())),
+        Said::Missed(message, _) => Some(Message::new(Notice::NoMatch, message.clone())),
         Said::Nothing if scene.targets.is_empty() && config.info.no_targets => {
-            Some((Notice::NoTargets, "no targets".into()))
+            Some(Message::new(Notice::NoTargets, "no targets"))
         }
         Said::Nothing => None,
     };
     Frame {
         tags,
         dots,
-        input: input(selector, config, scene.holding),
-        info,
+        status: Status {
+            info,
+            ..status(selector, config, scene.holding)
+        },
         ..Frame::default()
     }
 }
@@ -580,33 +584,22 @@ fn spot(target: &Target, config: &Config) -> Point {
         .offset(Point::new(x, y))
 }
 
-/// The input box's first line with the tags up: the armed verb's name,
-/// dimmed, or `drop` while a hold keeps a button down (whatever comes next
-/// lets go), then, with `[input] hints`, the letters typed so far. `None`
-/// with nothing to show.
-fn input(selector: &Selector, config: &Config, holding: bool) -> Option<Note> {
-    let status = if holding {
-        Some("drop")
-    } else {
-        selector.armed().map(Action::name)
-    };
+/// The input box with the tags up: the armed verb's name, dimmed, or
+/// `drop` while a hold keeps a button down (whatever comes next lets go),
+/// then, with `[input] hints`, the letters typed so far.
+fn status(selector: &Selector, config: &Config, holding: bool) -> Status {
     let letters = config.alphabet.letters();
-    let typed: String = selector
+    let typed = selector
         .typed()
         .iter()
-        .filter(|_| config.input.hints)
         .map(|&i| config.style.case.of(letters[i].label))
         .collect();
-    let (text, dimmed) = match (status, typed.is_empty()) {
-        (None, true) => return None,
-        (None, false) => (typed, 0),
-        (Some(status), true) => (status.to_owned(), status.chars().count()),
-        (Some(status), false) => (format!("{status} {typed}"), status.chars().count() + 1),
-    };
-    Some(Note {
-        text,
-        typed: dimmed,
-    })
+    Status::tags(
+        typed,
+        selector.armed().map(Action::name),
+        holding,
+        config.input.hints,
+    )
 }
 
 /// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick
@@ -1130,8 +1123,8 @@ mod tests {
             let frame = frame(&selector, &config, &scene(holding), &Said::Nothing);
             let tags: Vec<(String, usize)> =
                 frame.tags.into_iter().map(|t| (t.text, t.typed)).collect();
-            let input = frame.input.map(|n| (n.text, n.typed));
-            (tags, input)
+            assert_eq!(frame.status.input, "A", "what's typed, wherever it shows");
+            (tags, frame.status.line())
         };
         let owned = |text: &str, typed| (text.to_owned(), typed);
         let (tags, input) = shown("", false);
@@ -1144,6 +1137,8 @@ mod tests {
             "the whole command, typed keys dimmed"
         );
         assert_eq!(input, Some(owned("right", 5)));
+        let (_, input) = shown("[input]\nvisible = false", false);
+        assert_eq!(input, Some(owned("right A", 6)), "drawn or not");
         let (_, input) = shown("", true);
         assert_eq!(
             input,
@@ -1163,27 +1158,28 @@ mod tests {
             pointer: None,
             holding: false,
         };
-        let info = |targets, said: &Said| frame(&selector, &config, &scene(targets), said).info;
+        let info =
+            |targets, said: &Said| frame(&selector, &config, &scene(targets), said).status.info;
         assert_eq!(
             info(&[], &Said::Nothing),
-            Some((Notice::NoTargets, "no targets".into()))
+            Some(Message::new(Notice::NoTargets, "no targets"))
         );
         assert_eq!(info(&targets, &Said::Nothing), None);
         let missed = Said::Missed("no tag starts with Q".into(), Instant::now());
         assert_eq!(
             info(&[], &missed),
-            Some((Notice::NoMatch, "no tag starts with Q".into())),
+            Some(Message::new(Notice::NoMatch, "no tag starts with Q")),
             "a miss beats no targets"
         );
-        let (notice, legend) = info(&targets, &Said::Help).unwrap();
-        assert_eq!(notice, Notice::Help);
-        assert!(legend.contains("Esc\tleave"), "{legend}");
+        let help = info(&targets, &Said::Help).unwrap();
+        assert_eq!(help.kind, Notice::Help);
+        assert!(help.text.contains("Esc\tleave"), "{}", help.text);
         let quiet = Config::parse(
             "[info]\nno_targets = false",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
         let frame = frame(&selector, &quiet, &scene(&[]), &Said::Nothing);
-        assert_eq!(frame.info, None, "turned off");
+        assert_eq!(frame.status.info, None, "turned off");
     }
 }

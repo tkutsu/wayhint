@@ -64,6 +64,7 @@ use crate::{
     pointer::Pointer,
     search::Chosen,
     snapshot::{Snapshot, Target},
+    status::Status,
     text::{Span, Text},
 };
 
@@ -151,6 +152,7 @@ pub fn run(
         monitor,
     )?;
     overlay.listen_for_toggle(toggle, &config.verbs)?;
+    overlay.start_feed();
     if let Err(e) = overlay.follow_workspaces() {
         desktop::warn(&format!(
             "wayhint: the tags won't follow workspace changes: {e:#}"
@@ -603,7 +605,10 @@ fn scan(
 fn say_scanning(overlay: &mut Overlay, config: &Config) {
     if config.info.scanning {
         let busy = Frame {
-            info: Some(pick::scanning()),
+            status: Status {
+                info: Some(pick::scanning()),
+                ..Status::default()
+            },
             ..Frame::default()
         };
         let _ = overlay.update(&busy);
