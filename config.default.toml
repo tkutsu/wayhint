@@ -138,7 +138,7 @@
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
-# ocr = "eng"               # Tesseract's languages for windows with no accessibility tree, as "eng+ell"; "" for no OCR
+# ocr = "off"               # eng for English OCR in windows with no accessibility tree; off to disable it (default)
 
 [text.matches]
 # The box over every match. Unset radius and padding follow [style].
@@ -167,6 +167,8 @@
 [pixels]
 # Windows with no accessibility tree get tags found in their pixels.
 # detector = "full"         # "full", "fast" for slower CPUs, or "off"
+# One focus tag per terminal, independent of detector, including when it is off.
+# terminal_hint = true
 # Programs read as terminals (input areas, not buttons). Setting it replaces
 # the whole list; [] turns terminal detection off.
 # terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]

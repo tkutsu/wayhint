@@ -165,12 +165,9 @@ fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Resul
         .context("no monitor has focus")?;
     let mut desktop = Desktop::connect()?;
     let stack = desktop.stack(monitor.id)?;
-    let terminals = if pixels.is_some() {
-        crate::config::terminal_processes(config)?
-    } else {
-        Vec::new()
-    };
-    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels, &terminals);
+    let terminals = crate::config::terminal_processes(config)?;
+    let terminal_hint = crate::config::terminal_hint(config)?;
+    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels, terminal_hint, &terminals);
     let tags = |w: &Window| {
         let targets = snapshot.targets.iter();
         targets

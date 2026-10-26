@@ -149,7 +149,7 @@ pub fn run(
     }
     let mut desktop = Desktop::connect()?;
     if let Err(e) = desktop.watch_menus() {
-        desktop::warn(&format!("wayhint: menus won't get tags: {e:#}"));
+        desktop::log(&format!("wayhint: menus won't get tags: {e:#}"));
     }
     let mut session = Session {
         overlay,
@@ -265,17 +265,17 @@ impl Session {
                             self.command(config, &scanned, &scanned.targets[index], last)?
                         }
                         (Some(last), None) if last.object.is_none() => {
-                            desktop::warn(
+                            desktop::log(
                                 "wayhint: not repeating: the target was found in pixels, which can't be found again",
                             );
                             Done::Refused
                         }
                         (Some(_), None) => {
-                            desktop::warn("wayhint: not repeating: the target is gone");
+                            desktop::log("wayhint: not repeating: the target is gone");
                             Done::Refused
                         }
                         (None, _) => {
-                            desktop::warn("wayhint: nothing to repeat yet");
+                            desktop::log("wayhint: nothing to repeat yet");
                             Done::Refused
                         }
                     }
@@ -309,7 +309,7 @@ impl Session {
         if let Some(check) = &check
             && let Err(e) = self.desktop.still_reads(snapshot, target.window, check)
         {
-            eprintln!("wayhint: refreshing {:?}: {e:#}", check.text);
+            desktop::log(&format!("wayhint: refreshing {:?}: {e:#}", check.text));
             return Ok(Done::Refused);
         }
         let done = self.command(config, snapshot, &target, Command { object: None, act });
@@ -354,7 +354,7 @@ impl Session {
             Verdict::Refuse(why) => {
                 // A changing screen is routine: the next round refreshes
                 // the tags, without a desktop notification for the race.
-                eprintln!("wayhint: refreshing {:?}: {why}", target.name);
+                desktop::log(&format!("wayhint: refreshing {:?}: {why}", target.name));
                 Ok(Done::Refused)
             }
         }
@@ -509,14 +509,16 @@ impl pick::Source for Scans<'_> {
     fn read_text(&mut self, shown: &Snapshot) -> Vec<Text> {
         let reading = self.desktop.read_text(shown, self.config.ocr.as_deref());
         if let Some(why) = reading.incomplete {
-            eprintln!("wayhint: reading the text stopped early ({why}); some may be missing");
+            desktop::log(&format!(
+                "wayhint: reading the text stopped early ({why}); some may be missing"
+            ));
         }
         let messages = reading
             .unread
             .into_iter()
             .map(|e| (e.app, format!("no text from {:#}", e.error)));
         for message in group_warnings(messages, self.warned) {
-            desktop::warn(&message);
+            desktop::log(&message);
         }
         reading.texts
     }
@@ -532,7 +534,7 @@ impl pick::Source for Scans<'_> {
 }
 
 /// One scan of the windows `monitor` shows, and what they are, bottom to
-/// top. A scan slower than `[scan] refresh` is said once a run, on stderr:
+/// top. A scan slower than `[scan] refresh` is logged once a run:
 /// the tags then lag behind the screen by more than the setting says.
 fn scan(
     desktop: &mut Desktop,
@@ -542,21 +544,26 @@ fn scan(
 ) -> Result<(Stack, Snapshot)> {
     let started = Instant::now();
     let stack = desktop.stack(monitor.id)?;
-    let (scanned, unread) =
-        desktop.scan(&stack, monitor, config.pixels, &config.terminal_processes);
+    let (scanned, unread) = desktop.scan(
+        &stack,
+        monitor,
+        config.pixels,
+        config.terminal_hint,
+        &config.terminal_processes,
+    );
     for message in report(&scanned, &unread, warned) {
-        desktop::warn(&message);
+        desktop::log(&message);
     }
     let took = started.elapsed();
     if let Some(every) = config.refresh
         && took > every
         && warned.insert("slow scan".into())
     {
-        eprintln!(
+        desktop::log(&format!(
             "wayhint: a scan took {} ms, more than [scan] refresh ({} ms)",
             took.as_millis(),
             every.as_millis()
-        );
+        ));
     }
     Ok((stack, scanned))
 }
@@ -565,7 +572,7 @@ fn scan(
 /// cut short, each once a run (`warned` holds what was said), grouped by
 /// app. An empty scan is valid: keep listening for fresh targets or the
 /// toggle shortcut.
-/// Pixel tags are news only on stderr, and once a run too: they're how a
+/// Pixel tags are logged once a run too: they're how a
 /// window with no tree is meant to work.
 fn report(snapshot: &Snapshot, unread: &[Unread], warned: &mut HashSet<String>) -> Vec<String> {
     let incomplete = snapshot.windows.iter().filter_map(|scanned| {
@@ -583,16 +590,16 @@ fn report(snapshot: &Snapshot, unread: &[Unread], warned: &mut HashSet<String>) 
     for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
         let class = &scanned.window.class;
         if warned.insert(format!("pixels {class}")) {
-            eprintln!(
-                "wayhint: tags in {class} come from its pixels ({:.0} ms): it has no accessibility tree",
+            desktop::log(&format!(
+                "wayhint: tags in {class} come from its pixels ({:.0} ms)",
                 scanned.stats.ms
-            );
+            ));
         }
     }
     messages
 }
 
-/// Keeps repeated warnings quiet for this run and groups new ones by app.
+/// Keeps repeated diagnostics quiet for this run and groups new ones by app.
 fn group_warnings(
     messages: impl IntoIterator<Item = (Option<String>, String)>,
     warned: &mut HashSet<String>,
@@ -651,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn warnings_from_several_windows_of_one_app_share_a_notification() {
+    fn warnings_from_several_windows_of_one_app_share_a_log_entry() {
         let warnings = || {
             [
                 (
@@ -704,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_failures_and_incomplete_reads_share_an_app_notification() {
+    fn scan_failures_and_incomplete_reads_share_an_app_log_entry() {
         let snapshot = Snapshot {
             scan: 1,
             monitor: 0,
