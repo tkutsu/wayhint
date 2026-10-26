@@ -59,11 +59,14 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 
-pub use self::draw::{Dot, Frame, Highlight, Note, Tag};
 use self::{
     draw::Painter,
     typing::Typist,
     wayland::{Answered, Grab, NoEvents, State, Synced},
+};
+pub use self::{
+    draw::{Dot, Frame, Highlight, Note, Tag},
+    font::load as load_font,
 };
 use crate::{
     action::Mods,

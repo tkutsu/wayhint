@@ -164,7 +164,7 @@ fn lay_out(lines: &[Line]) -> (String, Vec<(u16, u16, u16)>) {
 }
 
 /// The address kitty listens on, from a program it started.
-fn listen_on(pid: u32) -> Result<String> {
+pub fn listen_on(pid: u32) -> Result<String> {
     let tasks = fs::read_dir(format!("/proc/{pid}/task"))?;
     let children = tasks
         .filter_map(|task| fs::read_to_string(task.ok()?.path().join("children")).ok())

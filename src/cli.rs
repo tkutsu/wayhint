@@ -50,6 +50,9 @@ pub enum Command {
         #[arg(long)]
         default: bool,
     },
+    /// Check the setup: config, Hyprland, Wayland protocols, accessibility,
+    /// fonts, OCR and kitty's remote control
+    Doctor,
     /// Show a saved snapshot's tags and print the one you pick; clicks nothing
     #[command(hide = true)]
     Overlay {
