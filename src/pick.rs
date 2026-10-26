@@ -173,7 +173,14 @@ pub fn pick(
     if start.text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-        if let Some(pick) = search::search(overlay, shown, &selector, source, &config.input)? {
+        if let Some(pick) = search::search(
+            overlay,
+            shown,
+            &selector,
+            source,
+            &config.input,
+            config.text_cursor,
+        )? {
             return Ok(pick);
         }
     }
@@ -255,9 +262,14 @@ pub fn pick(
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
             Step::Text => {
-                if let Some(pick) =
-                    search::search(overlay, shown, &selector, source, &config.input)?
-                {
+                if let Some(pick) = search::search(
+                    overlay,
+                    shown,
+                    &selector,
+                    source,
+                    &config.input,
+                    config.text_cursor,
+                )? {
                     return Ok(pick);
                 }
                 // Back to the tags of the same scan, as they were left.

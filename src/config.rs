@@ -46,10 +46,11 @@ struct File {
     text: FileText,
 }
 
-/// `[text]`: how text mode reads windows and how it looks.
+/// `[text]`: how text mode reads windows, acts on matches and looks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileText {
+    cursor: TextCursor,
     /// Tesseract's languages for windows read from pixels, `""` for none.
     ocr: Option<String>,
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
@@ -363,6 +364,16 @@ pub enum After {
     Leave,
 }
 
+/// Where an action lands on the selected text match: `[text] cursor`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextCursor {
+    Start,
+    #[default]
+    Center,
+    End,
+}
+
 /// The verbs' default keys, as positions, so they sit in the same place on
 /// every layout, as the home row does. On US they print `r m t o b n`:
 /// right, middle, twice, over, back, next; then Page Up and Page Down for
@@ -413,6 +424,8 @@ pub struct Config {
     pub marks: Marks,
     /// Text mode's query display: `[text.input]`.
     pub input: Input,
+    /// Where an action lands within a text match: `[text] cursor`.
+    pub text_cursor: TextCursor,
     /// Tesseract's languages for text mode in windows read from pixels,
     /// `None` for no OCR: `[text] ocr`.
     pub ocr: Option<String>,
@@ -888,6 +901,7 @@ impl Config {
             style: file.style,
             marks,
             input,
+            text_cursor: file.text.cursor,
             ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
@@ -908,8 +922,13 @@ impl Config {
 
     /// `[text]`'s own settings, for `wayhint config`.
     fn render_text(&self) -> String {
+        let cursor = match self.text_cursor {
+            TextCursor::Start => "start",
+            TextCursor::Center => "center",
+            TextCursor::End => "end",
+        };
         format!(
-            "\n[text]\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
             quote(self.ocr.as_deref().unwrap_or(""))
         )
     }
@@ -1247,6 +1266,30 @@ mod tests {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.ocr, config.ocr, "{text:?} reads back the same");
+        }
+    }
+
+    #[test]
+    fn text_cursor_defaults_to_center_and_round_trips() {
+        assert_eq!(
+            Config::parse("", &us()).unwrap().text_cursor,
+            TextCursor::Center
+        );
+        for (name, cursor) in [
+            ("start", TextCursor::Start),
+            ("center", TextCursor::Center),
+            ("end", TextCursor::End),
+        ] {
+            let config = Config::parse(&format!("[text]\ncursor = {name:?}"), &us()).unwrap();
+            assert_eq!(config.text_cursor, cursor);
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.text_cursor, cursor);
+        }
+        let err = Config::parse("[text]\ncursor = \"middle\"", &us()).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("cursor"), "{err}");
+        for name in ["start", "center", "end"] {
+            assert!(err.contains(name), "{err}");
         }
     }
 
