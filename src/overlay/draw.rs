@@ -11,6 +11,10 @@
 //! and drawn at the monitor's scale: shapes through a scaling transform,
 //! letters rasterized at their size times the scale. So a tag is the same
 //! size on every monitor, and sharp on a scaled one.
+//!
+//! The input box holds what's typed, and under it a message: an icon, a
+//! glyph from a Nerd Font's symbols, then the words, both in the
+//! message's colour.
 
 use std::collections::HashMap;
 
@@ -25,11 +29,16 @@ use crate::{
     overlay::font,
     placement::{self, Label},
     space::Space,
-    style::{Color, Mark, Marks, Position, Style},
+    style::{Color, Info, Mark, Marks, Notice, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
 const EDGE: f32 = 2.0;
+/// The most lines a message takes; the rest is cut, ending in `…`.
+const MESSAGE_LINES: usize = 2;
+/// The narrowest a message wraps at, in ems of the box's text: a terse
+/// message keeps to one line, however little is typed above it.
+const MESSAGE_WIDTH: f32 = 16.0;
 
 /// Everything one picture shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,23 +49,15 @@ pub struct Frame {
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
-    /// The input box: an armed verb, `drop`, text mode's query.
+    /// The input box's first line: an armed verb, `drop`, the tag letters
+    /// typed, text mode's query.
     pub input: Option<Note>,
-    /// The info box: scanning, no targets, a dropped key, the key legend.
-    pub info: Option<Note>,
+    /// The input box's second line: a message, wrapped to fit. One with
+    /// tabs, the key list, is shown whole, its columns lined up.
+    pub info: Option<(Notice, String)>,
 }
 
-impl Frame {
-    /// Whether the tags, lines, dots and marks are all gone: the boxes
-    /// aside, a blank screen.
-    pub fn is_bare(&self) -> bool {
-        self.tags.is_empty() && self.dots.is_empty() && self.highlights.is_empty()
-    }
-}
-
-/// What a box on the screen says. Where it goes is its table's: `[input]`
-/// or `[info]`. Lines are split at `\n`, and a line's columns at `\t`,
-/// lined up across lines.
+/// What's typed, as the input box shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
     pub text: String,
@@ -72,13 +73,6 @@ impl Note {
             typed: 0,
         }
     }
-}
-
-/// The boxes apart from the tags, each with its own look and spot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-    Input,
-    Info,
 }
 
 /// A translucent box over one line of a match in text mode.
@@ -121,13 +115,27 @@ struct Glyph {
     pixmap: Option<Pixmap>,
 }
 
-/// Draws tags, matches and the boxes, caching each font's rasterized
+/// One line of a box: `text` in `color`, its first `dimmed` characters in
+/// the box's dimmed colour, starting `indent` px in. A message's lines
+/// start past its icon, which its first line has.
+struct Row {
+    text: String,
+    dimmed: usize,
+    color: Color,
+    indent: f32,
+    icon: Option<String>,
+}
+
+/// Draws tags, matches and the input box, caching each font's rasterized
 /// glyphs.
 pub struct Painter {
     tags: TextPainter,
     input: TextPainter,
-    info: TextPainter,
+    /// The messages' icons: `[info] icon_font`, at the input box's size.
+    icons: TextPainter,
     marks: Marks,
+    /// The messages' icons and colours.
+    info: Info,
     /// Buffer px per logical px: the monitor's scale.
     scale: f32,
     space: Option<Space>,
@@ -139,20 +147,26 @@ pub struct Painter {
 }
 
 impl Painter {
-    /// The tags in `style`, text mode's marks in `marks`, the boxes in
-    /// `input` and `info`, drawn at `scale` buffer px per logical px.
+    /// The tags in `style`, text mode's marks in `marks`, the input box in
+    /// `input` with `info`'s icons and colours for its messages, drawn at
+    /// `scale` buffer px per logical px.
     pub fn new(
         style: &Style,
         marks: &Marks,
         input: &Style,
-        info: &Style,
+        info: &Info,
         scale: f32,
     ) -> Result<Self> {
+        let icons = Style {
+            font: info.icon_font.clone(),
+            ..input.clone()
+        };
         Ok(Self {
             tags: TextPainter::new(style, scale)?,
             input: TextPainter::new(input, scale)?,
-            info: TextPainter::new(info, scale)?,
+            icons: TextPainter::new(&icons, scale)?,
             marks: *marks,
+            info: info.clone(),
             scale,
             space: None,
             regions: Vec::new(),
@@ -232,44 +246,27 @@ impl Painter {
         result
     }
 
-    /// `pixmap`'s size in logical px.
-    #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
-    fn area(&self, pixmap: &Pixmap) -> (f32, f32) {
-        (
-            pixmap.width() as f32 / self.scale,
-            pixmap.height() as f32 / self.scale,
-        )
-    }
-
-    /// Draws `frame` on a cleared `pixmap`, boxes and all, at full
-    /// opacity.
-    pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
-        self.paint_board(pixmap, frame);
-        if let Some(note) = &frame.input {
-            self.paint_note(pixmap, Panel::Input, note, 1.0);
-        }
-        if let Some(note) = &frame.info {
-            self.paint_note(pixmap, Panel::Info, note, 1.0);
-        }
-    }
-
-    /// Clears `pixmap` and draws `frame`'s tags, lines, dots and marks on
-    /// it, in overlay coordinates; not its boxes.
+    /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
     ///
     /// Highlights go first, under everything. Lines start at their tags'
-    /// nearest edges and go under the tags. Dots follow.
-    pub fn paint_board(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
+    /// nearest edges and go under the tags. Dots follow, then the input
+    /// box.
+    pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let scaled = Transform::from_scale(self.scale, self.scale);
         for highlight in &frame.highlights {
             self.paint_highlight(pixmap, *highlight, scaled);
         }
-        let area = self.area(pixmap);
+        #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
+        let area = (
+            pixmap.width() as f32 / self.scale,
+            pixmap.height() as f32 / self.scale,
+        );
         let arranged = self.arrange(frame, area);
-        let frame = &arranged;
+        let tags = &arranged;
         let mut lines = Vec::new();
-        for &dot in &frame.dots {
-            let from = if let Some(tag) = dot.tag.and_then(|i| frame.tags.get(i)) {
+        for &dot in &tags.dots {
+            let from = if let Some(tag) = dot.tag.and_then(|i| tags.tags.get(i)) {
                 let Some(rect) = place(tag.at, tag.position, self.tags.size(&tag.text), area)
                 else {
                     continue;
@@ -284,35 +281,65 @@ impl Painter {
             lines.extend(self.line(from, centre(dot.at)));
         }
         paint_layer(pixmap, &lines, self.scale);
-        for tag in &frame.tags {
-            self.tags.paint_tag(pixmap, tag, area, 1.0);
+        for tag in &tags.tags {
+            self.tags.paint_tag(pixmap, tag, area);
         }
-        let dots: Vec<Part> = frame.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
+        let dots: Vec<Part> = tags.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
         paint_layer(pixmap, &dots, self.scale);
+        self.paint_input(pixmap, frame, area);
     }
 
-    /// Draws one box over `pixmap` at `opacity`, where its table puts it:
-    /// its position on the screen, moved by its offset.
+    /// The input box where `[input]` puts it on the screen: what's typed,
+    /// then the message. Nothing when neither is there.
     #[allow(clippy::cast_possible_truncation)] // logical sizes fit an i32
-    pub fn paint_note(&mut self, pixmap: &mut Pixmap, panel: Panel, note: &Note, opacity: f32) {
-        let (w, h) = self.area(pixmap);
-        let painter = match panel {
-            Panel::Input => &mut self.input,
-            Panel::Info => &mut self.info,
-        };
-        let style = &painter.style;
+    fn paint_input(&mut self, pixmap: &mut Pixmap, frame: &Frame, (w, h): (f32, f32)) {
+        let rows = self.rows(frame, w);
+        if rows.is_empty() {
+            return;
+        }
+        let style = &self.input.style;
         let [x, y] = style.offset;
-        let tag = Tag {
-            at: style
-                .position
-                .on(BoxRect::new(0, 0, w as i32, h as i32))
-                .offset(Point::new(x, y)),
-            position: style.position,
-            text: note.text.clone(),
-            typed: note.typed,
-            target: None,
+        let at = style
+            .position
+            .on(BoxRect::new(0, 0, w as i32, h as i32))
+            .offset(Point::new(x, y));
+        let Some(rect) = place(at, style.position, self.input.size_of(&rows), (w, h)) else {
+            return;
         };
-        painter.paint_tag(pixmap, &tag, (w, h), opacity);
+        self.input.draw(pixmap, rect, &rows, Some(&mut self.icons));
+    }
+
+    /// The input box's lines: what's typed, then the message, wrapped
+    /// within a screen `width` wide.
+    fn rows(&self, frame: &Frame, width: f32) -> Vec<Row> {
+        let text = &self.input;
+        let mut rows = Vec::new();
+        let mut typed = 0.0;
+        if let Some(note) = &frame.input {
+            typed = text.width(&note.text);
+            rows.push(text.row(&note.text, note.typed));
+        }
+        if let Some((notice, message)) = &frame.info {
+            let badge = self.info.badge(*notice);
+            // An icon the font doesn't have would be a box: none instead.
+            let icon = Some(&badge.icon).filter(|i| !i.is_empty() && self.icons.has(i));
+            let indent = icon.map_or(0.0, |i| self.icons.width(i) + text.style.size * 0.4);
+            let screen = width - 2.0 * (EDGE + text.style.padding[1]);
+            let room = screen.min(typed.max(MESSAGE_WIDTH * text.style.size)) - indent;
+            let lines = if message.contains('\t') {
+                message.split('\n').map(str::to_owned).collect()
+            } else {
+                wrap(message, room, MESSAGE_LINES, |c| text.advance(c))
+            };
+            rows.extend(lines.into_iter().enumerate().map(|(i, line)| Row {
+                text: line,
+                dimmed: 0,
+                color: badge.color,
+                indent,
+                icon: icon.filter(|_| i == 0).cloned(),
+            }));
+        }
+        rows
     }
 
     /// The line from a tag to where it clicks, inside its outline, so it
@@ -401,7 +428,8 @@ impl Painter {
     }
 }
 
-/// A font and glyph cache for one look; tags and each box have their own.
+/// A font and glyph cache for one look; the tags and the input box have
+/// their own.
 struct TextPainter {
     style: Style,
     font: fontdue::Font,
@@ -411,8 +439,8 @@ struct TextPainter {
     /// in logical px.
     ascent: f32,
     line_height: f32,
-    /// Keyed by letter and whether it's drawn in the typed colour.
-    glyphs: HashMap<(char, bool), Glyph>,
+    /// Keyed by letter and colour.
+    glyphs: HashMap<(char, Color), Glyph>,
 }
 
 impl TextPainter {
@@ -438,12 +466,28 @@ impl TextPainter {
         self.font.metrics(letter, self.style.size).advance_width
     }
 
-    /// Each column's width, the widest of its cells in every line.
-    fn columns(&self, text: &str) -> Vec<f32> {
+    /// How wide `text` is, in logical px.
+    fn width(&self, text: &str) -> f32 {
+        text.chars().map(|c| self.advance(c)).sum()
+    }
+
+    /// Whether the font has every letter of `text`.
+    fn has(&self, text: &str) -> bool {
+        text.chars().all(|c| self.font.lookup_glyph_index(c) != 0)
+    }
+
+    /// The gap between two columns: the box's side padding, twice.
+    fn gap(&self) -> f32 {
+        2.0 * self.style.padding[1]
+    }
+
+    /// Each column's width: the widest of its cells in the rows with
+    /// tabs. A row without one is a line of its own.
+    fn columns(&self, rows: &[Row]) -> Vec<f32> {
         let mut widths: Vec<f32> = Vec::new();
-        for line in text.split('\n') {
-            for (i, cell) in line.split('\t').enumerate() {
-                let width = cell.chars().map(|c| self.advance(c)).sum();
+        for row in rows.iter().filter(|r| r.text.contains('\t')) {
+            for (i, cell) in row.text.split('\t').enumerate() {
+                let width = self.width(cell);
                 match widths.get_mut(i) {
                     Some(widest) => *widest = widest.max(width),
                     None => widths.push(width),
@@ -453,75 +497,71 @@ impl TextPainter {
         widths
     }
 
-    /// The gap between two columns: the box's side padding, twice.
-    fn gap(&self) -> f32 {
-        2.0 * self.style.padding[1]
+    /// A tag's box size: its text plus padding on every side.
+    fn size(&self, text: &str) -> (f32, f32) {
+        self.size_of(&[self.row(text, 0)])
     }
 
-    /// The box's size: its text plus padding on every side.
-    #[allow(clippy::cast_precision_loss)] // a box has a few lines
-    fn size(&self, text: &str) -> (f32, f32) {
+    /// A box's size: its widest row and every row's height, plus padding
+    /// on every side.
+    #[allow(clippy::cast_precision_loss)] // a box has a few rows
+    fn size_of(&self, rows: &[Row]) -> (f32, f32) {
         let [pad_y, pad_x] = self.style.padding;
-        let columns = self.columns(text);
-        let gaps = columns.len().saturating_sub(1) as f32 * self.gap();
-        let width: f32 = columns.iter().sum::<f32>() + gaps;
-        let lines = text.split('\n').count() as f32;
+        let columns = self.columns(rows);
+        let width = rows
+            .iter()
+            .map(|row| {
+                let cells = row.text.split('\t').count();
+                let text = if cells > 1 {
+                    columns.iter().take(cells).sum::<f32>() + (cells - 1) as f32 * self.gap()
+                } else {
+                    self.width(&row.text)
+                };
+                row.indent + text
+            })
+            .fold(0.0, f32::max);
         (
             (width + 2.0 * pad_x).ceil(),
-            (self.line_height * lines + 2.0 * pad_y).ceil(),
+            (self.line_height * rows.len() as f32 + 2.0 * pad_y).ceil(),
         )
     }
 
-    /// Draws `tag` on `pixmap` at `opacity`. A box fading in or out is
-    /// drawn alone first, then laid over at that opacity, so its letters
-    /// don't show its background through them.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32), opacity: f32) {
-        let size = self.size(&tag.text);
-        let Some(rect) = place(tag.at, tag.position, size, area) else {
-            return;
-        };
-        if opacity >= 1.0 {
-            self.draw(pixmap, rect, &tag.text, tag.typed, (0.0, 0.0));
-            return;
+    /// A row of `text` in the text colour, its first `typed` letters
+    /// dimmed: a tag, or what's typed in the input box.
+    fn row(&self, text: &str, typed: usize) -> Row {
+        Row {
+            text: text.to_owned(),
+            dimmed: typed,
+            color: self.style.text,
+            indent: 0.0,
+            icon: None,
         }
-        let s = self.scale;
-        let (left, top) = ((rect.left() * s).floor(), (rect.top() * s).floor());
-        let (right, bottom) = ((rect.right() * s).ceil(), (rect.bottom() * s).ceil());
-        let Some(mut layer) = Pixmap::new((right - left) as u32 + 1, (bottom - top) as u32 + 1)
-        else {
-            return;
-        };
-        self.draw(&mut layer, rect, &tag.text, tag.typed, (left, top));
-        let paint = PixmapPaint {
-            opacity: opacity.clamp(0.0, 1.0),
-            ..PixmapPaint::default()
-        };
-        pixmap.draw_pixmap(
-            left as i32,
-            top as i32,
-            layer.as_ref(),
-            &paint,
-            Transform::identity(),
-            None,
-        );
     }
 
-    /// The box at `rect` (logical px) and its letters, on `target`, whose
-    /// top-left corner is `shift` buffer px into the overlay.
+    fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
+        let row = self.row(&tag.text, tag.typed);
+        let size = self.size_of(std::slice::from_ref(&row));
+        if let Some(rect) = place(tag.at, tag.position, size, area) {
+            self.draw(pixmap, rect, &[row], None);
+        }
+    }
+
+    /// The box at `rect` (logical px) and its rows: a message's icon in
+    /// `icons`' font, then the letters, on a baseline `ascent` below the
+    /// row's top. Each column starts past the widest cell of the one
+    /// before.
     fn draw(
         &mut self,
-        target: &mut Pixmap,
+        pixmap: &mut Pixmap,
         rect: Rect,
-        text: &str,
-        typed: usize,
-        shift: (f32, f32),
+        rows: &[Row],
+        mut icons: Option<&mut Self>,
     ) {
         let s = self.scale;
-        let transform = Transform::from_scale(s, s).post_translate(-shift.0, -shift.1);
+        let scaled = Transform::from_scale(s, s);
         let style = &self.style;
         paint_box(
-            target,
+            pixmap,
             rect,
             &Mark {
                 background: style.background,
@@ -530,65 +570,80 @@ impl TextPainter {
                 radius: style.radius,
                 padding: style.padding,
             },
-            transform,
+            scaled,
         );
-        // The letters, on a baseline `ascent` below the padding, a line
-        // height further for each line; each column starts past the
-        // widest cell of the one before.
         let [pad_y, pad_x] = style.padding;
-        let columns = self.columns(text);
-        let gap = self.gap();
-        let mut index = 0;
-        let mut baseline = rect.top() + pad_y + self.ascent;
-        for line in text.split('\n') {
-            let mut start = rect.left() + pad_x;
-            for (cell, width) in line.split('\t').zip(&columns) {
+        let (dimmed, columns, gap) = (style.dimmed, self.columns(rows), self.gap());
+        let mut top = rect.top() + pad_y;
+        for row in rows {
+            let left = rect.left() + pad_x;
+            let baseline = top + self.ascent;
+            if let (Some(icon), Some(icons)) = (&row.icon, icons.as_deref_mut()) {
+                let mut pen = left;
+                for letter in icon.chars() {
+                    pen += icons.letter(pixmap, (pen, baseline), letter, row.color);
+                }
+            }
+            let mut start = left + row.indent;
+            let mut index = 0;
+            for (i, cell) in row.text.split('\t').enumerate() {
                 let mut pen = start;
                 for letter in cell.chars() {
-                    let advance = self.advance(letter);
-                    let glyph = self.glyph(letter, index < typed);
-                    let m = glyph.metrics;
-                    if let Some(ink) = &glyph.pixmap {
-                        // fontdue measures `ymin` up from the baseline to the
-                        // glyph's bottom edge; pixmaps count down from the top.
-                        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                        let (x, y) = (
-                            (pen * s - shift.0 + m.xmin as f32).round() as i32,
-                            (baseline * s - shift.1 - m.ymin as f32 - m.height as f32).round()
-                                as i32,
-                        );
-                        target.draw_pixmap(
-                            x,
-                            y,
-                            ink.as_ref(),
-                            &PixmapPaint::default(),
-                            Transform::identity(),
-                            None,
-                        );
-                    }
-                    pen += advance;
+                    let color = if index < row.dimmed {
+                        dimmed
+                    } else {
+                        row.color
+                    };
+                    pen += self.letter(pixmap, (pen, baseline), letter, color);
                     index += 1;
                 }
-                // The tab or line break counts as a character typed.
+                // The tab counts as a character.
                 index += 1;
-                start += width + gap;
+                start += columns.get(i).copied().unwrap_or_default() + gap;
             }
-            baseline += self.line_height;
+            top += self.line_height;
         }
     }
 
-    /// A letter in the text or typed colour, rasterized on first use at
-    /// the buffer's size.
-    fn glyph(&mut self, letter: char, typed: bool) -> &Glyph {
-        let color = if typed {
-            self.style.dimmed
-        } else {
-            self.style.text
-        };
+    /// Draws `letter` in `color` with the pen at `(pen, baseline)`, in
+    /// logical px, and says how far the pen moves.
+    fn letter(
+        &mut self,
+        pixmap: &mut Pixmap,
+        (pen, baseline): (f32, f32),
+        letter: char,
+        color: Color,
+    ) -> f32 {
+        let s = self.scale;
+        let advance = self.advance(letter);
+        let glyph = self.glyph(letter, color);
+        let m = glyph.metrics;
+        if let Some(ink) = &glyph.pixmap {
+            // fontdue measures `ymin` up from the baseline to the glyph's
+            // bottom edge; pixmaps count down from the top.
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let (x, y) = (
+                (pen * s + m.xmin as f32).round() as i32,
+                (baseline * s - m.ymin as f32 - m.height as f32).round() as i32,
+            );
+            pixmap.draw_pixmap(
+                x,
+                y,
+                ink.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+        }
+        advance
+    }
+
+    /// A letter in `color`, rasterized on first use at the buffer's size.
+    fn glyph(&mut self, letter: char, color: Color) -> &Glyph {
         let (font, size) = (&self.font, self.style.size * self.scale);
         // `entry().or_insert_with` looks the key up once and runs the closure
         // only when it's missing: the cache in one line.
-        self.glyphs.entry((letter, typed)).or_insert_with(|| {
+        self.glyphs.entry((letter, color)).or_insert_with(|| {
             let (metrics, coverage) = font.rasterize(letter, size);
             Glyph {
                 metrics,
@@ -596,6 +651,49 @@ impl TextPainter {
             }
         })
     }
+}
+
+/// `text` in at most `most` lines no wider than `room`, broken at spaces,
+/// or inside a word too wide for a line. What doesn't fit is cut, and the
+/// last line ends in `…`.
+fn wrap(text: &str, room: f32, most: usize, advance: impl Fn(char) -> f32) -> Vec<String> {
+    let width = |s: &str| s.chars().map(&advance).sum::<f32>();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let joined = if line.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{line} {word}")
+        };
+        if width(&joined) <= room {
+            line = joined;
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        for letter in word.chars() {
+            if !line.is_empty() && width(&line) + advance(letter) > room {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(letter);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > most {
+        lines.truncate(most);
+        if let Some(last) = lines.last_mut() {
+            while !last.is_empty() && width(last.trim_end()) + advance('…') > room {
+                last.pop();
+            }
+            last.truncate(last.trim_end().len());
+            last.push('…');
+        }
+    }
+    lines
 }
 
 /// Where a tag of `size` goes with its `position` point on `at`, nudged to
@@ -851,7 +949,7 @@ offset = [20, 20]
             &config.style,
             &config.marks,
             &config.input.style,
-            &config.info.style,
+            &config.info,
             1.0,
         )
         .unwrap();
@@ -935,7 +1033,7 @@ offset = [20, 20]
                 ..style.clone()
             };
             let mut painter =
-                Painter::new(&style, &Marks::new(&style), &input, &style, 1.0).unwrap();
+                Painter::new(&style, &Marks::new(&style), &input, &Info::default(), 1.0).unwrap();
             for text in ["a", "a longer query  1/2"] {
                 let frame = Frame {
                     input: Some(Note::new(text)),
@@ -1038,7 +1136,8 @@ offset = [20, 20]
             ..Frame::default()
         };
         let render = |scale: f32| {
-            let mut painter = Painter::new(&style, &marks, &style, &style, scale).unwrap();
+            let mut painter =
+                Painter::new(&style, &marks, &style, &Info::default(), scale).unwrap();
             let mut pixmap = Pixmap::new((200.0 * scale) as u32, (150.0 * scale) as u32).unwrap();
             painter.paint(&mut pixmap, &frame);
             pixmap
@@ -1080,75 +1179,177 @@ offset = [20, 20]
     }
 
     #[test]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
-    fn a_fading_box_is_the_whole_box_at_part_opacity() {
-        let style = Style {
-            text: Color::rgba(240, 20, 30, 255),
-            background: Color::rgba(30, 90, 30, 255),
-            border: Color::rgba(200, 200, 0, 255),
-            border_width: 2.0,
-            position: Position::Center,
-            ..Style::default()
+    fn messages_wrap_to_two_lines_and_say_when_cut() {
+        let wrap = |text, room| wrap(text, room, 2, |_| 10.0);
+        assert_eq!(wrap("scanning", 100.0), ["scanning"]);
+        assert_eq!(wrap("no tag starts with x", 100.0), ["no tag", "starts…"]);
+        assert_eq!(
+            wrap("abcdefghijklmno", 100.0),
+            ["abcdefghij", "klmno"],
+            "a word wider than a line breaks inside"
+        );
+        assert_eq!(
+            wrap("aaaaaaaaaa bbbbbbbbbb cc", 100.0),
+            ["aaaaaaaaaa", "bbbbbbbbb…"],
+            "the cut mark fits in the line"
+        );
+    }
+
+    /// A painter whose input box sits `offset` from the top-left corner,
+    /// white on opaque grey.
+    fn boxed(offset: [i32; 2]) -> Painter {
+        let tags = Style::default();
+        let input = Style {
+            text: Color::rgba(255, 255, 255, 255),
+            background: Color::rgba(60, 60, 60, 255),
+            border_width: 0.0,
+            position: Position::TopLeft,
+            offset,
+            ..tags.clone()
         };
-        for scale in [1.0, 1.5] {
-            let mut painter =
-                Painter::new(&style, &Marks::new(&style), &style, &style, scale).unwrap();
-            let size = ((300.0 * scale) as u32, (100.0 * scale) as u32);
-            let note = Note {
-                text: "fade me".into(),
-                typed: 2,
-            };
-            let mut at = |opacity| {
-                let mut pixmap = Pixmap::new(size.0, size.1).unwrap();
-                painter.paint_note(&mut pixmap, Panel::Info, &note, opacity);
-                pixmap
-            };
-            let (full, half, gone) = (at(1.0), at(0.5), at(0.0));
-            assert!(gone.pixels().iter().all(|p| p.alpha() == 0), "opacity 0");
-            assert!(full.pixels().iter().any(|p| p.alpha() == 255));
-            // Each pixel is half the opaque box's: the letters cover the
-            // background, so none of it shows through them.
-            for (f, h) in full.pixels().iter().zip(half.pixels()) {
-                for (f, h) in [
-                    (f.red(), h.red()),
-                    (f.green(), h.green()),
-                    (f.blue(), h.blue()),
-                    (f.alpha(), h.alpha()),
-                ] {
-                    assert!(
-                        (i16::from(f) - 2 * i16::from(h)).abs() <= 2,
-                        "scale {scale}: {f} at full is {h} at half"
-                    );
-                }
+        Painter::new(&tags, &Marks::new(&tags), &input, &Info::default(), 1.0).unwrap()
+    }
+
+    #[test]
+    fn the_input_box_has_what_is_typed_then_the_message() {
+        let mut painter = boxed([10, 10]);
+        let red = Info::default().badges.no_match.color;
+        let is = |c: Color| {
+            move |p: PremultipliedColorU8| {
+                (p.red(), p.green(), p.blue(), p.alpha()) == (c.r, c.g, c.b, 255)
             }
+        };
+        let mut pixmap = Pixmap::new(800, 200).unwrap();
+        painter.paint(&mut pixmap, &Frame::default());
+        assert!(pixmap.pixels().iter().all(|p| p.alpha() == 0), "no box");
+
+        let frame = Frame {
+            input: Some(Note::new("abc")),
+            info: Some((Notice::NoMatch, "no tag starts with q".into())),
+            ..Frame::default()
+        };
+        painter.paint(&mut pixmap, &frame);
+        let typed = bounds(&pixmap, is(Color::rgba(255, 255, 255, 255)));
+        let message = bounds(&pixmap, is(red));
+        assert!(message[1] >= typed[3], "the message is under what's typed");
+        assert!(
+            (message[0] - typed[0]).abs() <= 2,
+            "the icon starts where the typed text does"
+        );
+        let shown = bounds(&pixmap, |p| p.alpha() > 0);
+        assert!(shown[0] >= 10 && shown[1] >= 10, "where [input] puts it");
+
+        // A long message on a narrow screen: two lines, inside the screen.
+        let mut narrow = Pixmap::new(160, 200).unwrap();
+        let long = Frame {
+            info: Some((
+                Notice::NoMatch,
+                "no text on this monitor matches what you typed, so the key was dropped".into(),
+            )),
+            ..Frame::default()
+        };
+        painter.paint(&mut narrow, &long);
+        let shown = bounds(&narrow, |p| p.alpha() > 0);
+        assert!(shown[2] <= 160 - 2, "inside the screen: {shown:?}");
+        let (_, two) = painter.input.size_of(&painter.rows(&long, 160.0));
+        assert_eq!(painter.rows(&long, 160.0).len(), 2);
+        #[allow(clippy::cast_possible_truncation)]
+        let height = two as i32;
+        assert_eq!(shown[3] - shown[1], height);
+    }
+
+    #[test]
+    fn each_message_has_its_own_icon_and_colour() {
+        let mut painter = boxed([10, 10]);
+        let badges = Info::default().badges;
+        let mut icons = Vec::new();
+        for (notice, badge) in [
+            (Notice::Scanning, &badges.scanning),
+            (Notice::NoTargets, &badges.no_targets),
+            (Notice::NoMatch, &badges.no_match),
+            (Notice::Help, &badges.help),
+        ] {
+            assert!(
+                painter.icons.has(&badge.icon),
+                "the default icons need the Symbols Nerd Font installed"
+            );
+            let frame = Frame {
+                info: Some((notice, "words".into())),
+                ..Frame::default()
+            };
+            let mut pixmap = Pixmap::new(400, 100).unwrap();
+            painter.paint(&mut pixmap, &frame);
+            // The icon is left of where the words start; its edges blend
+            // into the box, so near the colour will do.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let words = (10.0
+                + painter.input.style.padding[1]
+                + painter.rows(&frame, 400.0)[0].indent) as usize;
+            let color = badge.color;
+            let near = |a: u8, b: u8| a.abs_diff(b) <= 24;
+            let ink: Vec<usize> = pixmap
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|&(i, p)| {
+                    i % 400 < words
+                        && near(p.red(), color.r)
+                        && near(p.green(), color.g)
+                        && near(p.blue(), color.b)
+                })
+                .map(|(i, _)| i % 400)
+                .collect();
+            assert!(ink.len() > 4, "{notice:?} draws its icon in its colour");
+            icons.push(ink);
+        }
+        for (i, a) in icons.iter().enumerate() {
+            for b in &icons[i + 1..] {
+                assert_ne!(a, b, "two messages share an icon");
+            }
+        }
+
+        // No icon, or one the font lacks: the words start at the edge.
+        let frame = Frame {
+            info: Some((Notice::NoMatch, "words".into())),
+            ..Frame::default()
+        };
+        for (font, icon) in [("Symbols Nerd Font", ""), ("sans-serif", "\u{f057}")] {
+            let mut info = Info {
+                icon_font: font.into(),
+                ..Info::default()
+            };
+            info.badges.no_match.icon = icon.into();
+            let tags = Style::default();
+            let bare = Painter::new(&tags, &Marks::new(&tags), &tags, &info, 1.0).unwrap();
+            let rows = bare.rows(&frame, 400.0);
+            assert_eq!(
+                (rows[0].indent, &rows[0].icon),
+                (0.0, &None),
+                "{font} {icon:?}"
+            );
         }
     }
 
     #[test]
-    fn the_legend_lines_up_its_columns_across_lines() {
-        let style = Style {
-            text: Color::rgba(240, 20, 30, 255),
-            background: Color::rgba(0, 0, 0, 0),
-            border_width: 0.0,
-            position: Position::TopLeft,
-            offset: [10, 10],
-            ..Style::default()
-        };
-        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
+    fn the_key_list_lines_up_its_columns_across_lines() {
+        let mut painter = boxed([10, 10]);
         let legend = "a\tx\nlonger\tx";
-        let (_, one_line) = painter.info.size("a");
-        let (_, two_lines) = painter.info.size(legend);
-        assert!(two_lines > one_line + painter.info.line_height - 1.0);
+        let frame = Frame {
+            info: Some((Notice::Help, legend.into())),
+            ..Frame::default()
+        };
+        assert_eq!(
+            painter.rows(&frame, 400.0).len(),
+            2,
+            "shown whole, unwrapped"
+        );
         let mut pixmap = Pixmap::new(400, 200).unwrap();
-        painter.paint_note(&mut pixmap, Panel::Info, &Note::new(legend), 1.0);
+        painter.paint(&mut pixmap, &frame);
         // Each line ends in the same letter, in the same column: the same
         // right edge, though "a" is far shorter than "longer".
+        let pad = painter.input.style.padding[0];
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let split = (10.0 + style.padding[0] + painter.info.line_height).round() as u32;
+        let split = (10.0 + pad + painter.input.line_height).round() as u32;
         let right = |rows: std::ops::Range<u32>| {
             let mut band = Pixmap::new(400, rows.end - rows.start).unwrap();
             band.draw_pixmap(
@@ -1159,7 +1360,8 @@ offset = [20, 20]
                 Transform::identity(),
                 None,
             );
-            bounds(&band, |p| p.alpha() > 128)[2]
+            // Letters in the help colour, over the grey box.
+            bounds(&band, |p| p.blue() > 160)[2]
         };
         assert_eq!(right(0..split), right(split..200));
     }
@@ -1218,7 +1420,8 @@ offset = [20, 20]
             radius: 6.0,
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         let mut pixmap = Pixmap::new(240, 200).unwrap();
         let mut frame = Frame {
             tags: vec![Tag {
@@ -1277,7 +1480,8 @@ offset = [20, 20]
         style.leader.line = Some(Color::rgba(255, 0, 0, 128));
         style.leader.dot = Some(Color::rgba(0, 255, 0, 128));
         style.leader.outline = Some(Color::rgba(0, 0, 255, 255));
-        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         let mut pixmap = Pixmap::new(200, 200).unwrap();
         let frame = Frame {
             dots: vec![Dot {
@@ -1335,7 +1539,8 @@ mod collision_tests {
             offset: [3, 3],
             ..Style::default()
         };
-        let mut painter = Painter::new(&style, &Marks::new(&style), &style, &style, 1.0).unwrap();
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         let mut pixmap = Pixmap::new(300, 600).unwrap();
         painter.set_space(
             BoxRect::new(0, 0, 300, 600),
@@ -1461,7 +1666,7 @@ mod capture_replay {
             &config.style,
             &config.marks,
             &config.input.style,
-            &config.info.style,
+            &config.info,
             1.0,
         )
         .unwrap();
@@ -1535,7 +1740,7 @@ mod capture_replay {
             &config.style,
             &config.marks,
             &config.input.style,
-            &config.info.style,
+            &config.info,
             1.0,
         )
         .unwrap();
