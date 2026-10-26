@@ -441,8 +441,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene) -> Frame {
     Frame {
         tags,
         dots,
-        highlights: Vec::new(),
-        input: None,
+        ..Frame::default()
     }
 }
 
