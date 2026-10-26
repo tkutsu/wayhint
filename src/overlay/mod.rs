@@ -4,7 +4,9 @@
 //! - Drawing: software, into a pixmap the size of the monitor (`draw.rs`),
 //!   shown on a popup of the layer, not on the layer itself. Hyprland draws
 //!   every layer's popups after all the layers, so a bar's open menu would
-//!   cover tags on the layer.
+//!   cover tags on the layer. The pixmap has the monitor's physical pixels
+//!   on a scaled monitor, and `wp_viewporter` shows it at the logical size,
+//!   so tags are sharp at any scale.
 //! - Keys: an input-method keyboard grab, or keyboard focus as the
 //!   fallback (`wayland.rs`), filtered by the stale-key rule (`gate.rs`).
 //!   What the grab takes and wayhint doesn't use goes on to the app.
@@ -41,7 +43,9 @@ use smithay_client_toolkit::{
             signals::{Signal, Signals},
         },
         calloop_wayland_source::WaylandSource,
+        client::protocol::wl_surface::WlSurface,
         client::{Connection, EventQueue, QueueHandle, globals::registry_queue_init},
+        protocols::wp::viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         protocols::xdg::shell::client::xdg_positioner,
     },
     registry::RegistryState,
@@ -131,12 +135,14 @@ impl Overlay {
         info: &Info,
         monitor: &Monitor,
     ) -> Result<Self> {
-        // The fonts first: a bad `[style] font` fails before any grab.
-        let painter = Painter::new(style, marks, &input.style, info, 1.0)?;
-
         let (globals, mut queue) =
             registry_queue_init::<State>(conn).context("connecting to Wayland")?;
         let qh = queue.handle();
+        let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, NoEvents).ok();
+        let scale = wayland::drawn_scale(monitor.scale, viewporter.is_some());
+        // The fonts first: a bad `[style] font` fails before any grab.
+        #[allow(clippy::cast_possible_truncation)] // a monitor's scale fits an f32
+        let painter = Painter::new(style, marks, &input.style, info, scale as f32)?;
         let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor")?;
         let layer_shell =
             LayerShell::bind(&globals, &qh).context("the compositor has no layer-shell")?;
@@ -149,6 +155,8 @@ impl Overlay {
             input_methods: globals.bind(&qh, 1..=1, NoEvents).ok(),
             layer: None,
             size: None,
+            scale,
+            viewport: None,
             popup: None,
             placed: false,
             pool: None,
@@ -194,7 +202,8 @@ impl Overlay {
             queue.blocking_dispatch(&mut state)?;
         }
         let (w, h) = state.size.unwrap_or_default();
-        let pixmap = Pixmap::new(w, h).with_context(|| format!("overlay size {w}x{h}"))?;
+        let (bw, bh) = state.buffer_size().unwrap_or_default();
+        let pixmap = Pixmap::new(bw, bh).with_context(|| format!("overlay size {bw}x{bh}"))?;
 
         // The popup the tags are drawn on: the layer's size, at its corner.
         // It takes no grab, so the compositor never dismisses it, and an
@@ -215,6 +224,7 @@ impl Overlay {
         if let Some(layer) = &state.layer {
             layer.get_popup(popup.xdg_popup());
         }
+        state.viewport = at_scale(popup.wl_surface(), viewporter.as_ref(), &qh, (w, h), scale)?;
         popup.wl_surface().set_input_region(Some(empty.wl_region()));
         popup.wl_surface().commit();
         state.popup = Some(popup);
@@ -521,6 +531,26 @@ impl Overlay {
     }
 }
 
+/// Shows `surface`'s buffers, `scale` times its `size`, at its size, so
+/// they're sharp: through a viewport if there's a `viewporter`, else
+/// through a whole buffer scale (`wayland::drawn_scale` keeps it whole).
+fn at_scale(
+    surface: &WlSurface,
+    viewporter: Option<&WpViewporter>,
+    qh: &QueueHandle<State>,
+    (w, h): (u32, u32),
+    scale: f64,
+) -> Result<Option<WpViewport>> {
+    let Some(viewporter) = viewporter else {
+        #[allow(clippy::cast_possible_truncation)] // a whole scale, from 1 up
+        surface.set_buffer_scale(scale as i32);
+        return Ok(None);
+    };
+    let viewport = viewporter.get_viewport(surface, qh, NoEvents);
+    viewport.set_destination(i32::try_from(w)?, i32::try_from(h)?);
+    Ok(Some(viewport))
+}
+
 /// The loop the overlay waits in: Wayland's events from `queue`, and
 /// SIGINT and SIGTERM as [`Event::Interrupted`].
 fn event_loop(conn: &Connection, queue: EventQueue<State>) -> Result<EventLoop<'static, State>> {
@@ -544,7 +574,11 @@ impl Drop for Overlay {
     /// overlay. Errors can't be returned from `drop`, so they're ignored.
     fn drop(&mut self) {
         self.state.release_keys();
-        // The popup before its parent; dropping each destroys it.
+        // The viewport before its surface, the popup before its parent;
+        // dropping each surface destroys it.
+        if let Some(viewport) = self.state.viewport.take() {
+            viewport.destroy();
+        }
         self.state.popup = None;
         self.state.layer = None;
         let _ = self.conn.flush();
