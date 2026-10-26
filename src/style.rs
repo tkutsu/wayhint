@@ -512,6 +512,9 @@ impl Style {
 /// second line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
+    /// Whether the overlay draws the box's first line. Hidden, it's still
+    /// sent to a listener (`feed.rs`).
+    pub visible: bool,
     /// Whether typed tag letters show here, and leave the tags.
     pub hints: bool,
     pub prefix: String,
@@ -525,6 +528,7 @@ impl Input {
     /// Keep the tags' colours and font, centred near the screen's bottom.
     pub fn new(tags: &Style) -> Self {
         Self {
+            visible: true,
             hints: true,
             prefix: String::new(),
             suffix: String::new(),
@@ -544,10 +548,12 @@ impl Input {
         let quote = crate::config::quote;
         format!(
             "\n{header}   # what's typed, and [info]'s messages under it\n\
+             visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
              hints = {}   # typed tag letters show here, and leave the tags\n\
              placeholder = {}   # shown while nothing is typed in text mode\n\
              prefix = {}   # before the query, as \"find: \"\n\
              suffix = {}   # after the query, before the match count\n{fields}",
+            self.visible,
             self.hints,
             quote(&self.placeholder),
             quote(&self.prefix),
@@ -558,7 +564,8 @@ impl Input {
 
 /// What wayhint has to say, under what's typed in the input box: each
 /// kind has its own icon and colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Notice {
     /// The windows are being read, and it's taking a while.
     Scanning,
@@ -573,7 +580,11 @@ pub enum Notice {
 /// `[info]`: which messages the input box's second line shows, for how
 /// long, and in which colours.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // independent switches, as the file has them
 pub struct Info {
+    /// Whether the overlay draws the messages. Hidden, they're still
+    /// sent to a listener (`feed.rs`).
+    pub visible: bool,
     /// `scanning`, once a scan takes long enough to notice.
     pub scanning: bool,
     /// `no targets`, while nothing on the monitor has a tag.
@@ -614,6 +625,7 @@ impl Default for Info {
             color: Color::rgba(r, g, b, 0xff),
         };
         Self {
+            visible: true,
             scanning: true,
             no_targets: true,
             no_match: true,
@@ -644,11 +656,13 @@ impl Info {
         let quote = crate::config::quote;
         let mut out = format!(
             "\n[info]   # the input box's second line: what wayhint has to say\n\
+             visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
              scanning = {}   # once a scan takes over half a second\n\
              no_targets = {}   # while nothing on the monitor has a tag\n\
              no_match = {}   # a key that matches no tag, or a character no text, is dropped and named\n\
              duration = {}   # ms a message stays\n\
              icon_font = {}   # a fontconfig pattern for the icons: a Nerd Font's symbols\n",
+            self.visible,
             self.scanning,
             self.no_targets,
             self.no_match,

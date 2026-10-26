@@ -29,7 +29,8 @@ use crate::{
     overlay::font,
     placement::{self, Label},
     space::Space,
-    style::{Color, Info, Mark, Marks, Notice, Position, Style},
+    status::{Message, Status},
+    style::{Color, Info, Mark, Marks, Position, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -49,31 +50,11 @@ pub struct Frame {
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
-    /// The input box's first line: an armed verb, `drop`, the tag letters
-    /// typed, text mode's query.
-    pub input: Option<Note>,
-    /// The input box's second line: a message, wrapped to fit. One with
-    /// tabs, the key list, is shown whole, its columns lined up.
-    pub info: Option<(Notice, String)>,
-}
-
-/// What's typed, as the input box shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Note {
-    pub text: String,
-    /// How many leading characters are drawn dimmed: a verb's name, a
-    /// placeholder.
-    pub typed: usize,
-}
-
-impl Note {
-    #[cfg(test)]
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            typed: 0,
-        }
-    }
+    /// The input box: its first line, an armed verb, `drop`, the tag
+    /// letters typed, text mode's query; and its second, a message,
+    /// wrapped to fit. One with tabs, the key list, is shown whole, its
+    /// columns lined up.
+    pub status: Status,
 }
 
 /// A translucent box over one line of a match in text mode.
@@ -334,12 +315,16 @@ impl Painter {
         let text = &self.input;
         let mut rows = Vec::new();
         let mut typed = 0.0;
-        if let Some(note) = &frame.input {
-            typed = text.width(&note.text);
-            rows.push(text.row(&note.text, note.typed));
+        if let Some((line, dimmed)) = frame.status.line() {
+            typed = text.width(&line);
+            rows.push(text.row(&line, dimmed));
         }
-        if let Some((notice, message)) = &frame.info {
-            let badge = self.info.badge(*notice);
+        if let Some(Message {
+            kind,
+            text: message,
+        }) = &frame.status.info
+        {
+            let badge = self.info.badge(*kind);
             // An icon the font doesn't have would be a box: none instead.
             let icon = Some(&badge.icon).filter(|i| !i.is_empty() && self.icons.has(i));
             let indent = icon.map_or(0.0, |i| self.icons.width(i) + text.style.size * 0.4);
@@ -934,6 +919,7 @@ pub fn to_argb8888(pixmap: &Pixmap, out: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::Notice;
 
     #[test]
     fn query_has_its_own_font_colours_and_box_above_the_marks() {
@@ -973,10 +959,6 @@ offset = [20, 20]
         )
         .unwrap();
         let mut pixmap = Pixmap::new(300, 160).unwrap();
-        let tag = Note {
-            text: "AB".into(),
-            typed: 1,
-        };
         assert!(painter.input.size("AB").0 > painter.tags.size("AB").0);
         let mut frame = Frame {
             highlights: vec![
@@ -989,7 +971,7 @@ offset = [20, 20]
                     current: true,
                 },
             ],
-            input: Some(tag),
+            status: Status::dimmed("A", "B"),
             ..Frame::default()
         };
         painter.paint(&mut pixmap, &frame);
@@ -1015,7 +997,7 @@ offset = [20, 20]
                 .any(|p| p.green() > 200 && p.blue() > 200 && p.red() < 30),
             "dimmed verb colour"
         );
-        frame.input = None;
+        frame.status = Status::default();
         painter.paint(&mut pixmap, &frame);
         assert_eq!(
             rgb(&pixmap, 24, 24),
@@ -1055,7 +1037,7 @@ offset = [20, 20]
                 Painter::new(&style, &Marks::new(&style), &input, &Info::default(), 1.0).unwrap();
             for text in ["a", "a longer query  1/2"] {
                 let frame = Frame {
-                    input: Some(Note::new(text)),
+                    status: Status::plain(text),
                     ..Frame::default()
                 };
                 painter.paint(&mut pixmap, &frame);
@@ -1244,8 +1226,10 @@ offset = [20, 20]
         assert!(pixmap.pixels().iter().all(|p| p.alpha() == 0), "no box");
 
         let frame = Frame {
-            input: Some(Note::new("abc")),
-            info: Some((Notice::NoMatch, "no tag starts with q".into())),
+            status: Status {
+                info: Some(Message::new(Notice::NoMatch, "no tag starts with q")),
+                ..Status::plain("abc")
+            },
             ..Frame::default()
         };
         painter.paint(&mut pixmap, &frame);
@@ -1262,10 +1246,10 @@ offset = [20, 20]
         // A long message on a narrow screen: two lines, inside the screen.
         let mut narrow = Pixmap::new(160, 200).unwrap();
         let long = Frame {
-            info: Some((
+            status: Status::saying(
                 Notice::NoMatch,
-                "no text on this monitor matches what you typed, so the key was dropped".into(),
-            )),
+                "no text on this monitor matches what you typed, so the key was dropped",
+            ),
             ..Frame::default()
         };
         painter.paint(&mut narrow, &long);
@@ -1294,7 +1278,7 @@ offset = [20, 20]
                 "the default icons need the Symbols Nerd Font installed"
             );
             let frame = Frame {
-                info: Some((notice, "words".into())),
+                status: Status::saying(notice, "words"),
                 ..Frame::default()
             };
             let mut pixmap = Pixmap::new(400, 100).unwrap();
@@ -1330,7 +1314,7 @@ offset = [20, 20]
 
         // No icon, or one the font lacks: the words start at the edge.
         let frame = Frame {
-            info: Some((Notice::NoMatch, "words".into())),
+            status: Status::saying(Notice::NoMatch, "words"),
             ..Frame::default()
         };
         for (font, icon) in [("Symbols Nerd Font", ""), ("sans-serif", "\u{f057}")] {
@@ -1355,7 +1339,7 @@ offset = [20, 20]
         let mut painter = boxed([10, 10]);
         let legend = "a\tx\nlonger\tx";
         let frame = Frame {
-            info: Some((Notice::Help, legend.into())),
+            status: Status::saying(Notice::Help, legend),
             ..Frame::default()
         };
         assert_eq!(
@@ -1495,8 +1479,7 @@ offset = [20, 20]
                 tag: Some(0),
             }],
             highlights: vec![],
-            input: None,
-            info: None,
+            status: Status::default(),
         };
         for (dot, (x, y)) in [
             (Point::new(60, 90), (90, 90)),
@@ -1625,8 +1608,7 @@ mod collision_tests {
             .collect(),
             dots: vec![],
             highlights: vec![],
-            input: None,
-            info: None,
+            status: Status::default(),
         };
         painter.paint(&mut pixmap, &frame);
         let arranged = painter.arrange(&frame, (300.0, 600.0));
