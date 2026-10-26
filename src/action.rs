@@ -82,6 +82,22 @@ impl Action {
         }
     }
 
+    /// What it does in a word or two, for the help key's legend.
+    pub const fn short(self) -> &'static str {
+        match self {
+            Self::Left => "left click",
+            Self::Right => "right click",
+            Self::Middle => "middle click",
+            Self::Double => "double click",
+            Self::Hover => "hover",
+            Self::Back => "back button",
+            Self::Forward => "forward button",
+            Self::ScrollUp => "scroll up",
+            Self::ScrollDown => "scroll down",
+            Self::Hold => "hold, then drop on the next",
+        }
+    }
+
     /// Whether it presses a button. A press on a text field focuses it, so
     /// the run ends there and typing goes to the app; a hover or a scroll
     /// doesn't.

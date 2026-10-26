@@ -6,8 +6,10 @@
 #     wayhint config --default > ~/.config/wayhint/config.toml
 #
 # `wayhint config` prints the settings in effect: your file merged with
-# these defaults. A misspelt setting is an error, shown before wayhint takes
-# the keyboard, so a typo can never leave you stuck.
+# these defaults. It also checks your file: a misspelt setting or a bad
+# value is an error that names it, and wayhint itself stops on it before
+# taking the keyboard, so a typo can never leave you stuck. `wayhint doctor`
+# checks the rest of the setup.
 #
 # Colours are "#RGB", "#RGBA", "#RRGGBB" or "#RRGGBBAA"; A is opacity.
 # Sizes and distances are logical px.
@@ -44,6 +46,7 @@
 # Commands of their own.
 # repeat = ""               # the last command again, on the same target; "" for none
 # text = "/"                # text mode: type text on screen, Enter acts on it; "" for none
+# help = "?"                # every key and what it does, in the info box; "" for none
 
 # Built in, never bindable: Esc leaves (from text mode too; while a hold is
 # down it lets go first), Backspace takes back the last key, Space acts at
@@ -69,6 +72,7 @@
 # padding = [2, 5]          # vertical, horizontal
 # position = "bottom-right" # on the target: center, top, bottom, left, right, or a corner as top-left
 # offset = [0, 0]           # px from there, right and down
+# fade = 100                # ms the tags take to fade in after a scan, and out as wayhint leaves; 0 for none
 
 [style.leader]
 # The line from a tag to the dot where it clicks: shown when an arrow moves
@@ -82,6 +86,49 @@
 # width = 1                 # the line's, in px
 # radius = 3                # the dot's, in px
 # outline_width = 2         # px, around the dot and across the line; 0 for none
+
+
+[input]
+# The box for what you type that isn't a tag letter: an armed verb's name,
+# "drop" while a hold is down, and text mode's query. Once called
+# [text.input], which a file may still say. Unset look fields follow
+# [style]; position and offset are on the screen here.
+# placeholder = "text"      # shown, dimmed, while nothing is typed in text mode
+# prefix = ""               # before the query, as "find: "
+# suffix = ""               # after the query, before the match count
+# font = "sans-serif:bold"
+# size = 13
+# text = "#ffffffff"
+# dimmed = "#ffffff66"      # the armed verb's name and the placeholder
+# background = "#1e1e2ef0"
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
+# offset = [0, -48]         # px from there, right and down
+# fade = 100                # ms to fade in as it appears and out as it goes; 0 for none
+
+
+[info]
+# A small box for what wayhint has to say while the tags are up. Each kind
+# of message can be turned off. Unset look fields follow [style].
+# scanning = true           # "scanning" while the windows are read, after the keybind and after each click
+# no_targets = true         # "no targets" while nothing on the monitor has a tag
+# no_match = true           # a key that matches no tag, or a character no text, is dropped and named here
+# duration = 1000           # ms a dropped key's message stays
+# font = "sans-serif:bold"
+# size = 13
+# text = "#ffffffff"
+# dimmed = "#ffffff66"
+# background = "#1e1e2ef0"
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
+# offset = [0, -80]         # px from there, right and down
+# fade = 100                # ms to fade in as it appears and out as it goes; 0 for none
 
 
 [text]
@@ -109,29 +156,12 @@
 # radius = 4
 # padding = [2, 5]          # vertical, horizontal
 
-[text.input]
-# The query you type, shown on the screen apart from the tags. Unset look
-# fields follow [style]; position and offset are on the screen here.
-# placeholder = "text"      # shown, dimmed, while nothing is typed
-# prefix = ""               # before the query, as "find: "
-# suffix = ""               # after the query, before the match count
-# font = "sans-serif:bold"
-# size = 13
-# text = "#ffffffff"
-# dimmed = "#ffffff66"      # the armed verb's name and the placeholder
-# background = "#1e1e2ef0"
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
-# offset = [0, -48]         # px from there, right and down
-
 
 [pointer]
 # after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
 # nudge = 10                # px one arrow press moves a click; held, it goes on, faster
 # scroll = 5                # wheel notches one scroll_up or scroll_down turns
+# settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
 
 
 [pixels]
