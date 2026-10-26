@@ -19,6 +19,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     action::{Act, Action},
+    config::TextCursor,
     desktop,
     geometry::{Point, Rect},
     keys::KeyCode,
@@ -35,7 +36,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chosen {
     /// The text's object, its box and where the match shows: clicked at the
-    /// middle of its first visible line, and re-checked as a tag's target.
+    /// configured cursor position, and re-checked as a tag's target.
     /// A terminal's text has no object: its window is re-checked, as for a
     /// tag found in pixels.
     pub target: Target,
@@ -55,12 +56,13 @@ pub fn search(
     selector: &Selector,
     source: &mut dyn Source,
     input: &Input,
+    cursor: TextCursor,
 ) -> Result<Option<Pick>> {
     if let Err(e) = overlay.start_typing() {
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
         return Ok(None);
     }
-    let result = keys(overlay, shown, selector, source, input);
+    let result = keys(overlay, shown, selector, source, input, cursor);
     overlay.stop_typing();
     result
 }
@@ -72,6 +74,7 @@ fn keys(
     selector: &Selector,
     source: &mut dyn Source,
     input: &Input,
+    cursor: TextCursor,
 ) -> Result<Option<Pick>> {
     let screen = overlay.monitor().rect;
     let verb = selector.armed().map(Action::name);
@@ -132,7 +135,7 @@ fn keys(
         }
         match key.code {
             KeyCode::ENTER => {
-                if let Some(chosen) = choose(&search, shown, selector.act(mods)) {
+                if let Some(chosen) = choose(&search, shown, selector.act(mods), cursor) {
                     return Ok(Some(Pick::Text(Box::new(chosen))));
                 }
             }
@@ -160,10 +163,21 @@ fn find(search: &mut Search, shown: &Snapshot, source: &mut dyn Source) {
 
 /// The current match as a command: the text's object as the target, and
 /// the text to read again.
-fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
+fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Option<Chosen> {
     let found = search.current()?;
     let text = &search.texts()[found.span.text];
-    let part = found.parts[0];
+    let part = match cursor {
+        TextCursor::Start | TextCursor::Center => found.parts[0],
+        TextCursor::End => *found.parts.last()?,
+    };
+    let hit = Point::new(
+        match cursor {
+            TextCursor::Start => part.x,
+            TextCursor::Center => part.center().x,
+            TextCursor::End => part.right() - 1,
+        },
+        part.center().y,
+    );
     let (start, end) = (found.span.start, found.span.end);
     let check = Check {
         place: text.place.clone(),
@@ -193,7 +207,7 @@ fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
             window: text.window,
             rect: text.rect,
             visible: part,
-            hit: part.center(),
+            hit,
             role,
             name: text.name.clone(),
             editable,
@@ -455,12 +469,100 @@ mod tests {
             mods: crate::action::Mods::NONE,
             nudge: Point::default(),
         };
-        let chosen = choose(&found, &shown, act).expect("a match");
-        assert_eq!(chosen.target.object, None, "nothing to ask: a pixel target");
-        assert_eq!(chosen.target.role, "terminal");
-        assert_eq!(chosen.target.hit, Point::new(160, 10));
-        let check = chosen.check.expect("read again before acting");
-        assert_eq!((check.start, check.end, check.text.as_str()), (5, 7, "me"));
-        assert_eq!(check.place, Place::Cells(cells));
+        for (cursor, x) in [
+            (TextCursor::Start, 150),
+            (TextCursor::Center, 160),
+            (TextCursor::End, 169),
+        ] {
+            let chosen = choose(&found, &shown, act, cursor).expect("a match");
+            assert_eq!(chosen.target.object, None, "nothing to ask: a pixel target");
+            assert_eq!(chosen.target.role, "terminal");
+            assert_eq!(chosen.target.hit, Point::new(x, 10));
+            assert!(chosen.target.visible.contains(chosen.target.hit));
+            let check = chosen.check.expect("read again before acting");
+            assert_eq!((check.start, check.end, check.text.as_str()), (5, 7, "me"));
+            assert_eq!(check.place, Place::Cells(cells.clone()));
+        }
+    }
+
+    #[test]
+    fn text_cursor_uses_visible_line_edges_and_keeps_the_recheck() {
+        use crate::{desktop::tree::ObjectId, snapshot::TextSource};
+
+        let object = ObjectId {
+            bus: ":1.42".into(),
+            path: "/text".into(),
+        };
+        let area = Rect::new(-90, 0, 60, 40);
+        let mut shown = Snapshot::build(1, 0, std::iter::empty());
+        shown.texts.push(TextSource {
+            object: object.clone(),
+            window: 0,
+            role: "text".into(),
+            editable: true,
+            named: false,
+            area,
+            clips: vec![object.clone()],
+            button: None,
+        });
+        let mut found = Search::new(vec![Text {
+            place: Place::Object(0),
+            window: 0,
+            name: "editor".into(),
+            rect: Rect::new(-100, 0, 80, 40),
+            area,
+            start: 0,
+            content: "save as".into(),
+        }]);
+        "save as".chars().for_each(|c| found.push(c));
+        let wanted = found.wanted();
+        found.located(
+            &wanted,
+            vec![vec![
+                Rect::new(-100, 0, 40, 20),
+                Rect::new(-100, 20, 80, 20),
+            ]],
+        );
+        found.update(&|_, _| true);
+        let act = Act {
+            action: Action::Right,
+            mods: crate::action::Mods {
+                shift: true,
+                ..crate::action::Mods::NONE
+            },
+            nudge: Point::new(3, -2),
+        };
+        for (cursor, hit, visible) in [
+            (
+                TextCursor::Start,
+                Point::new(-90, 10),
+                Rect::new(-90, 0, 30, 20),
+            ),
+            (
+                TextCursor::Center,
+                Point::new(-75, 10),
+                Rect::new(-90, 0, 30, 20),
+            ),
+            (
+                TextCursor::End,
+                Point::new(-31, 30),
+                Rect::new(-90, 20, 60, 20),
+            ),
+        ] {
+            let chosen = choose(&found, &shown, act, cursor).expect("a wrapped match");
+            assert_eq!(chosen.target.hit, hit);
+            assert_eq!(chosen.target.visible, visible);
+            assert!(visible.contains(hit));
+            assert_eq!(chosen.target.object, Some(object.clone()));
+            assert_eq!(chosen.target.clips, std::slice::from_ref(&object));
+            assert!(chosen.target.editable);
+            assert_eq!(chosen.act, act, "keep the verb, modifiers and nudge");
+            let check = chosen.check.expect("read the whole match again");
+            assert_eq!(
+                (check.start, check.end, check.text.as_str()),
+                (0, 7, "save as")
+            );
+            assert_eq!(check.place, Place::Object(0));
+        }
     }
 }

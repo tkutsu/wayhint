@@ -160,6 +160,11 @@ match's first line, and `Shift`, `Ctrl` or `Alt` held on `Enter` hold that
 key through the click. `Backspace` with nothing typed goes back to the
 tags.
 
+`[text] cursor` picks where in the match `Enter` acts. The default,
+`"center"`, is the middle of the first visible line. `"start"` is that
+line's left edge, and `"end"` the rightmost pixel of the last visible
+line, each halfway down its line and inside the match's box.
+
 A lower-case query ignores case; one capital letter makes it exact.
 Accents are ignored both ways (`cafe` finds "café", `α` finds "άλλο"). A
 space matches any run of spaces or a line break, and matches can start
