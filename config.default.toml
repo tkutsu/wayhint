@@ -27,25 +27,27 @@
 # The verbs. Type one anywhere before a tag's last letter to do it there
 # instead of a left click, before Space to do it at the pointer, or twice to
 # do it again where the last command was (PageDown PageDown scrolls the same
-# pane again). A key is one character, Shift included ("_"), or a name:
+# pane again). In text mode, type it before any text; a named key works
+# there any time, and a key that types a letter or digit is always text.
+# A key is one character, Shift included ("_"), or a name:
 # PageUp, PageDown, Home, End, Delete.
 # "" makes a verb what a bare tag does; exactly one verb is "".
 # A key a verb takes leaves the alphabet. A default key that is one of your
 # tag letters, or that you gave another command, is simply left unbound.
 # left = ""                 # left click: a bare tag does this
-# right = "r"               # right click
-# middle = "m"              # middle click
-# double = "t"              # double click
-# hover = "o"               # move there and stay, for tooltips
-# back = "b"                # the mouse's back button
-# forward = "n"             # the mouse's forward button
+# right = ","               # right click
+# middle = "/"              # middle click
+# double = "."              # double click
+# hover = "'"               # move there and stay, for tooltips
+# back = "Home"             # the mouse's back button
+# forward = "End"           # the mouse's forward button
 # scroll_up = "PageUp"      # the wheel up, [pointer] scroll notches
 # scroll_down = "PageDown"  # the wheel down, [pointer] scroll notches
-# hold = ","                # press and keep down; the next tag or Space lets go there (a drag), the close key lets go in place
+# hold = ";"                # press and keep down; the next tag or Space lets go there (a drag), the close key lets go in place
 
 # Commands of their own.
 # repeat = ""               # the last command again, on the same target; "" for none
-# text = "/"                # text mode: type text on screen, Enter acts on it; "" for none
+# text = "q"                # text mode: type text on screen, Enter acts on it; "" for none
 # help = "?"                # every key and what it does, in the info box; "" for none
 # close = "Esc"             # leave wayhint, from tags or text mode; while holding, release in place first
 # The close key takes its letter out of the alphabet. It can be a character
@@ -154,8 +156,9 @@
 [text]
 # Text mode: typing finds text on screen from the start of a word, Enter
 # acts on the current match, Tab and the arrows move between matches.
-# Targets with no text to type keep a tag. Backspace with nothing typed
-# goes back to the tags; the close key leaves wayhint.
+# Targets with no text to type keep a tag. A verb goes first, before the
+# text. Backspace with nothing typed takes back that verb, then goes back
+# to the tags; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
