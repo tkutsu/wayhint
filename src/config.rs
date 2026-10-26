@@ -759,6 +759,7 @@ impl Verbs {
     /// Every bound key and what it does, one `key\twhat` line each, for
     /// the help key's legend: the verbs, the commands, then the keys
     /// built in.
+    #[allow(dead_code)] // the help key isn't wired yet
     pub fn legend(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!("tag\t{}", self.default.short()));

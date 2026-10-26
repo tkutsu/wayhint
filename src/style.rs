@@ -559,6 +559,7 @@ impl Input {
 /// What wayhint has to say, under what's typed in the input box: each
 /// kind has its own icon and colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // nothing sends a message yet
 pub enum Notice {
     /// The windows are being read, and it's taking a while.
     Scanning,

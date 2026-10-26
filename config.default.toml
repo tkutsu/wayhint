@@ -8,8 +8,7 @@
 # `wayhint config` prints the settings in effect: your file merged with
 # these defaults. It also checks your file: a misspelt setting or a bad
 # value is an error that names it, and wayhint itself stops on it before
-# taking the keyboard, so a typo can never leave you stuck. `wayhint doctor`
-# checks the rest of the setup.
+# taking the keyboard, so a typo can never leave you stuck.
 #
 # Colours are "#RGB", "#RGBA", "#RRGGBB" or "#RRGGBBAA"; A is opacity.
 # Sizes and distances are logical px.

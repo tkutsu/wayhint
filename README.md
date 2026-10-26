@@ -1,33 +1,50 @@
 # wayhint
 
+[![CI](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml/badge.svg)](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 Keyboard hints for everything clickable on a Wayland desktop.
 
 Press a keybind and every button, link, tab and field in the windows on
 your screen gets a short letter tag. Type a tag and wayhint clicks that
 control, then tags the windows again for the next one. `Esc` ends it.
 
+It's vimium's link hints for the whole desktop, read from the
+accessibility tree that screen readers use, with pixel detection for the
+windows that don't have one.
+
 Status: early development, Hyprland only. It works daily on the author's
 setup (one monitor at scale 1) and has not been packaged yet.
+
+- [What it offers](#what-it-offers)
+- [Install](#install)
+- [Getting tags in every app](#getting-tags-in-every-app)
+- [Use](#use)
+- [Configuration](#configuration)
+- [Other compositors](#other-compositors)
+- [Roadmap](#roadmap)
+- [Limitations](#limitations)
 
 ## What it offers
 
 ### Tags on real controls
 
-wayhint reads the accessibility tree (AT-SPI), the one screen readers use,
-so tags sit on the controls apps report, not on boxes guessed from a
-screenshot. Every window on the focused monitor gets tags, not only the
-focused one. A control under another window gets none. Bars, launchers and
-other layer-shell surfaces (a Quickshell shell, say) get tags, and so do
-their popups and the menus apps open while wayhint runs.
+wayhint reads the accessibility tree (AT-SPI), so tags sit on the controls
+apps report, not on boxes guessed from a screenshot. Every window on the
+focused monitor gets tags, not only the focused one. A control under
+another window gets none. Bars, launchers and other layer-shell surfaces
+(a Quickshell shell, say) get tags, and so do their popups and the menus
+apps open while wayhint runs.
 
 ### Windows with no tree still get tags
 
 kitty, canvases, games and many Electron apps get tags found in their
 pixels: Hyprland renders the window alone into a buffer and wayhint looks
-for shapes that read as controls and words. A paragraph gets one tag,
-which opens into a tag per line. A terminal gets a single tag that focuses
-it, and a spreadsheet or text document (LibreOffice, or a Google Sheets
-grid in a browser) gets a single tag that puts the cursor in it.
+for shapes that read as controls and words. These tags have teal letters,
+since they are guesses. A paragraph gets one tag, which opens into a tag
+per line. A terminal gets a single tag that focuses it, and a spreadsheet
+or text document (LibreOffice, or a Google Sheets grid in a browser) gets
+a single tag that puts the cursor in it.
 
 ### More than a left click
 
@@ -67,36 +84,74 @@ Keys are read with the keymap your compositor already uses and matched by
 position, so the tags stay the same when you switch to a Greek or Cyrillic
 layout, and text mode searches in whatever layout is active.
 
-## Requirements
+## Install
 
-- Hyprland, with the protocols `zwlr_layer_shell_v1` and
-  `zwlr_virtual_pointer_v1`. `zwp_input_method_manager_v2` is used when
-  present. Without it, or when fcitx or IBus holds the input method,
-  wayhint takes keyboard focus instead, and open menus close.
-  `zwp_virtual_keyboard_v1` is needed for modifier clicks.
-- libxkbcommon and fontconfig (`fc-match`).
-- The AT-SPI bus (`at-spi-bus-launcher`, from `at-spi2-core`).
-- Apps on that bus, for exact tags. GTK and Qt apps, Firefox and Dolphin
-  were checked. Chromium and Electron apps join it with
-  `--force-renderer-accessibility`; on Arch, put that line in
-  `~/.config/chromium-flags.conf` or `~/.config/electron-flags.conf`.
+You need:
+
+- Hyprland. It must offer `zwlr_layer_shell_v1` and
+  `zwlr_virtual_pointer_v1`, which it does by default.
+  `zwp_input_method_manager_v2` is used when present. Without it, or when
+  fcitx or IBus holds the input method, wayhint takes keyboard focus
+  instead, and open menus close. `zwp_virtual_keyboard_v1` is needed for
+  modifier clicks.
+- Rust 1.88 or newer, libxkbcommon, and fontconfig (`fc-match`).
+- The AT-SPI bus, from `at-spi2-core`. Most desktops already run it.
 - Optional: Tesseract, for text mode in windows with no tree:
   `pacman -S tesseract tesseract-data-eng`.
 
-## Build
+Build and install it:
 
-```fish
-cargo build --release
+```sh
+cargo install --locked --git https://github.com/tkutsu/wayhint
 ```
+
+or from a clone, `cargo build --release`, which leaves the binary in
+`target/release/wayhint`.
 
 Then bind it to a key. In `hyprland.conf`:
 
 ```
-bind = SUPER, slash, exec, wayhint
+bind = SUPER, W, exec, wayhint
+bind = SUPER CTRL, W, exec, wayhint --text
+```
+
+or in a Lua config:
+
+```lua
+hl.bind("SUPER + W", hl.dsp.exec_cmd("wayhint"))
+hl.bind("SUPER + CTRL + W", hl.dsp.exec_cmd("wayhint --text"))
 ```
 
 Pressing the keybind again closes wayhint. On an empty workspace it keeps
 listening for controls to appear.
+
+## Getting tags in every app
+
+An app gets exact tags only if it puts its controls on the accessibility
+bus. Many do out of the box; some need a switch. `wayhint dump --surfaces`
+lists every window on the monitor with its tag count, which shows which
+apps are missing.
+
+| App | What it needs |
+|---|---|
+| GTK 4 apps | Nothing |
+| GTK 3 apps, Firefox | Usually nothing. If they get no tags, turn on GNOME's accessibility setting: `gsettings set org.gnome.desktop.interface toolkit-accessibility true` |
+| Qt apps (Dolphin, KDE apps, Quickshell) | Nothing on the author's setup. If one gets no tags, start it with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` set |
+| Chromium, Chrome, Electron apps | The flag `--force-renderer-accessibility`. On Arch, put it on its own line in `~/.config/chromium-flags.conf` or `~/.config/electron-flags.conf`; an app that bundles its own Electron takes it on its command line |
+| kitty | Remote control, for text mode (below). Its panes get pixel tags either way |
+| Anything else with no tree | Pixel tags, and Tesseract for text mode |
+
+An app joins the bus when it starts. Apps started before the bus, or
+before you turned a switch on, need reopening; wayhint says so when it
+finds an app that started before the bus.
+
+kitty has no accessibility tree, so text mode asks kitty what its panes
+show. That needs a socket, in `kitty.conf`:
+
+```conf
+allow_remote_control socket-only
+listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
+```
 
 ## Use
 
@@ -163,7 +218,9 @@ tags.
 `[text] cursor` picks where in the match `Enter` acts. The default,
 `"center"`, is the middle of the first visible line. `"start"` is that
 line's left edge, and `"end"` the rightmost pixel of the last visible
-line, each halfway down its line and inside the match's box.
+line, each halfway down its line and inside the match's box. With
+`pick_unique = true`, a query of 3 or more characters that leaves one
+match acts on it without `Enter`.
 
 A lower-case query ignores case; one capital letter makes it exact.
 Accents are ignored both ways (`cafe` finds "café", `α` finds "άλλο"). A
@@ -173,21 +230,13 @@ inside words, so `con` finds "falcon".
 Before the click wayhint reads the text at that spot again and skips the
 click if it changed.
 
-kitty has no accessibility tree, so wayhint asks kitty what its panes
-show. That needs a socket, in `kitty.conf`:
-
-```conf
-allow_remote_control socket-only
-listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
-```
-
-Other windows with no tree are read by Tesseract when text mode starts.
-On a monitor with a scale under 2, the picture is doubled first, since
-Tesseract misreads small interface text at its real size. Reading took
-about 0.5 s for a terminal and 1.5 s for a full-screen spreadsheet on a
-Ryzen 7 7700; the query box shows `text ...` until it's done, and keys
-typed meanwhile wait. For Greek too, install `tesseract-data-ell` and set
-`ocr = "eng+ell"` under `[text]`.
+Windows with no tree, other than kitty, are read by Tesseract when text
+mode starts. On a monitor with a scale under 2, the picture is doubled
+first, since Tesseract misreads small interface text at its real size.
+Reading took about 0.5 s for a terminal and 1.5 s for a full-screen
+spreadsheet on a Ryzen 7 7700; the query box shows `text ...` until it's
+done, and keys typed meanwhile wait. For Greek too, install
+`tesseract-data-ell` and set `ocr = "eng+ell"` under `[text]`.
 
 ### Windows tagged from their pixels
 
@@ -222,15 +271,11 @@ Flags for other keybinds:
 | `--text` | Starts in text mode, with no tags first |
 | `--static` | Scans once, keeps those tags, and exits after one action or a workspace switch |
 
-```
-bind = SUPER CTRL, W, exec, wayhint --text
-```
-
 ### Warnings and debugging
 
 When a run started from a keybind fails or warns, the reason shows as a
-desktop notification (Hyprland's own notification if no server answers).
-From a terminal it's printed.
+desktop notification (Hyprland's own notification if no server answers),
+one per app. From a terminal it's printed.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON;
 `--explain` adds every control it left out and why, `--surfaces` lists
@@ -268,8 +313,9 @@ repeat = "r"            # no key unless you set one
 font = "Inter:bold"     # a fontconfig pattern, as fc-match takes it
 background = "#1e1e2ee0"
 position = "top-left"   # where a tag sits on its control
+case = "lower"          # the tags' letters; the keys stay the same
 
-[text.input]
+[input]
 placeholder = "find"
 position = "top"
 ```
@@ -278,18 +324,21 @@ The sections:
 
 | Section | Sets |
 |---|---|
-| `[keys]` | Tag letters, verb keys, repeat and text keys, aliases |
-| `[style]` | The tags: font, size, colours, border, radius, padding, position on the control, offset |
+| `[keys]` | Tag letters, verb keys, repeat, text and help keys, aliases |
+| `[style]` | The tags: font, size, colours, border, radius, padding, letter case, position on the control, offset |
 | `[style.leader]` | The line and dot from a moved tag or a nudged click to where it lands |
-| `[text]` | OCR languages |
+| `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
+| `[input]` | The box for what you type: look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
+| `[info]` | The messages under the input box: which show, for how long, their icons and colours |
+| `[text]` | Where `Enter` acts on a match, `pick_unique`, OCR languages |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
-| `[text.input]` | The query box: look, placeholder, prefix and suffix, screen position and offset |
-| `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches |
+| `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
 | `[pixels]` | The pixel detector (`full`, `fast` or `off`) and which programs count as terminals |
 | `[scan]` | Refresh interval, and how close hints must be to share one tag |
 
 Colours are `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`, where A is opacity.
-Sizes are logical pixels.
+Sizes are logical pixels. The `[info]` icons are Nerd Font glyphs, drawn
+with `Symbols Nerd Font` by default; an icon the font lacks is left out.
 
 Keys are written as your keyboard's first layout prints them, which must
 be a Latin one (US, Colemak, AZERTY and so on), and matched by position. A
@@ -306,11 +355,43 @@ nothing clickable instead of 33%.
 When tags overlap, one moves into nearby clear space and gets a line back
 to its control. If no clear slot fits within 256 px, it stays put.
 
+## Other compositors
+
+Only Hyprland, for now. Drawing the tags, reading keys and clicking go
+through Wayland protocols that most wlroots-based compositors offer too.
+Three things come from Hyprland itself:
+
+- Where each window, layer and monitor is. On Wayland, AT-SPI gives a
+  control's position inside its window but not where the window is on
+  screen, so wayhint asks Hyprland's IPC socket.
+- Workspace switches, from Hyprland's event socket, so the tags follow.
+- Pictures of single windows for pixel tags and OCR, through
+  `hyprland-toplevel-export-v1`.
+
+All three live in `src/desktop/hyprland.rs` and `src/desktop/capture.rs`.
+A port to sway or niri would answer the same questions from that
+compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
+
+## Roadmap
+
+These settings are read and checked, but nothing acts on them yet:
+
+- `[info]`: the "scanning", "no targets" and "no match" messages, and
+  dropping a key that matches no tag.
+- `[input] hints`: typed tag letters moving from the tags to the input
+  box. For now they show dimmed on the tags.
+- `[keys] help`: the key list in the info box.
+- `[pointer] settle`: the wait after a click is still a fixed 150 ms.
+
+Also planned: tags drawn sharp on scaled monitors, and `wayhint doctor`,
+which checks the setup (the protocols, the accessibility bus, Tesseract,
+kitty's socket) and says what's missing.
+
 ## Limitations
 
 ### Setup
 
-- Hyprland only. Other compositors aren't supported.
+- Hyprland only (see [Other compositors](#other-compositors)).
 - One monitor at scale 1 is the tested setup. Only the focused monitor
   gets tags. On a scaled monitor the tags are drawn at scale 1 and look
   blurry. Several monitors and rotated ones are untested.

@@ -83,6 +83,7 @@ impl Action {
     }
 
     /// What it does in a word or two, for the help key's legend.
+    #[allow(dead_code)] // the help key isn't wired yet
     pub const fn short(self) -> &'static str {
         match self {
             Self::Left => "left click",

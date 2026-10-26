@@ -14,8 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # wayhint links libxkbcommon; the key tests read xkb's layout data.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev xkb-data
+      # wayhint links libxkbcommon; the key tests read xkb's layout data, and
+      # the drawing tests find fonts through fc-match.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev xkb-data fontconfig fonts-dejavu-core
+      # The info icons' default font.
+      - run: |
+          mkdir -p ~/.local/share/fonts
+          curl -fsSL https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/NerdFontsSymbolsOnly.tar.xz | tar -xJ -C ~/.local/share/fonts
+          fc-cache -f
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
