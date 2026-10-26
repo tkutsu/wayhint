@@ -51,7 +51,7 @@ pub use self::{
         window_by_address,
     },
     kitty::is_kitty,
-    notify::warn,
+    notify::{log, warn},
     recheck::Verdict,
     surfaces::Stack,
 };
@@ -243,7 +243,8 @@ impl Desktop {
     /// keeps what deserves a tag: on `monitor`, and not under a surface
     /// that may be above its own. A client that can't be read (not on the
     /// accessibility bus, or no frame clearly its own) is tagged from its
-    /// pixels with `pixels`, or gets no tags when that's `None`; a layer or
+    /// pixels with `pixels`, or gets no tags when that's `None`. Terminals
+    /// get one focus tag when `terminal_hint` is on, independently. A layer or
     /// popup that can't be read gets none, since Hyprland's window export
     /// only takes pictures of clients. kitty's surfaces left without tags
     /// (its windows with no pixels, its dropdown layer) are kept untagged,
@@ -254,6 +255,7 @@ impl Desktop {
         stack: &Stack,
         monitor: &Monitor,
         pixels: Option<Detector>,
+        terminal_hint: bool,
         terminals: &[String],
     ) -> (Snapshot, Vec<Unread>) {
         // A layer with no frame only covers.
@@ -284,7 +286,12 @@ impl Desktop {
             })
             .collect();
         for (window, read) in readable.into_iter().zip(reads) {
-            let detector = pixels.filter(|_| window.kind == Kind::Client);
+            let terminal = is_terminal(window, terminals);
+            if terminal && !terminal_hint {
+                continue;
+            }
+            let detector = hint_detector(pixels, terminal_hint, terminal)
+                .filter(|_| window.kind == Kind::Client);
             match (read, detector) {
                 (Ok((tree, stats)), _) => {
                     let filtered = filter::filter(&tree);
@@ -523,7 +530,7 @@ impl Desktop {
 
     /// The text of every object in `snapshot.texts` that shows some, and
     /// of every window read from pixels, for text mode: kitty's panes from
-    /// kitty, the rest by OCR in `ocr`'s languages, unless that's `None`.
+    /// kitty, the rest by English OCR when `ocr` is `Some("eng")`.
     /// OCR starts first: Tesseract reads while the apps are asked.
     pub fn read_text(&mut self, snapshot: &Snapshot, ocr: Option<&str>) -> Reading {
         let mut others = Vec::new();
@@ -891,6 +898,19 @@ fn is_terminal(window: &Window, terminals: &[String]) -> bool {
     })
 }
 
+/// Terminal focus needs only a clear patch; general pixel tags use the detector setting.
+fn hint_detector(
+    pixels: Option<Detector>,
+    terminal_hint: bool,
+    terminal: bool,
+) -> Option<Detector> {
+    if terminal {
+        terminal_hint.then_some(pixels.unwrap_or_default())
+    } else {
+        pixels
+    }
+}
+
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
 pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) -> Result<Snapshot> {
     let (found, (_, scale), stats) = look(&mut None, window, detector, terminals)?;
@@ -970,6 +990,46 @@ mod tests {
         let name = executable.file_name().unwrap().to_str().unwrap().to_owned();
         assert!(is_terminal(&window, &[name]));
         assert!(!is_terminal(&window, &["different-terminal".into()]));
+    }
+
+    #[test]
+    fn terminal_hint_routing_is_independent_of_general_pixel_tags() {
+        for pixels in [None, Some(Detector::Fast), Some(Detector::Full)] {
+            assert!(hint_detector(pixels, true, true).is_some());
+            assert_eq!(hint_detector(pixels, false, true), None);
+            for terminal_hint in [true, false] {
+                assert_eq!(hint_detector(pixels, terminal_hint, false), pixels);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a live desktop and WAYHINT_TEST_KITTY_ADDRESS"]
+    fn live_terminal_hint_works_with_general_pixels_off() {
+        let address = std::env::var("WAYHINT_TEST_KITTY_ADDRESS").unwrap();
+        let window = window_by_address(&address).unwrap().unwrap();
+        assert!(is_kitty(&window));
+        let monitor = monitors()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == window.monitor)
+            .unwrap();
+        let stack = stack(vec![window]);
+        let mut desktop = Desktop::connect().unwrap();
+        for enabled in [true, false] {
+            let (snapshot, unread) =
+                desktop.scan(&stack, &monitor, None, enabled, &["kitty".into()]);
+            assert!(
+                unread.is_empty(),
+                "{:?}",
+                unread
+                    .iter()
+                    .map(|u| u.error.to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(snapshot.targets.len(), usize::from(enabled));
+            assert!(snapshot.windows.iter().any(|s| is_kitty(&s.window)));
+        }
     }
 
     #[test]
