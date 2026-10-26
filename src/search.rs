@@ -9,15 +9,22 @@
 //!                 close key: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
 //!                 one match left (with [text] pick_unique): as Enter
+//!                 a whole tag typed (with [text] hints): its target, as a tag
 //!                 a character that matches nothing: dropped, and named
 //! ```
+//!
+//! With `[text] hints`, the targets typing can't find keep a tag: those
+//! whose text wasn't read (an icon, a window read from pixels) or has no
+//! word. Their labels are ones no word on screen starts with, so a whole
+//! label is never a query, and what's typed is both until one of them
+//! wins ([`Hints`]).
 //!
 //! The text is read once, as text mode starts. Where a match is, the app is
 //! asked only for matches it wasn't asked about before, and only once the
 //! keys typed so far are all in. Nothing is scanned again while text mode
 //! is up; the match is checked again before acting on it (see `run.rs`).
 
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use anyhow::{Result, bail};
 
@@ -27,9 +34,9 @@ use crate::{
     desktop,
     geometry::Point,
     keys::KeyCode,
-    overlay::{Event, Frame, Highlight, Note, Overlay},
-    pick::{Pick, Source},
-    selection::Selector,
+    overlay::{Event, Frame, Highlight, Note, Overlay, Tag},
+    pick::{self, Pick, Source},
+    selection::{Selector, free_labels},
     snapshot::{Snapshot, Target},
     style::{Input, Notice},
     text::{Check, Place, Search},
@@ -54,6 +61,89 @@ pub struct Chosen {
     pub check: Option<Check>,
 }
 
+/// Text mode's tags: each tagged target, by its index in the snapshot, and
+/// its label as the letters that type it, lower case.
+struct Hints(Vec<(usize, String)>);
+
+impl Hints {
+    /// Tags for `shown`'s targets that no text of `search` is on, in
+    /// labels no word of it starts with. None without `[text] hints`.
+    fn new(search: &Search, shown: &Snapshot, config: &Config) -> Self {
+        if !config.text_hints {
+            return Self(Vec::new());
+        }
+        // A text with no word (an icon's glyph) can't be typed.
+        let found: HashSet<_> = search
+            .texts()
+            .iter()
+            .filter(|text| text.content.chars().any(char::is_alphanumeric))
+            .filter_map(|text| match text.place {
+                Place::Object(index) => shown.texts[index].owner.as_ref(),
+                Place::Cells(_) | Place::Glyphs(_) => None,
+            })
+            .collect();
+        let untyped: Vec<usize> = (0..shown.targets.len())
+            .filter(|&i| {
+                shown.targets[i]
+                    .object
+                    .as_ref()
+                    .is_none_or(|o| !found.contains(o))
+            })
+            .collect();
+        let letters = config.alphabet.letters();
+        let spell = |label: &[usize]| -> String {
+            label
+                .iter()
+                .flat_map(|&i| letters[i].label.to_lowercase())
+                .collect()
+        };
+        let free = |label: &[usize]| !search.starts_a_word(&spell(label));
+        let labels = free_labels(untyped.len(), letters.len(), &free);
+        Self(
+            untyped
+                .into_iter()
+                .zip(labels.iter().map(|l| spell(l)))
+                .collect(),
+        )
+    }
+
+    /// The target whose whole label is `typed`.
+    fn picked(&self, typed: &str) -> Option<usize> {
+        let typed = typed.to_lowercase();
+        self.0
+            .iter()
+            .find(|(_, label)| *label == typed)
+            .map(|t| t.0)
+    }
+
+    /// Whether a label goes on from `typed`.
+    fn open(&self, typed: &str) -> bool {
+        let typed = typed.to_lowercase();
+        self.0.iter().any(|(_, label)| label.starts_with(&typed))
+    }
+
+    /// The tags still open after `typed`, drawn as `pick` draws its own:
+    /// with `[input] hints`, only the letters left to type; without, the
+    /// whole label with what's typed dimmed.
+    fn tags(&self, typed: &str, shown: &Snapshot, config: &Config) -> Vec<Tag> {
+        let typed = typed.to_lowercase();
+        let done = typed.chars().count();
+        let (skip, dimmed) = if config.input.hints {
+            (done, 0)
+        } else {
+            (0, done)
+        };
+        self.0
+            .iter()
+            .filter(|(_, label)| label.starts_with(&typed))
+            .map(|(index, label)| {
+                let text = label.chars().skip(skip).map(|c| config.style.case.of(c));
+                pick::tag(&shown.targets[*index], text.collect(), dimmed, config)
+            })
+            .collect()
+    }
+}
+
 /// Text mode, from the text key until a match is chosen or the close key leaves
 /// (`Some` pick), or until Backspace with nothing typed goes back to the
 /// tags (`None`).
@@ -75,6 +165,7 @@ pub fn search(
 }
 
 /// Text mode's keys, with the overlay typing.
+#[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 fn keys(
     overlay: &mut Overlay,
     shown: &Snapshot,
@@ -87,7 +178,12 @@ fn keys(
     // The tags go before the text is read: none is left to be typed.
     overlay.update(&frame(None, false, verb, input, None))?;
     let mut search = Search::new(source.read_text(shown));
-    overlay.update(&frame(Some(&search), false, verb, input, None))?;
+    let hints = Hints::new(&search, shown, config);
+    let draw = |search: &Search, stale, missed: Option<&str>| Frame {
+        tags: hints.tags(search.query(), shown, config),
+        ..frame(Some(search), stale, verb, input, missed)
+    };
+    overlay.update(&draw(&search, false, None))?;
     // The query changed since the matches were found.
     let mut stale = false;
     // What was typed that matched nothing, and until when it's named.
@@ -95,7 +191,7 @@ fn keys(
     loop {
         let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
             missed = None;
-            overlay.update(&frame(Some(&search), stale, verb, input, None))?;
+            overlay.update(&draw(&search, stale, None))?;
             continue;
         };
         let (key, mods, typed) = match event {
@@ -147,6 +243,13 @@ fn keys(
             },
         };
         stale |= edit;
+        if edit
+            && key.code != KeyCode::BACKSPACE
+            && let Some(index) = hints.picked(search.query())
+        {
+            let act = selector.act(mods);
+            return Ok(Some(Pick::Target { index, act }));
+        }
         // Every key typed so far first: fast typing asks the apps once.
         // A key that moves through the matches needs them found.
         if stale && (!edit || !overlay.has_events()?) {
@@ -154,17 +257,18 @@ fn keys(
             stale = false;
             let dropped = config.info.no_match
                 && key.code != KeyCode::BACKSPACE
-                && drop_unmatched(&mut search, shown, source).is_some_and(|tried| {
+                && drop_unmatched(&mut search, shown, source, &hints).is_some_and(|tried| {
                     let until = Instant::now() + config.info.duration;
                     missed = Some((format!("no text has \"{tried}\""), until));
                     true
                 });
             // Typed into one match, not backed into it or left there by
-            // a miss.
+            // a miss, and no tag goes on from it.
             if config.pick_unique
                 && !dropped
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
+                && !hints.open(search.query())
                 && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
             {
                 return Ok(Some(Pick::Text(Box::new(chosen))));
@@ -184,20 +288,22 @@ fn keys(
             _ => {}
         }
         let said = missed.as_ref().map(|m| m.0.as_str());
-        overlay.update(&frame(Some(&search), stale, verb, input, said))?;
+        overlay.update(&draw(&search, stale, said))?;
     }
 }
 
 /// Takes back the characters at the query's end that leave nothing to
-/// match, as typed with the keys that matched nothing: a fast typist's
-/// keys after a miss go with it. The query as typed if any went.
+/// match and no tag to go on with, as typed with the keys that matched
+/// nothing: a fast typist's keys after a miss go with it. The query as
+/// typed if any went.
 fn drop_unmatched(
     search: &mut Search,
     shown: &Snapshot,
     source: &mut dyn Source,
+    hints: &Hints,
 ) -> Option<String> {
     let tried = search.query().to_owned();
-    while search.matches().is_empty() && search.pop() {
+    while search.matches().is_empty() && !hints.open(search.query()) && search.pop() {
         find(search, shown, source);
     }
     (search.query() != tried).then_some(tried)
@@ -237,12 +343,15 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
         },
         part.center().y,
     );
+    // The character before the match too, where it was read: one typed
+    // there since would leave the match inside a word.
     let (start, end) = (found.span.start, found.span.end);
+    let from = if start > text.start { start - 1 } else { start };
     let check = Check {
         place: text.place.clone(),
-        start,
+        start: from,
         end,
-        text: text.chars(start, end),
+        text: text.chars(from, end),
     };
     let (object, role, editable, clips, check) = match text.place {
         Place::Object(index) => {
@@ -426,12 +535,15 @@ mod tests {
         let mut found = search(&["contact", "falcon"]);
         "con".chars().for_each(|c| found.push(c));
         find(&mut found, &shown, &mut Rows);
-        assert_eq!(drop_unmatched(&mut found, &shown, &mut Rows), None);
+        assert_eq!(
+            drop_unmatched(&mut found, &shown, &mut Rows, &Hints(Vec::new())),
+            None
+        );
         // Typed fast: t matches contact, then x and y match nothing.
         "txy".chars().for_each(|c| found.push(c));
         find(&mut found, &shown, &mut Rows);
         assert_eq!(
-            drop_unmatched(&mut found, &shown, &mut Rows).as_deref(),
+            drop_unmatched(&mut found, &shown, &mut Rows, &Hints(Vec::new())).as_deref(),
             Some("contxy")
         );
         assert_eq!(found.query(), "cont");
@@ -440,7 +552,7 @@ mod tests {
         nothing.push('q');
         find(&mut nothing, &shown, &mut Rows);
         assert_eq!(
-            drop_unmatched(&mut nothing, &shown, &mut Rows).as_deref(),
+            drop_unmatched(&mut nothing, &shown, &mut Rows, &Hints(Vec::new())).as_deref(),
             Some("q")
         );
         assert_eq!(nothing.query(), "", "nothing left to match");
@@ -467,7 +579,7 @@ mod tests {
         let loading = frame(None, false, None);
         assert!(loading.tags.is_empty(), "target tags are hidden");
         assert_eq!(loading.input.unwrap().text, "text ...");
-        let mut found = search(&["contact", "falcon"]);
+        let mut found = search(&["contact", "control"]);
         let pill = |found: &Search, stale| frame(Some(found), stale, Some("double")).input.unwrap();
         assert_eq!(pill(&found, false).text, "double text");
         assert_eq!(
@@ -515,7 +627,7 @@ mod tests {
 
     #[test]
     fn every_match_is_highlighted_and_the_current_one_marked() {
-        let mut found = search(&["contact", "falcon"]);
+        let mut found = search(&["contact", "control"]);
         typed(&mut found, "con");
         found.next();
         let shown = frame(Some(&found), false, None);
@@ -579,7 +691,8 @@ mod tests {
             assert_eq!(chosen.target.hit, Point::new(x, 10));
             assert!(chosen.target.visible.contains(chosen.target.hit));
             let check = chosen.check.expect("read again before acting");
-            assert_eq!((check.start, check.end, check.text.as_str()), (5, 7, "me"));
+            // The space before it too: a letter there would put it inside a word.
+            assert_eq!((check.start, check.end, check.text.as_str()), (4, 7, " me"));
             assert_eq!(check.place, Place::Cells(cells.clone()));
         }
     }
@@ -602,6 +715,7 @@ mod tests {
             named: false,
             area,
             clips: vec![object.clone()],
+            owner: None,
             button: None,
         });
         let mut found = Search::new(vec![Text {
@@ -663,5 +777,102 @@ mod tests {
             );
             assert_eq!(check.place, Place::Object(0));
         }
+    }
+
+    /// A Save button whose label was read, an icon button and a pixel tag,
+    /// and the text read: `label`, the Save button's.
+    fn buttons(label: &str) -> (Snapshot, Search) {
+        use crate::{desktop::tree::ObjectId, snapshot::TextSource};
+
+        let object = |path: &str| ObjectId {
+            bus: ":1.1".into(),
+            path: path.into(),
+        };
+        let target = |object, x| Target {
+            object,
+            window: 0,
+            rect: Rect::new(x, 0, 20, 20),
+            visible: Rect::new(x, 0, 20, 20),
+            hit: Point::new(x + 10, 10),
+            role: "push button".into(),
+            name: String::new(),
+            editable: false,
+            clips: Vec::new(),
+            opens: Vec::new(),
+        };
+        let mut shown = Snapshot::build(1, 0, std::iter::empty());
+        shown.targets = vec![
+            target(Some(object("/save")), 0),
+            target(Some(object("/menu")), 30),
+            target(None, 60),
+        ];
+        shown.texts.push(TextSource {
+            object: object("/save/label"),
+            window: 0,
+            role: "label".into(),
+            editable: false,
+            named: true,
+            area: Rect::new(0, 0, 1000, 1000),
+            clips: Vec::new(),
+            owner: Some(object("/save")),
+            button: None,
+        });
+        let found = Search::new(vec![Text {
+            place: Place::Object(0),
+            window: 0,
+            name: label.into(),
+            rect: Rect::new(0, 0, 20, 20),
+            area: Rect::new(0, 0, 1000, 1000),
+            start: 0,
+            content: label.into(),
+        }]);
+        (shown, found)
+    }
+
+    fn config(text: &str) -> Config {
+        let layout = crate::keys::Layout::named("us", "");
+        Config::parse(&format!("[keys]\nalphabet = \"asdf\"\n{text}"), &layout).unwrap()
+    }
+
+    #[test]
+    fn hints_go_on_targets_with_no_text_in_letters_no_word_starts_with() {
+        let (shown, found) = buttons("Save add");
+        let hints = Hints::new(&found, &shown, &config(""));
+        // s and a start Save and add: the icon and the pixel tag get d and f.
+        assert_eq!(hints.0, [(1, "d".to_owned()), (2, "f".to_owned())]);
+        assert_eq!(hints.picked("D"), Some(1), "Shift types the same tag");
+        assert_eq!(hints.picked("s"), None);
+        assert!(hints.open("") && hints.open("f") && !hints.open("s"));
+        let tags = hints.tags("", &shown, &config(""));
+        let texts: Vec<&str> = tags.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["D", "F"]);
+        assert_eq!(tags[0].target, Some(shown.targets[1].hit));
+        let off = Hints::new(&found, &shown, &config("[text]\nhints = false"));
+        assert_eq!(off.0, Vec::<(usize, String)>::new());
+    }
+
+    #[test]
+    fn a_text_with_no_word_leaves_its_target_a_hint() {
+        let (shown, found) = buttons("×");
+        let hints = Hints::new(&found, &shown, &config(""));
+        let tagged: Vec<usize> = hints.0.iter().map(|h| h.0).collect();
+        assert_eq!(tagged, [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_letter_that_goes_on_to_a_tag_is_kept() {
+        let shown = Snapshot::build(1, 0, std::iter::empty());
+        let hints = Hints(vec![(0, "xa".into())]);
+        let mut found = search(&["contact"]);
+        found.push('x');
+        find(&mut found, &shown, &mut Rows);
+        assert_eq!(drop_unmatched(&mut found, &shown, &mut Rows, &hints), None);
+        found.push('q');
+        find(&mut found, &shown, &mut Rows);
+        assert_eq!(
+            drop_unmatched(&mut found, &shown, &mut Rows, &hints).as_deref(),
+            Some("xq")
+        );
+        assert_eq!(found.query(), "x", "back to where a tag goes on");
     }
 }

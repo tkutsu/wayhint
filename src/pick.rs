@@ -163,7 +163,8 @@ pub trait Source {
 ///
 /// The text key hands the keys to text mode (`search::search`), with the
 /// verb and arrows typed before it; Backspace with nothing typed brings
-/// the same tags back.
+/// the same tags back. A tag typed there is picked as here, and a block's
+/// opens into its lines' tags.
 ///
 /// While a hold keeps a button down (`start.holding`), whatever is picked
 /// is where it's let go, and the close key lets go where it is.
@@ -202,19 +203,39 @@ pub fn pick(
             said,
         )
     };
-    if start.text {
+    // Text mode is next: `--text`, or the text key.
+    let mut text = start.text;
+    if text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-        if let Some(pick) = search::search(overlay, shown, &selector, source, config)? {
-            return Ok(pick);
-        }
+    } else {
+        overlay.show(&tags(&selector, shown, pointer, &said))?;
     }
-    overlay.show(&tags(&selector, shown, pointer, &said))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
     let next = || config.refresh.map(|every| Instant::now() + every);
     let mut due = next();
     loop {
+        if std::mem::take(&mut text) {
+            // `None` is Backspace with nothing typed: back to the tags of
+            // the same scan, as they were left. A block's tag typed there
+            // opens it here, as from the tags.
+            let back = search::search(overlay, shown, &selector, source, config)?;
+            due = next();
+            if let Some(Pick::Target { index, .. }) = back
+                && !shown.targets[index].opens.is_empty()
+            {
+                if open(shown, index, &*source, config) {
+                    selector.reopen(shown.targets.len(), config.alphabet.len());
+                    due = None;
+                }
+            } else if let Some(pick) = back {
+                return Ok(pick);
+            }
+            pointer = cursor().ok();
+            overlay.show(&tags(&selector, shown, pointer, &said))?;
+            continue;
+        }
         let wake = due.into_iter().chain(said.until()).min();
         let Some(event) = overlay.next_event(wake)? else {
             let now = Instant::now();
@@ -302,16 +323,12 @@ pub fn pick(
                 overlay.update(&tags(&selector, shown, pointer, &said))?;
             }
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
-                let mut opened = shown.open(index);
-                source.keep(&mut opened);
-                opened.merge_nearby(config.merge_distance);
                 selector = before;
                 // A block with no line left to show stays shut, as if its
                 // last letter missed.
-                if opened.targets.is_empty() {
+                if !open(shown, index, &*source, config) {
                     continue;
                 }
-                *shown = opened;
                 selector.reopen(shown.targets.len(), config.alphabet.len());
                 due = None;
                 // The lines have new labels: discard taps queued for the
@@ -328,15 +345,7 @@ pub fn pick(
             }
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
-            Step::Text => {
-                if let Some(pick) = search::search(overlay, shown, &selector, source, config)? {
-                    return Ok(pick);
-                }
-                // Back to the tags of the same scan, as they were left.
-                pointer = cursor().ok();
-                overlay.show(&tags(&selector, shown, pointer, &said))?;
-                due = next();
-            }
+            Step::Text => text = true,
             // The letter is dropped, and named for `[info] duration`.
             Step::Ignored => {
                 if let Input::Letter(letter, _) = input
@@ -359,6 +368,19 @@ pub fn pick(
             Step::Exit => return Ok(Pick::Leave),
         }
     }
+}
+
+/// Opens the block at `index` of `shown` into its lines, those `source`
+/// keeps. `false`, with `shown` as it was, if no line is left to show.
+fn open(shown: &mut Snapshot, index: usize, source: &dyn Source, config: &Config) -> bool {
+    let mut opened = shown.open(index);
+    source.keep(&mut opened);
+    opened.merge_nearby(config.merge_distance);
+    if opened.targets.is_empty() {
+        return false;
+    }
+    *shown = opened;
+    true
 }
 
 /// Brings `shown` up to date with a fresh scan from `source`: a target
@@ -482,30 +504,12 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .zip(scene.targets)
         .filter(|(label, _)| selector.matches(label))
         .collect();
-    let spot = |target: &Target| {
-        if target.role == "terminal" {
-            return target.hit;
-        }
-        let [x, y] = style.offset;
-        style.position.on(target.shown()).offset(Point::new(x, y))
-    };
     let letter = |&i: &usize| style.case.of(letters[i].label);
     let tags: Vec<Tag> = open
         .iter()
-        .map(|(label, target)| Tag {
-            at: spot(target),
-            target: Some(target.hit),
-            position: if target.role == "terminal" {
-                Position::Center
-            } else {
-                style.position
-            },
-            text: prefix
-                .chars()
-                .chain(label[skip..].iter().map(letter))
-                .collect(),
-            typed: dimmed,
-            pixels: target.in_pixels(),
+        .map(|(label, target)| {
+            let text = prefix.chars().chain(label[skip..].iter().map(letter));
+            tag(target, text.collect(), dimmed, config)
         })
         .collect();
     let nudge = selector.nudge();
@@ -517,7 +521,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         let starts = open
             .iter()
             .enumerate()
-            .map(|(i, (_, target))| (spot(target), target.hit, Some(i)));
+            .map(|(i, (_, target))| (spot(target, config), target.hit, Some(i)));
         // A pointer on another monitor draws nothing here, as it should:
         // `lands` keeps its dot on that monitor, off this overlay.
         starts
@@ -544,6 +548,36 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         info,
         ..Frame::default()
     }
+}
+
+/// `target`'s tag, reading `text` with its first `typed` characters dimmed.
+pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag {
+    Tag {
+        at: spot(target, config),
+        target: Some(target.hit),
+        position: if target.role == "terminal" {
+            Position::Center
+        } else {
+            config.style.position
+        },
+        text,
+        typed,
+        pixels: target.in_pixels(),
+    }
+}
+
+/// Where `target`'s tag goes: at `[style] position` on its visible box,
+/// moved by `[style] offset`; a terminal's on its cursor.
+fn spot(target: &Target, config: &Config) -> Point {
+    if target.role == "terminal" {
+        return target.hit;
+    }
+    let [x, y] = config.style.offset;
+    config
+        .style
+        .position
+        .on(target.shown())
+        .offset(Point::new(x, y))
 }
 
 /// The input box's first line with the tags up: the armed verb's name,

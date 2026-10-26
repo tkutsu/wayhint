@@ -49,6 +49,38 @@ fn all_labels(count: usize, size: usize) -> Vec<Vec<usize>> {
     labels
 }
 
+/// Labels for `count` targets that share the keys with text: `free(label)`
+/// says typing the label finds no text. As [`labels`], but a label that
+/// isn't free is never given out, only gone on from: typed, it's a query,
+/// and the letters after it make it a tag. A label that is free stays free
+/// with more letters, so a long enough one always is.
+///
+/// How: as `all_labels`, but while too few labels are free, the first one
+/// that isn't goes on first: replacing it costs no tag. With every label
+/// free, the first label goes on, as in `all_labels`. The list is kept
+/// sorted by length, so the first is always a shortest.
+pub fn free_labels(count: usize, size: usize, free: &dyn Fn(&[usize]) -> bool) -> Vec<Vec<usize>> {
+    assert!(size >= 2, "the config guarantees two letters or more");
+    let with_free = |label: Vec<usize>| {
+        let ok = free(&label);
+        (label, ok)
+    };
+    let mut labels: Vec<(Vec<usize>, bool)> = (0..size).map(|l| with_free(vec![l])).collect();
+    while labels.iter().filter(|(_, ok)| *ok).count() < count {
+        let at = labels.iter().position(|(_, ok)| !ok).unwrap_or(0);
+        let (prefix, _) = labels.remove(at);
+        let children = (0..size).map(|letter| with_free([prefix.as_slice(), &[letter]].concat()));
+        labels.extend(children);
+        // A stable sort: each length keeps the order its labels came in.
+        labels.sort_by_key(|(label, _)| label.len());
+    }
+    labels
+        .into_iter()
+        .filter_map(|(label, ok)| ok.then_some(label))
+        .take(count)
+        .collect()
+}
+
 /// Labels for targets scanned again, where `kept[i]` is the label target
 /// `i` had before, if it was there: it keeps that label if it's still one
 /// `kept.len()` targets can have, so a tag doesn't move to another target
@@ -405,6 +437,55 @@ mod tests {
             ["aaa", "aas"],
             "past size^2, the easiest two-letter label becomes a prefix"
         );
+    }
+
+    /// Labels over "asd" for `count` targets that share the keys with
+    /// `words`: a label is free if no word starts with it.
+    fn free_text(count: usize, words: &[&str]) -> Vec<String> {
+        let spell =
+            |l: &[usize]| -> String { l.iter().map(|&i| "asd".as_bytes()[i] as char).collect() };
+        let free = |l: &[usize]| !words.iter().any(|w| w.starts_with(&spell(l)));
+        free_labels(count, 3, &free)
+            .iter()
+            .map(|l| spell(l))
+            .collect()
+    }
+
+    #[test]
+    fn labels_that_would_find_text_are_only_gone_on_from() {
+        assert_eq!(free_text(0, &["save", "add"]), Vec::<String>::new());
+        // s and a start words, so does ad: they are no tags.
+        assert_eq!(free_text(3, &["save", "add"]), ["d", "aa", "as"]);
+        assert_eq!(free_text(4, &["save", "add"]), ["d", "aa", "as", "ss"]);
+        assert_eq!(free_text(3, &["a", "s", "d"]), ["aa", "as", "ad"]);
+        for count in 0..60 {
+            assert_eq!(
+                free_labels(count, 4, &|_| true),
+                labels(count, 4),
+                "with no text, the labels are the usual ones"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn free_labels_are_free_prefix_free_and_enough(
+            words in prop::collection::vec("[asd]{1,4}", 0..12),
+            count in 0usize..40,
+        ) {
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            let got = free_text(count, &words);
+            prop_assert_eq!(got.len(), count);
+            for (i, label) in got.iter().enumerate() {
+                prop_assert!(!words.iter().any(|w| w.starts_with(label.as_str())));
+                for (j, other) in got.iter().enumerate() {
+                    prop_assert!(i == j || !other.starts_with(label.as_str()));
+                }
+            }
+            let mut lengths: Vec<usize> = got.iter().map(String::len).collect();
+            lengths.dedup();
+            prop_assert!(lengths.windows(2).all(|pair| pair[0] < pair[1]), "shortest first");
+        }
     }
 
     /// Five targets over four letters: s d f aa as. Bare tags left-click.
