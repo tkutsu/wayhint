@@ -39,6 +39,7 @@ pub const DEFAULT: &str = include_str!("../config.default.toml");
 #[serde(default, deny_unknown_fields)]
 struct File {
     keys: FileKeys,
+    hints: FileHints,
     style: Style,
     pointer: FilePointer,
     pixels: FilePixels,
@@ -48,13 +49,21 @@ struct File {
     info: FileInfo,
 }
 
+/// `[hints]`: whether a completed tag acts immediately or waits for Enter.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileHints {
+    auto_accept: Option<bool>,
+}
+
 /// `[text]`: how text mode reads windows, acts on matches and looks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileText {
     cursor: TextCursor,
     /// Act on the only match left, without Enter.
-    pick_unique: bool,
+    #[serde(alias = "pick_unique")]
+    auto_accept: bool,
     /// Tags on the targets typing can't find: on unless `false`.
     hints: Option<bool>,
     /// `eng` for English OCR in windows read from pixels, `off` for none.
@@ -519,9 +528,12 @@ const BUILT_IN_NAMES: &str = "Backspace, Space, Enter, Tab and the arrows";
 
 /// Everything wayhint needs from the settings, checked.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // independent settings, including each mode's acceptance
 pub struct Config {
     pub alphabet: Alphabet,
     pub verbs: Verbs,
+    /// Act on a completed tag without Enter, including text mode's tags.
+    pub hint_auto_accept: bool,
     /// The name of the layout the keys were decoded with ("English (US)"),
     /// for `wayhint config`.
     pub layout: String,
@@ -535,8 +547,8 @@ pub struct Config {
     /// Where an action lands within a text match: `[text] cursor`.
     pub text_cursor: TextCursor,
     /// Act on the only match left once the query is long enough, without
-    /// Enter: `[text] pick_unique`.
-    pub pick_unique: bool,
+    /// Enter: `[text] auto_accept` (formerly `pick_unique`).
+    pub text_auto_accept: bool,
     /// Tags, in text mode, on the targets with no text to type:
     /// `[text] hints`.
     pub text_hints: bool,
@@ -804,6 +816,7 @@ impl Verbs {
         }
         for (key, what) in [
             ("Space", "at the pointer"),
+            ("Enter", "confirm a completed tag or text match"),
             ("arrows", "move where the click lands"),
             ("Backspace", "take back a key"),
         ] {
@@ -1137,13 +1150,14 @@ impl Config {
         Ok(Self {
             alphabet,
             verbs,
+            hint_auto_accept: file.hints.auto_accept.unwrap_or(true),
             layout: layout.name().to_string(),
             style: file.style,
             marks,
             input,
             info,
             text_cursor: file.text.cursor,
-            pick_unique: file.text.pick_unique,
+            text_auto_accept: file.text.auto_accept,
             text_hints: file.text.hints.unwrap_or(true),
             ocr,
             after: file.pointer.after,
@@ -1173,8 +1187,8 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\npick_unique = {}   # act on the only match left, once {} characters are typed, without Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
-            self.pick_unique,
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
+            self.text_auto_accept,
             crate::search::UNIQUE,
             self.text_hints,
             quote(self.ocr.as_deref().unwrap_or("off"))
@@ -1186,6 +1200,11 @@ impl Config {
         let mut out =
             String::from("# wayhint config in effect: defaults merged with your file\n\n");
         out.push_str(&self.render_keys());
+        let _ = writeln!(
+            out,
+            "\n[hints]\nauto_accept = {}   # act on a completed tag; false requires Enter, in either mode",
+            self.hint_auto_accept
+        );
         out.push('\n');
         out.push_str(&self.style.render());
         out.push_str(&self.input.render());
@@ -2094,7 +2113,7 @@ offset = [-13, 17]
     fn case_pixel_looks_and_pick_unique_read_back_the_same() {
         let plain = Config::parse("", &us()).unwrap();
         assert_eq!(plain.style.case, crate::style::Case::Upper);
-        assert!(!plain.pick_unique, "Enter is needed unless told");
+        assert!(!plain.text_auto_accept, "Enter is needed unless told");
         let mine = Config::parse(
             "[style]\ncase = \"lower\"\n[style.pixels]\nborder = \"#f00\"\nsize = 11\n[text]\npick_unique = true",
             &us(),
@@ -2106,14 +2125,39 @@ offset = [-13, 17]
             Some(Color::rgba(0xff, 0, 0, 0xff))
         );
         assert_eq!(mine.style.for_pixels().size, 11.0);
-        assert!(mine.pick_unique);
+        assert!(mine.text_auto_accept);
         let again = Config::parse(&mine.render(), &us()).unwrap();
         assert_eq!(again.style, mine.style);
-        assert!(again.pick_unique);
+        assert!(again.text_auto_accept);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(err("[style]\ncase = \"title\"").contains("case"));
         assert!(err("[style.pixels]\nsize = 0").contains("[style.pixels] size"));
         assert!(err("[style.pixels]\nposition = \"top\"").contains("unknown field"));
+    }
+
+    #[test]
+    fn acceptance_settings_are_independent_and_round_trip() {
+        let defaults = Config::parse("", &us()).unwrap();
+        assert!(defaults.hint_auto_accept);
+        assert!(!defaults.text_auto_accept);
+        for hints in [false, true] {
+            for text in [false, true] {
+                let written =
+                    format!("[hints]\nauto_accept = {hints}\n[text]\nauto_accept = {text}");
+                let config = Config::parse(&written, &us()).unwrap();
+                let again = Config::parse(&config.render(), &us()).unwrap();
+                assert_eq!(again.hint_auto_accept, hints);
+                assert_eq!(again.text_auto_accept, text);
+            }
+        }
+        for invalid in [
+            "[hints]\nauto_accept = \"enter\"",
+            "[text]\nauto_accept = 1",
+            "[text]\nauto_accept = true\npick_unique = false",
+            "[hints]\nauto_acceppt = false",
+        ] {
+            assert!(Config::parse(invalid, &us()).is_err(), "{invalid}");
+        }
     }
 
     #[test]

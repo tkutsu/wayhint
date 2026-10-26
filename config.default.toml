@@ -53,14 +53,20 @@
 # overrides a built-in key and also closes text mode, so its character
 # cannot be searched there. The launch shortcut always closes wayhint too.
 
-# Built in, unless chosen as the close key: Backspace takes back the last key, Space acts at
-# the pointer, Enter and Tab work in text mode, and the arrows move where a
-# click lands, held for faster.
+# Built in, unless chosen as the close key: Backspace takes back the last
+# key, Space acts at the pointer, Enter confirms a completed tag or text
+# match, Tab works in text mode, and the arrows move where a click lands,
+# held for faster.
 
 # Other keys that type a tag letter, for a layer that sends a different
 # character from the same key: "key" = "letter".
 # [keys.aliases]
 # ";" = "c"
+
+
+[hints]
+# Completed tags, in tag mode and on text mode's targets with no text.
+# auto_accept = true        # false waits for Enter after the whole tag; modifiers on Enter apply to the action
 
 
 [style]
@@ -159,7 +165,8 @@
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
-# pick_unique = false       # act on the only match left, once 3 characters are typed, without Enter
+# auto_accept = false       # act on the only match left, once 3 characters are typed; false requires Enter
+# The former name, pick_unique, still works. Tags here use [hints] auto_accept.
 # hints = true              # tags on the targets with no text to type, in letters no word on screen starts with
 # ocr = "off"               # eng for English OCR in windows with no accessibility tree; off to disable it (default)
 

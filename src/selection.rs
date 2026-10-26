@@ -124,6 +124,8 @@ pub fn relabel(kept: &[Option<&[usize]>], size: usize) -> Vec<Vec<usize>> {
 pub enum Input {
     /// A tag letter, by its index in the alphabet.
     Letter(usize, Mods),
+    /// Enter: act on a completed tag, with these modifiers.
+    Confirm(Mods),
     /// A verb key: the tag being typed gets this action instead of the
     /// default.
     Verb(Action, Mods),
@@ -169,12 +171,14 @@ pub enum Step {
 /// its last key: `k e h`, `e k h` and `e → k h` all double-click tag
 /// `eh`. Nothing ever waits on a timeout: a verb key is never a tag letter
 /// (the config takes verb keys out of the alphabet), and labels are
-/// prefix-free, so the last letter always acts. Arrows add up, and only
+/// prefix-free, so the last letter can act immediately. With autoaccept
+/// off, Enter confirms the completed tag. Arrows add up, and only
 /// this command lands where they moved it.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
     typed: Vec<usize>,
+    auto_accept: bool,
     /// The action a bare tag does: the config's `""` verb.
     default: Action,
     armed: Option<Action>,
@@ -191,12 +195,19 @@ impl Selector {
         Self {
             labels: labels(count, alphabet_size),
             typed: Vec::new(),
+            auto_accept: true,
             default,
             armed: None,
             armed_shifted: false,
             armed_at: 0,
             nudge: Point::default(),
         }
+    }
+
+    /// Choose whether the last letter acts or leaves the tag for Enter.
+    pub fn with_auto_accept(mut self, auto_accept: bool) -> Self {
+        self.auto_accept = auto_accept;
+        self
     }
 
     pub fn labels(&self) -> &[Vec<usize>] {
@@ -279,14 +290,19 @@ impl Selector {
             .map(|was| was.map(|i| self.labels[i].as_slice()))
             .collect();
         let labels = relabel(&kept, alphabet_size);
-        // Labels are prefix-free, so one equal to `typed` means none goes
-        // on from it, and the next letter could pick nothing.
+        // Labels are prefix-free. A completed tag can stay for Enter only
+        // while the same target keeps that label.
         let after = |label: &[usize]| {
             label
                 .strip_prefix(self.typed.as_slice())
                 .map_or(0, <[usize]>::len)
         };
-        let leads = labels.iter().any(|label| after(label) > 0);
+        let pending = !self.auto_accept
+            && labels
+                .iter()
+                .zip(&kept)
+                .any(|(label, was)| *label == self.typed && *was == Some(label.as_slice()));
+        let leads = pending || labels.iter().any(|label| after(label) > 0);
         let instant = labels
             .iter()
             .zip(&kept)
@@ -320,13 +336,24 @@ impl Selector {
             Input::Letter(letter, held) => {
                 let mut next = self.typed.clone();
                 next.push(letter);
-                if let Some(index) = self.labels.iter().position(|l| *l == next) {
+                if self.auto_accept
+                    && let Some(index) = self.labels.iter().position(|l| *l == next)
+                {
                     let act = self.act(held);
                     self.reset();
                     Step::Picked { index, act }
                 } else if self.labels.iter().any(|l| l.starts_with(&next)) {
                     self.typed = next;
                     Step::Typing
+                } else {
+                    Step::Ignored
+                }
+            }
+            Input::Confirm(held) => {
+                if let Some(index) = self.labels.iter().position(|l| *l == self.typed) {
+                    let act = self.act(held);
+                    self.reset();
+                    Step::Picked { index, act }
                 } else {
                     Step::Ignored
                 }
@@ -534,6 +561,83 @@ mod tests {
         assert!(s.matches(&[0, 0]) && !s.matches(&[1]));
         assert_eq!(s.press(letter(1)), picked(4, Action::Left), "as");
         assert_eq!(s.typed(), [0; 0], "a pick starts over");
+    }
+
+    #[test]
+    fn confirmation_waits_for_a_whole_tag_and_uses_enters_modifiers() {
+        let mut s = five().with_auto_accept(false);
+        assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored);
+        assert_eq!(s.press(letter(0)), Step::Typing);
+        assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored, "a prefix");
+        assert_eq!(s.press(Input::Letter(1, SHIFT)), Step::Typing);
+        assert_eq!(s.typed(), [0, 1]);
+        assert_eq!(s.press(letter(2)), Step::Ignored, "no extra letters");
+        s.press(verb(Action::Right));
+        s.press(Input::Nudge(Point::new(10, -10)));
+        assert_eq!(
+            s.press(Input::Confirm(CTRL)),
+            Step::Picked {
+                index: 4,
+                act: Act {
+                    action: Action::Right,
+                    mods: CTRL,
+                    nudge: Point::new(10, -10),
+                },
+            }
+        );
+        assert_eq!(s.typed(), [0; 0]);
+        assert_eq!(s.armed(), None);
+        assert_eq!(s.nudge(), Point::default());
+    }
+
+    #[test]
+    fn a_completed_tag_can_be_corrected_or_cancelled() {
+        let mut s = five().with_auto_accept(false);
+        s.press(letter(0));
+        s.press(letter(1));
+        s.press(Input::Backspace);
+        assert_eq!(s.typed(), [0]);
+        assert_eq!(s.press(letter(0)), Step::Typing);
+        assert_eq!(s.press(Input::Confirm(Mods::NONE)), picked(3, Action::Left));
+        s.press(letter(1));
+        assert_eq!(s.press(Input::Escape), Step::Exit);
+    }
+
+    #[test]
+    fn a_pending_confirmation_survives_only_on_the_same_target() {
+        let mut s = five().with_auto_accept(false);
+        s.press(letter(1));
+        let mut same = s.clone();
+        assert!(!same.relabel(&[Some(0), Some(1), Some(2), Some(3), Some(4)], 4));
+        assert_eq!(same.typed(), [1]);
+        assert_eq!(
+            same.press(Input::Confirm(Mods::NONE)),
+            picked(0, Action::Left)
+        );
+        let mut reordered = s.clone();
+        reordered.relabel(&[Some(1), Some(0), Some(2), Some(3), Some(4)], 4);
+        assert_eq!(
+            reordered.press(Input::Confirm(Mods::NONE)),
+            picked(1, Action::Left),
+            "confirmation follows the target across index changes"
+        );
+        assert!(s.relabel(&[None, Some(1), Some(2), Some(3), Some(4)], 4));
+        assert!(s.typed().is_empty(), "a reused label is not a selection");
+        assert_eq!(s.press(Input::Confirm(Mods::NONE)), Step::Ignored);
+    }
+
+    #[test]
+    fn reopening_a_block_requires_a_fresh_confirmed_tag() {
+        let mut s = five().with_auto_accept(false);
+        s.press(verb(Action::Right));
+        s.press(letter(1));
+        s.reopen(2, 4);
+        assert_eq!(s.press(Input::Confirm(Mods::NONE)), Step::Ignored);
+        assert_eq!(s.press(letter(0)), Step::Typing);
+        assert_eq!(
+            s.press(Input::Confirm(Mods::NONE)),
+            picked(0, Action::Right)
+        );
     }
 
     #[test]
