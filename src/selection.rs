@@ -131,7 +131,7 @@ pub enum Step {
     Text,
     /// A letter no label continues with. Nothing changes, nothing runs.
     Ignored,
-    /// `Esc` with nothing typed or armed: leave.
+    /// `Esc`: leave, whatever was typed.
     Exit,
 }
 
@@ -221,11 +221,6 @@ impl Selector {
         self.typed.clear();
         self.disarm();
         self.nudge = Point::default();
-    }
-
-    /// Whether anything of a command is in: letters, a verb or a nudge.
-    fn started(&self) -> bool {
-        !self.typed.is_empty() || self.armed.is_some() || self.nudge != Point::default()
     }
 
     /// The same command on `count` new targets: the verb, its Shift and the
@@ -342,12 +337,7 @@ impl Selector {
                 }
                 Step::Typing
             }
-            // Esc clears what's typed, armed and nudged first; only a
-            // second Esc leaves.
-            Input::Escape if self.started() => {
-                self.reset();
-                Step::Typing
-            }
+            // Esc leaves at once: taking back what's typed is Backspace's.
             Input::Escape => Step::Exit,
         }
     }
@@ -436,14 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn backspace_and_escape_step_back() {
+    fn backspace_steps_back_and_escape_leaves() {
         let mut s = five();
         s.press(letter(3));
         assert_eq!(s.press(Input::Backspace), Step::Typing);
         assert_eq!(s.typed(), [0; 0]);
         s.press(letter(3));
-        assert_eq!(s.press(Input::Escape), Step::Typing, "first Esc clears");
-        assert_eq!(s.press(Input::Escape), Step::Exit, "second Esc leaves");
+        assert_eq!(s.press(Input::Escape), Step::Exit, "with a letter typed");
     }
 
     #[test]
@@ -496,8 +485,7 @@ mod tests {
             "the verb came last"
         );
         s.press(verb(Action::Hover));
-        assert_eq!(s.press(Input::Escape), Step::Typing, "Esc disarms first");
-        assert_eq!(s.press(Input::Escape), Step::Exit);
+        assert_eq!(s.press(Input::Escape), Step::Exit, "with a verb armed");
     }
 
     #[test]
@@ -548,19 +536,13 @@ mod tests {
     }
 
     #[test]
-    fn backspace_leaves_the_nudge_and_esc_clears_it() {
+    fn backspace_keeps_the_nudge_and_esc_leaves() {
         let mut s = five();
         s.press(RIGHT);
         s.press(verb(Action::Hover));
         s.press(Input::Backspace);
         assert_eq!((s.armed(), s.nudge()), (None, Point::new(14, 0)));
-        assert_eq!(
-            s.press(Input::Escape),
-            Step::Typing,
-            "a nudge alone is a start"
-        );
-        assert_eq!(s.nudge(), Point::default());
-        assert_eq!(s.press(Input::Escape), Step::Exit);
+        assert_eq!(s.press(Input::Escape), Step::Exit, "with a nudge");
     }
 
     #[test]

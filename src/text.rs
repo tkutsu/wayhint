@@ -367,13 +367,6 @@ impl Search {
         self.query.pop().is_some()
     }
 
-    /// Clears the query; `false` if it was already empty.
-    pub fn clear(&mut self) -> bool {
-        let had = !self.query.is_empty();
-        self.query.clear();
-        had
-    }
-
     /// Every occurrence of the query in the texts, in no particular order.
     fn spans(&self) -> Vec<Span> {
         let ignore = ignores_case(&self.query);
@@ -622,7 +615,7 @@ mod tests {
         assert_eq!(search.position(), (1, 2), "an edit selects the first");
         search.pop();
         assert!(search.wanted().is_empty(), "co was asked before");
-        assert!(search.clear() && !search.clear());
+        assert!(search.pop() && search.pop() && !search.pop());
         search.update(&everywhere);
         assert_eq!(search.position(), (0, 0), "nothing typed, nothing current");
         search.next();
