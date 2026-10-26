@@ -208,9 +208,9 @@ Its second line has messages, each with its own icon and colour:
 
 - `scanning`, when reading the windows has taken over half a second.
 - `no targets`, while nothing on the monitor has a tag.
-- A letter no tag starts with, or text nothing on screen matches. The key
-  is dropped, so a typo costs nothing, and the message goes after two
-  seconds.
+- A letter no tag starts with, or text nothing on screen matches. A tag
+  key is dropped, so a typo costs nothing; text stays typed, to fix with
+  Backspace. The message goes after two seconds.
 - The key list, while `?` has it up.
 
 Each message can be turned off under `[info]`.

@@ -326,7 +326,7 @@ impl Session {
     fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
         let Chosen { target, act, check } = chosen;
         if let Some(check) = &check
-            && let Err(e) = self.desktop.still_reads(snapshot, target.window, check)
+            && let Err(e) = self.desktop.still_reads(snapshot, &target, check)
         {
             desktop::log(&format!("wayhint: refreshing {:?}: {e:#}", check.text));
             return Ok(Done::Refused);

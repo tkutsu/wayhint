@@ -25,8 +25,9 @@ def line(screen, y):
             x = past_tab(shown, x)
             continue
         width = wcwidth(ord(c))
-        # A combining mark sits on the character before it.
-        if width <= 0 and cols:
+        # A combining mark sits on the character before it. Below 0 is a
+        # width kitty can't say (box drawing, private use): one cell.
+        if width == 0 and cols:
             cols.append(cols[-1])
             continue
         cols.append(x)

@@ -21,10 +21,11 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use atspi::{
-    AccessibilityConnection, Event, Role, State,
+    Event, Role, State,
     events::ObjectEvents,
     proxy::{accessible::AccessibleProxy, registry::RegistryProxy},
 };
+use atspi_connection::AccessibilityConnection;
 use futures::StreamExt as _;
 use zbus::{MatchRule, proxy::CacheProperties};
 

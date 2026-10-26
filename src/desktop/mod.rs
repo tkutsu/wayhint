@@ -709,11 +709,18 @@ impl Desktop {
             .collect()
     }
 
-    /// Whether a text in `snapshot`'s window `window` still reads what
-    /// `check` says, and if not, why: the last look before acting on a
-    /// match. A terminal's must also still be in the same cells; OCR's
-    /// can't be read again in time, so its pixels must be the same.
-    pub fn still_reads(&mut self, snapshot: &Snapshot, window: usize, check: &Check) -> Result<()> {
+    /// Whether the text `target` was made from still reads what `check`
+    /// says, and if not, why: the last look before acting on a match.
+    /// An object's characters must also still be under `target`'s hit,
+    /// since scrolling moves them inside a box that stays put; a
+    /// terminal's must still be in the same cells; OCR's can't be read
+    /// again in time, so its pixels must be the same.
+    pub fn still_reads(
+        &mut self,
+        snapshot: &Snapshot,
+        target: &Target,
+        check: &Check,
+    ) -> Result<()> {
         let Check {
             place,
             start,
@@ -721,11 +728,23 @@ impl Desktop {
             text,
         } = check;
         let (start, end) = (*start, *end);
+        let window = target.window;
         let now: String = match place {
             Place::Object(index) => {
                 let object = &snapshot.texts[*index].object;
+                let span = [Some((object, start, end))];
                 let read = self.scanner.read_range(object, start, end, RECHECK_TIMEOUT);
-                self.runtime.block_on(read)?
+                let locate = self.scanner.locate(&span, RECHECK_TIMEOUT);
+                let (now, parts) = self.runtime.block_on(future::join(read, locate));
+                let now = now?;
+                ensure!(now == *text, "the text changed");
+                let origin = snapshot.windows[window].window.rect.origin();
+                let under = parts
+                    .iter()
+                    .flatten()
+                    .any(|part| part.offset(origin).contains(target.hit));
+                ensure!(under, "the text moved");
+                return Ok(());
             }
             Place::Cells(cells) => {
                 let panes = kitty::read(&snapshot.windows[window].window, KITTY_TIMEOUT)?;
