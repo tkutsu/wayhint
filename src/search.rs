@@ -142,17 +142,20 @@ fn keys(
         if stale && (!edit || !overlay.has_events()?) {
             find(&mut search, shown, source);
             stale = false;
-            let dropped = config.info.no_match
-                && key.code != KeyCode::BACKSPACE
+            let dropped = key.code != KeyCode::BACKSPACE
                 && drop_unmatched(&mut search, shown, source).is_some_and(|tried| {
-                    let until = Instant::now() + config.info.duration;
-                    missed = Some((format!("no text has \"{tried}\""), until));
+                    if config.info.no_match {
+                        let until = Instant::now() + config.info.duration;
+                        missed = Some((format!("no text has \"{tried}\""), until));
+                    }
                     true
                 });
             // Typed into one match, not backed into it or left there by
-            // a miss.
+            // a miss. An Enter that comes after the typing acts below,
+            // with its own Ctrl, Shift and Alt.
             if config.pick_unique
                 && !dropped
+                && edit
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
                 && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
