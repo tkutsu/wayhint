@@ -190,7 +190,7 @@ fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Resul
                 tags: tags(w),
             })
             .collect(),
-        unread: unread.iter().map(|e| format!("{e:#}")).collect(),
+        unread: unread.iter().map(|e| format!("{:#}", e.error)).collect(),
     })
 }
 
@@ -256,7 +256,11 @@ fn text(
         read_ms,
         locate_ms,
         incomplete: reading.incomplete,
-        unread: reading.unread.iter().map(|e| format!("{e:#}")).collect(),
+        unread: reading
+            .unread
+            .iter()
+            .map(|e| format!("{:#}", e.error))
+            .collect(),
         texts: search
             .texts()
             .iter()

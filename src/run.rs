@@ -54,7 +54,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 use crate::{
     action::{Act, Action, Mods},
     config::{After, Config},
-    desktop::{self, Desktop, Monitor, Stack, Verdict, tree::ObjectId},
+    desktop::{self, Desktop, Monitor, Stack, Unread, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::Overlay,
@@ -511,11 +511,12 @@ impl pick::Source for Scans<'_> {
         if let Some(why) = reading.incomplete {
             eprintln!("wayhint: reading the text stopped early ({why}); some may be missing");
         }
-        for e in reading.unread {
-            let message = format!("wayhint: no text from {e:#}");
-            if self.warned.insert(message.clone()) {
-                desktop::warn(&message);
-            }
+        let messages = reading
+            .unread
+            .into_iter()
+            .map(|e| (e.app, format!("no text from {:#}", e.error)));
+        for message in group_warnings(messages, self.warned) {
+            desktop::warn(&message);
         }
         reading.texts
     }
@@ -543,7 +544,9 @@ fn scan(
     let stack = desktop.stack(monitor.id)?;
     let (scanned, unread) =
         desktop.scan(&stack, monitor, config.pixels, &config.terminal_processes);
-    report(&scanned, &unread, warned);
+    for message in report(&scanned, &unread, warned) {
+        desktop::warn(&message);
+    }
     let took = started.elapsed();
     if let Some(every) = config.refresh
         && took > every
@@ -559,24 +562,24 @@ fn scan(
 }
 
 /// Says what a scan missed: windows it couldn't read (`unread`) and scans
-/// cut short, each once a run (`warned` holds what was said). An empty
-/// scan is valid: keep listening for fresh targets or the toggle shortcut.
+/// cut short, each once a run (`warned` holds what was said), grouped by
+/// app. An empty scan is valid: keep listening for fresh targets or the
+/// toggle shortcut.
 /// Pixel tags are news only on stderr, and once a run too: they're how a
 /// window with no tree is meant to work.
-fn report(snapshot: &Snapshot, unread: &[anyhow::Error], warned: &mut HashSet<String>) {
+fn report(snapshot: &Snapshot, unread: &[Unread], warned: &mut HashSet<String>) -> Vec<String> {
     let incomplete = snapshot.windows.iter().filter_map(|scanned| {
         let why = scanned.stats.incomplete.as_ref()?;
         let class = &scanned.window.class;
-        Some(format!(
-            "wayhint: scan of {class} incomplete ({why}); some targets may be missing"
+        Some((
+            Some(class.clone()),
+            format!("scan of {class} incomplete ({why}); some targets may be missing"),
         ))
     });
-    let unread = unread.iter().map(|e| format!("wayhint: no tags in {e:#}"));
-    for message in unread.chain(incomplete) {
-        if warned.insert(message.clone()) {
-            desktop::warn(&message);
-        }
-    }
+    let unread = unread
+        .iter()
+        .map(|e| (e.app.clone(), format!("no tags in {:#}", e.error)));
+    let messages = group_warnings(unread.chain(incomplete), warned);
     for scanned in snapshot.windows.iter().filter(|s| s.pixels) {
         let class = &scanned.window.class;
         if warned.insert(format!("pixels {class}")) {
@@ -586,6 +589,30 @@ fn report(snapshot: &Snapshot, unread: &[anyhow::Error], warned: &mut HashSet<St
             );
         }
     }
+    messages
+}
+
+/// Keeps repeated warnings quiet for this run and groups new ones by app.
+fn group_warnings(
+    messages: impl IntoIterator<Item = (Option<String>, String)>,
+    warned: &mut HashSet<String>,
+) -> Vec<String> {
+    let mut groups: Vec<(Option<String>, String)> = Vec::new();
+    for (app, message) in messages {
+        if !warned.insert(format!("wayhint: {message}")) {
+            continue;
+        }
+        let group = groups
+            .iter_mut()
+            .find(|(key, _)| app.is_some() && *key == app);
+        if let Some((_, body)) = group {
+            body.push('\n');
+            body.push_str(&message);
+        } else {
+            groups.push((app, format!("wayhint: {message}")));
+        }
+    }
+    groups.into_iter().map(|(_, body)| body).collect()
 }
 
 /// `wayhint click --at X,Y`: the pointer alone, one action. A hold lets go
@@ -619,7 +646,123 @@ mod tests {
             texts: Vec::new(),
         };
         let mut warned = HashSet::new();
-        report(&snapshot, &[], &mut warned);
+        assert_eq!(report(&snapshot, &[], &mut warned), Vec::<String>::new());
         assert!(warned.is_empty());
+    }
+
+    #[test]
+    fn warnings_from_several_windows_of_one_app_share_a_notification() {
+        let warnings = || {
+            [
+                (
+                    Some("kitty".into()),
+                    "no text from kitty: pid 1 has no socket".into(),
+                ),
+                (
+                    Some("firefox".into()),
+                    "no tags in firefox: timed out".into(),
+                ),
+                (
+                    Some("kitty".into()),
+                    "no text from kitty: pid 2 has no socket".into(),
+                ),
+                (
+                    Some("kitty".into()),
+                    "no text from kitty: pid 1 has no socket".into(),
+                ),
+            ]
+        };
+        let mut warned = HashSet::new();
+        let messages = group_warnings(warnings(), &mut warned);
+        assert_eq!(
+            messages,
+            [
+                "wayhint: no text from kitty: pid 1 has no socket\nno text from kitty: pid 2 has no socket",
+                "wayhint: no tags in firefox: timed out",
+            ]
+        );
+        assert_eq!(
+            group_warnings(warnings(), &mut warned),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            group_warnings(
+                [
+                    (
+                        Some("kitty".into()),
+                        "no text from kitty: pid 1 has no socket".into()
+                    ),
+                    (
+                        Some("kitty".into()),
+                        "no text from kitty: pid 3 has no socket".into()
+                    ),
+                ],
+                &mut warned
+            ),
+            ["wayhint: no text from kitty: pid 3 has no socket"]
+        );
+    }
+
+    #[test]
+    fn scan_failures_and_incomplete_reads_share_an_app_notification() {
+        let snapshot = Snapshot {
+            scan: 1,
+            monitor: 0,
+            windows: vec![crate::snapshot::Scanned {
+                window: desktop::Window {
+                    address: "0x1".into(),
+                    pid: 1,
+                    class: "quickshell:bar".into(),
+                    title: String::new(),
+                    rect: Rect::new(0, 0, 100, 40),
+                    monitor: 0,
+                    focused: false,
+                    kind: desktop::Kind::Layer { level: 2 },
+                    frames: Vec::new(),
+                },
+                stats: desktop::Stats {
+                    incomplete: Some("node budget".into()),
+                    ..desktop::Stats::default()
+                },
+                pixels: false,
+            }],
+            targets: Vec::new(),
+            obstacles: Vec::new(),
+            texts: Vec::new(),
+        };
+        let unread = [Unread {
+            app: Some("quickshell:bar".into()),
+            error: anyhow::anyhow!("quickshell:bar: frames didn't answer"),
+        }];
+        let mut warned = HashSet::new();
+        assert_eq!(
+            report(&snapshot, &unread, &mut warned),
+            [
+                "wayhint: no tags in quickshell:bar: frames didn't answer\nscan of quickshell:bar incomplete (node budget); some targets may be missing",
+            ]
+        );
+        assert_eq!(
+            report(&snapshot, &unread, &mut warned),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn unrelated_warnings_without_a_known_app_stay_separate() {
+        assert_eq!(
+            group_warnings(
+                [
+                    (None, "pid 1: unplaced popup".into()),
+                    (Some("kitty".into()), "no text from kitty: no socket".into()),
+                    (None, "pid 2: frames didn't answer".into()),
+                ],
+                &mut HashSet::new()
+            ),
+            [
+                "wayhint: pid 1: unplaced popup",
+                "wayhint: no text from kitty: no socket",
+                "wayhint: pid 2: frames didn't answer",
+            ]
+        );
     }
 }
