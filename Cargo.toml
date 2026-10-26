@@ -13,7 +13,8 @@ categories = ["command-line-utilities", "accessibility"]
 [dependencies]
 anyhow = "1.0.104"
 bitflags = "2"  # already in the tree through wayland: the window export's generated code names it
-atspi = { version = "0.30", default-features = false, features = ["connection", "proxies", "wrappers", "tokio"] }  # no p2p: it dials every app at startup
+atspi = { version = "0.30", default-features = false, features = ["proxies", "wrappers", "tokio"] }
+atspi-connection = { version = "0.14", default-features = false, features = ["wrappers"] }  # not through atspi's `connection`, which turns on p2p: that dials every app at startup, and one dead app fails the connection
 calloop = { version = "0.14", features = ["signals"] }  # only to turn on SCTK's calloop signals: Ctrl+C as an event
 clap = { version = "4.6.7", features = ["derive"] }
 fontdue = "0.9"
