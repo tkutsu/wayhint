@@ -1280,8 +1280,9 @@ impl Config {
         }
         out.push_str(
             "# The verbs: type one before a tag's last letter, or before Space for\n\
-             # the pointer, or twice for where the last command was. \"\" makes a\n\
-             # verb what a bare tag does.\n",
+             # the pointer, or twice for where the last command was; in text\n\
+             # mode, before the text, unless it types a letter or digit. \"\"\n\
+             # makes a verb what a bare tag does.\n",
         );
         for action in Action::ALL {
             let (name, about) = (action.name(), action.about());
