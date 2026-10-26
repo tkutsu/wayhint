@@ -15,7 +15,7 @@
 
 use std::{
     env,
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
@@ -81,8 +81,15 @@ impl Feed {
             return;
         };
         line.push('\n');
-        if self.stream.is_some() && line == self.sent {
-            return;
+        // The same state again needs no write, unless the listener went:
+        // a bar that restarts wants it from a new connection.
+        if let Some(stream) = &self.stream
+            && line == self.sent
+        {
+            if !closed(stream) {
+                return;
+            }
+            self.stream = None;
         }
         if self.stream.is_none() {
             self.stream = dial(&self.path).ok();
@@ -110,10 +117,16 @@ fn dial(path: &Path) -> io::Result<UnixStream> {
     Ok(UnixStream::from(socket))
 }
 
+/// Whether the listener closed `stream`. It never writes, so a read that
+/// would wait means it's still there; the stream doesn't block.
+fn closed(mut stream: &UnixStream) -> bool {
+    !matches!(stream.read(&mut [0]), Err(e) if e.kind() == io::ErrorKind::WouldBlock)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{BufRead as _, BufReader, Read as _},
+        io::{BufRead as _, BufReader},
         os::unix::net::UnixListener,
     };
 
@@ -188,6 +201,26 @@ mod tests {
         let got = lines(second);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["input"], "AB");
+    }
+
+    #[test]
+    fn a_listener_that_went_away_gets_the_same_state_again() {
+        let path = path("same");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut feed = Feed::at(path.clone(), "DP-1");
+        let state = Status::tags("A".into(), None, false, true);
+        feed.send(&state);
+        let (first, _) = listener.accept().unwrap();
+        drop(first);
+        // A bar that restarts while nothing changes: the next send sees
+        // the close and dials again.
+        feed.send(&state);
+        drop(feed);
+        listener.set_nonblocking(true).unwrap();
+        let (second, _) = listener.accept().expect("dialled again");
+        let got = lines(second);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["input"], "A");
     }
 
     #[test]

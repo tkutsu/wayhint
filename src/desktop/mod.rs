@@ -696,16 +696,7 @@ impl Desktop {
         boxes
             .into_iter()
             .zip(spans)
-            .map(|(parts, span)| {
-                let text = &texts[span.text];
-                match &text.place {
-                    Place::Cells(cells) => return cells.boxes(span.start, span.end),
-                    Place::Glyphs(glyphs) => return glyphs.boxes(span.start, span.end),
-                    Place::Object(_) => {}
-                }
-                let origin = snapshot.windows[text.window].window.rect.origin();
-                parts.into_iter().map(|r| r.offset(origin)).collect()
-            })
+            .map(|(parts, span)| placed(snapshot, &texts[span.text], span, parts))
             .collect()
     }
 
@@ -775,6 +766,22 @@ impl Desktop {
         };
         ensure!(now == *text, "the text changed");
         Ok(())
+    }
+}
+
+/// Where `span` of `text` is, global: in an object, the `parts` its app
+/// gave, window-relative; in a terminal or a picture, worked out. A name
+/// has no characters to ask about, long or short: the match is its
+/// object, as the object's tag would be.
+fn placed(snapshot: &Snapshot, text: &Text, span: &Span, parts: Vec<Rect>) -> Vec<Rect> {
+    match &text.place {
+        Place::Cells(cells) => cells.boxes(span.start, span.end),
+        Place::Glyphs(glyphs) => glyphs.boxes(span.start, span.end),
+        Place::Object(index) if snapshot.texts[*index].named => vec![text.rect],
+        Place::Object(_) => {
+            let origin = snapshot.windows[text.window].window.rect.origin();
+            parts.into_iter().map(|r| r.offset(origin)).collect()
+        }
     }
 }
 
@@ -1368,5 +1375,48 @@ mod tests {
             space.ink(Rect::new(1798, 38, 8, 100)) > 0,
             "so does the gap"
         );
+    }
+
+    #[test]
+    fn a_long_name_is_matched_on_its_object() {
+        use crate::{desktop::tree::ObjectId, snapshot::TextSource, text::Search};
+
+        let mut snapshot = Snapshot::build(1, 0, std::iter::empty());
+        snapshot.texts.push(TextSource {
+            object: ObjectId {
+                bus: ":1.42".into(),
+                path: "/link".into(),
+            },
+            window: 0,
+            role: "link".into(),
+            editable: false,
+            named: true,
+            area: Rect::new(0, 0, 1000, 1000),
+            clips: Vec::new(),
+            owner: None,
+            button: None,
+        });
+        let name = format!("{} contact us", "read more about it ".repeat(6));
+        assert!(name.chars().count() > 100, "longer than a label");
+        let rect = Rect::new(10, 20, 600, 18);
+        let mut search = Search::new(vec![Text {
+            place: Place::Object(0),
+            window: 0,
+            name: name.clone(),
+            rect,
+            area: Rect::new(0, 0, 1000, 1000),
+            start: 0,
+            content: name,
+        }]);
+        "contact".chars().for_each(|c| search.push(c));
+        let wanted = search.wanted();
+        let boxes = wanted
+            .iter()
+            .map(|span| placed(&snapshot, &search.texts()[span.text], span, Vec::new()))
+            .collect();
+        search.located(&wanted, boxes);
+        search.update(&|_, _| true);
+        assert_eq!(search.matches().len(), 1, "the match keeps the link's box");
+        assert_eq!(search.matches()[0].parts, [rect]);
     }
 }
