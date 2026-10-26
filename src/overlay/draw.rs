@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use tiny_skia::{
-    FillRule, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, Stroke,
-    Transform,
+    BlendMode, FillRule, IntRect, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
+    PremultipliedColorU8, Rect, Stroke, Transform,
 };
 
 use crate::{
@@ -189,6 +189,7 @@ impl Painter {
         let area = (pixmap.width() as f32, pixmap.height() as f32);
         let arranged = self.arrange(frame, area);
         let frame = &arranged;
+        let mut lines = Vec::new();
         for &dot in &frame.dots {
             let from = if let Some(tag) = dot.tag.and_then(|i| frame.tags.get(i)) {
                 let Some(rect) = place(tag.at, tag.position, self.tags.size(&tag.text), area)
@@ -202,14 +203,14 @@ impl Painter {
             } else {
                 centre(dot.from)
             };
-            self.paint_line(pixmap, from, centre(dot.at));
+            lines.extend(self.line(from, centre(dot.at)));
         }
+        paint_layer(pixmap, &lines);
         for tag in &frame.tags {
             self.tags.paint_tag(pixmap, tag, area);
         }
-        for &dot in &frame.dots {
-            self.paint_dot(pixmap, dot.at);
-        }
+        let dots: Vec<Part> = frame.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
+        paint_layer(pixmap, &dots);
         if let Some(tag) = &frame.input {
             self.input.paint_tag(pixmap, tag, area);
         }
@@ -217,58 +218,65 @@ impl Painter {
 
     /// The line from a tag to where it clicks, inside its outline, so it
     /// shows on light and dark windows alike: `[style.leader]`, by default
-    /// the tags' letters on their background.
-    fn paint_line(&self, pixmap: &mut Pixmap, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) {
+    /// the tags' letters on their background. It stops where its outline
+    /// meets the dot's, so a translucent dot shows no line through it.
+    fn line(&self, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Vec<Part> {
         let style = &self.tags.style;
         let leader = &style.leader;
         let (line, _, outline) = leader.colors(style);
+        let reach = leader.radius + leader.outline_width;
+        let half = f32::midpoint(leader.width, leader.outline_width);
+        let stop = (reach * reach - half * half).max(0.0).sqrt();
+        let length = (x1 - x0).hypot(y1 - y0);
+        if length <= stop {
+            return Vec::new();
+        }
+        let keep = 1.0 - stop / length;
         let mut path = PathBuilder::new();
         path.move_to(x0, y0);
-        path.line_to(x1, y1);
+        path.line_to(x0 + (x1 - x0) * keep, y0 + (y1 - y0) * keep);
         let Some(path) = path.finish() else {
-            return;
+            return Vec::new();
         };
         // tiny-skia draws a 0 px stroke a pixel wide, so a part set to 0
         // is left out, not stroked.
-        for (width, color, shown) in [
+        [
             (
                 leader.width + leader.outline_width,
                 outline,
                 leader.outline_width > 0.0,
             ),
             (leader.width, line, leader.width > 0.0),
-        ] {
-            if !shown {
-                continue;
-            }
-            let stroke = Stroke {
-                width,
-                ..Stroke::default()
-            };
-            pixmap.stroke_path(&path, &paint(color), &stroke, Transform::identity(), None);
-        }
+        ]
+        .into_iter()
+        .filter(|&(_, _, shown)| shown)
+        .map(|(width, color, _)| Part {
+            path: path.clone(),
+            width: Some(width),
+            color,
+        })
+        .collect()
     }
 
     /// The dot where a tag clicks, inside its outline: `[style.leader]`.
-    fn paint_dot(&self, pixmap: &mut Pixmap, at: Point) {
+    fn dot(&self, at: Point) -> Vec<Part> {
         let style = &self.tags.style;
         let leader = &style.leader;
         let (_, dot, outline) = leader.colors(style);
         let (x, y) = centre(at);
-        for (radius, color) in [
+        [
             (leader.radius + leader.outline_width, outline),
             (leader.radius, dot),
-        ] {
-            if let Some(circle) = PathBuilder::from_circle(x, y, radius) {
-                pixmap.fill_path(
-                    &circle,
-                    &paint(color),
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
-            }
-        }
+        ]
+        .into_iter()
+        .filter_map(|(radius, color)| {
+            Some(Part {
+                path: PathBuilder::from_circle(x, y, radius)?,
+                width: None,
+                color,
+            })
+        })
+        .collect()
     }
 
     /// One line of a match: its box grown by the mark's padding, filled
@@ -517,6 +525,66 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
     path.cubic_to(left, top + pull, left + pull, top, left + radius, top);
     path.close();
     path.finish()
+}
+
+/// One part of a leader: `path` stroked `width` px wide, or filled when
+/// `width` is `None`.
+struct Part {
+    path: Path,
+    width: Option<f32>,
+    color: Color,
+}
+
+/// Paints `parts` on a layer of their own, each replacing what's under it,
+/// then lays the layer over `pixmap`. A translucent line or dot then shows
+/// the window behind it, not the outline it sits in.
+fn paint_layer(pixmap: &mut Pixmap, parts: &[Part]) {
+    let corners: Vec<_> = parts
+        .iter()
+        .flat_map(|part| {
+            // Half the stroke, and a pixel for the anti-aliased edge.
+            let grow = part.width.unwrap_or(0.0) / 2.0 + 1.0;
+            let b = part.path.bounds();
+            [
+                tiny_skia::Point::from_xy(b.left() - grow, b.top() - grow),
+                tiny_skia::Point::from_xy(b.right() + grow, b.bottom() + grow),
+            ]
+        })
+        .collect();
+    let Some(area) = Rect::from_points(&corners)
+        .and_then(|r| r.round_out())
+        .zip(IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height()))
+        .and_then(|(r, screen)| r.intersect(&screen))
+    else {
+        return;
+    };
+    let Some(mut layer) = Pixmap::new(area.width(), area.height()) else {
+        return;
+    };
+    #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
+    let shift = Transform::from_translate(-area.left() as f32, -area.top() as f32);
+    for part in parts {
+        let mut paint = paint(part.color);
+        paint.blend_mode = BlendMode::Source;
+        match part.width {
+            Some(width) => {
+                let stroke = Stroke {
+                    width,
+                    ..Stroke::default()
+                };
+                layer.stroke_path(&part.path, &paint, &stroke, shift, None);
+            }
+            None => layer.fill_path(&part.path, &paint, FillRule::Winding, shift, None),
+        }
+    }
+    pixmap.draw_pixmap(
+        area.left(),
+        area.top(),
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
 }
 
 fn paint(color: Color) -> Paint<'static> {
@@ -821,6 +889,34 @@ padding = [8, 12]
         };
         painter.paint(&mut pixmap, &frame);
         assert_eq!(pixmap.pixel(100, 140).unwrap().red(), 240);
+    }
+
+    #[test]
+    fn a_translucent_leader_shows_the_window_not_its_outline() {
+        let mut style = Style::default();
+        style.leader.line = Some(Color::rgba(255, 0, 0, 128));
+        style.leader.dot = Some(Color::rgba(0, 255, 0, 128));
+        style.leader.outline = Some(Color::rgba(0, 0, 255, 255));
+        let mut painter = Painter::new(&style, &Marks::new(&style), &Input::new(&style)).unwrap();
+        let mut pixmap = Pixmap::new(200, 200).unwrap();
+        let frame = Frame {
+            dots: vec![Dot {
+                from: Point::new(100, 20),
+                at: Point::new(100, 160),
+                tag: None,
+            }],
+            ..Frame::default()
+        };
+        painter.paint(&mut pixmap, &frame);
+        let rgba = |x, y| {
+            let p = pixmap.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue(), p.alpha())
+        };
+        // Premultiplied: half of full red is 128 red at 128 alpha.
+        assert_eq!(rgba(100, 90), (128, 0, 0, 128), "the line");
+        assert_eq!(rgba(100, 160), (0, 128, 0, 128), "the dot");
+        assert_eq!(rgba(100, 158), (0, 128, 0, 128), "no line under the dot");
+        assert_eq!(rgba(101, 90).2, 255, "the outline beside the line");
     }
 
     #[test]
