@@ -20,6 +20,10 @@ def line(screen, y):
     text = str(shown)
     cols, x = [], 0
     for c in text:
+        if c == '\t':
+            cols.append(x)
+            x = past_tab(shown, x)
+            continue
         width = wcwidth(ord(c))
         # A combining mark sits on the character before it.
         if width <= 0 and cols:
@@ -38,6 +42,18 @@ def line(screen, y):
     if cols != list(range(len(cols))):
         out['cols'] = cols
     return out
+
+
+def past_tab(shown, x):
+    """The column the text goes on at after the tab at column `x`. kitty
+    keeps a tab as its cell, holding how many cells it jumped, then those
+    cells as spaces; its text skips up to that many spaces after the tab."""
+    cell = shown[x]
+    skip = ord(cell[1]) if len(cell) > 1 else 0
+    x += 1
+    while skip and x < len(shown) and shown[x] == ' ':
+        x, skip = x + 1, skip - 1
+    return x
 
 
 def pane(window, cell_height):
