@@ -50,7 +50,8 @@ Switch workspace and the tags follow.
 Press `/` and type text you see on screen instead of a tag. Matches get
 yellow boxes, `Tab` and the arrows move between them, and `Enter` clicks
 the current one. The text comes from the accessibility tree, from kitty's
-own remote control, or from Tesseract OCR for windows with neither.
+own remote control, or, when enabled, from English Tesseract OCR for
+windows with neither.
 
 ### Safe clicks
 
@@ -181,13 +182,14 @@ allow_remote_control socket-only
 listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 ```
 
-Other windows with no tree are read by Tesseract when text mode starts.
+OCR is off by default. Set `ocr = "eng"` under `[text]` to read English
+text in other windows with no tree using Tesseract when text mode starts.
+Set `ocr = "off"` to disable it.
 On a monitor with a scale under 2, the picture is doubled first, since
 Tesseract misreads small interface text at its real size. Reading took
 about 0.5 s for a terminal and 1.5 s for a full-screen spreadsheet on a
 Ryzen 7 7700; the query box shows `text ...` until it's done, and keys
-typed meanwhile wait. For Greek too, install `tesseract-data-ell` and set
-`ocr = "eng+ell"` under `[text]`.
+typed meanwhile wait.
 
 ### Windows tagged from their pixels
 
@@ -202,7 +204,9 @@ instead of clicking, and a verb typed before it carries over.
 
 A terminal gets one tag near its bottom centre, on empty pixels where it
 can find them. Picking it clicks there and exits, so your typing goes to
-the terminal. An editable sheet or document gets one tag on the empty spot
+the terminal. `[pixels] terminal_hint = false` hides that tag. It defaults
+to `true` and works even with `detector = "off"`.
+An editable sheet or document gets one tag on the empty spot
 nearest its middle, which does the same. Links and controls around it keep
 their own tags.
 
@@ -228,9 +232,15 @@ bind = SUPER CTRL, W, exec, wayhint --text
 
 ### Warnings and debugging
 
-When a run started from a keybind fails or warns, the reason shows as a
-desktop notification (Hyprland's own notification if no server answers).
-From a terminal it's printed.
+Failures that stop a run, and warnings about keyboard, modifier or workspace
+safety, show as desktop notifications when started from a keybind
+(Hyprland's own notification if no server answers). From a terminal they
+are printed. Routine messages about missing tags or text, scan limits,
+pixel tags, unavailable menus and repeat actions go to
+`~/.local/state/wayhint/wayhint.log`, or `$XDG_STATE_HOME/wayhint/wayhint.log`
+when set. Serious warnings are logged too. Lines start with Unix time in
+seconds and a severity. The log rotates at 1 MiB and keeps one previous
+file as `wayhint.log.1`.
 
 `wayhint dump` prints what wayhint sees in the focused window as JSON;
 `--explain` adds every control it left out and why, `--surfaces` lists
@@ -281,11 +291,11 @@ The sections:
 | `[keys]` | Tag letters, verb keys, repeat and text keys, aliases |
 | `[style]` | The tags: font, size, colours, border, radius, padding, position on the control, offset |
 | `[style.leader]` | The line and dot from a moved tag or a nudged click to where it lands |
-| `[text]` | OCR languages |
+| `[text]` | Text cursor position and English OCR (`eng` or `off`, default `off`) |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[text.input]` | The query box: look, placeholder, prefix and suffix, screen position and offset |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches |
-| `[pixels]` | The pixel detector (`full`, `fast` or `off`) and which programs count as terminals |
+| `[pixels]` | The pixel detector (`full`, `fast` or `off`), the independent terminal focus hint, and which programs count as terminals |
 | `[scan]` | Refresh interval, and how close hints must be to share one tag |
 
 Colours are `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`, where A is opacity.

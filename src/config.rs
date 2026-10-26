@@ -53,7 +53,7 @@ struct File {
 #[serde(default, deny_unknown_fields)]
 struct FileText {
     cursor: TextCursor,
-    /// Tesseract's languages for windows read from pixels, `""` for none.
+    /// `eng` for English OCR in windows read from pixels, `off` for none.
     ocr: Option<String>,
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
     #[serde(alias = "style")]
@@ -62,25 +62,16 @@ struct FileText {
     input: Option<FileInput>,
 }
 
-/// The OCR languages unless the file says: the one Tesseract ships with.
-const OCR: &str = "eng";
-
 impl FileText {
-    /// The OCR languages, `None` for no OCR. Tesseract's names, joined by
-    /// `+`: `eng`, `eng+ell`.
+    /// English OCR when enabled, otherwise `None`; off by default.
     fn ocr(&self) -> Result<Option<String>> {
-        let languages = self.ocr.as_deref().unwrap_or(OCR);
-        let name = |n: &str| {
-            !n.is_empty()
-                && n.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        };
-        if !languages.is_empty() && !languages.split('+').all(name) {
-            bail!(
-                "[text] ocr = {languages:?}: Tesseract's language names joined by +, as \"eng+ell\", or \"\" for no OCR"
-            );
+        match self.ocr.as_deref().unwrap_or("off") {
+            "off" => Ok(None),
+            "eng" => Ok(Some("eng".to_owned())),
+            value => bail!(
+                "[text] ocr = {value:?}: use \"eng\" for English OCR or \"off\" to disable it"
+            ),
         }
-        Ok(Some(languages.to_owned()).filter(|l| !l.is_empty()))
     }
 }
 
@@ -317,6 +308,7 @@ const MERGE_DISTANCE: u16 = 0;
 #[serde(default, deny_unknown_fields)]
 struct FilePixels {
     detector: Pixels,
+    terminal_hint: bool,
     terminal_processes: Vec<String>,
 }
 
@@ -324,6 +316,7 @@ impl Default for FilePixels {
     fn default() -> Self {
         Self {
             detector: Pixels::default(),
+            terminal_hint: true,
             terminal_processes: [
                 "kitty",
                 "foot",
@@ -364,7 +357,12 @@ pub fn terminal_processes(explicit: Option<&Path>) -> Result<Vec<String>> {
     Ok(file.pixels.terminal_processes)
 }
 
-/// Text dumps read with the same OCR languages, also without a keymap.
+/// Surface dumps share the terminal hint switch without needing a keymap.
+pub fn terminal_hint(explicit: Option<&Path>) -> Result<bool> {
+    Ok(unkeyed(explicit)?.pixels.terminal_hint)
+}
+
+/// Text dumps use the same OCR setting, also without a keymap.
 pub fn ocr(explicit: Option<&Path>) -> Result<Option<String>> {
     unkeyed(explicit)?.text.ocr()
 }
@@ -547,7 +545,7 @@ pub struct Config {
     pub info: Info,
     /// Where an action lands within a text match: `[text] cursor`.
     pub text_cursor: TextCursor,
-    /// Tesseract's languages for text mode in windows read from pixels,
+    /// English OCR for text mode in windows read from pixels,
     /// `None` for no OCR: `[text] ocr`.
     pub ocr: Option<String>,
     pub after: After,
@@ -561,6 +559,8 @@ pub struct Config {
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
+    /// One focus tag per terminal, independent of `[pixels] detector`.
+    pub terminal_hint: bool,
     /// Executable basenames or window classes read as terminal input areas.
     pub terminal_processes: Vec<String>,
     /// How long the tags stay up before the windows are scanned again,
@@ -1131,6 +1131,7 @@ impl Config {
                 Pixels::Off => None,
             },
             terminal_processes: file.pixels.terminal_processes,
+            terminal_hint: file.pixels.terminal_hint,
             refresh: match file.scan.refresh.unwrap_or(REFRESH) {
                 0 => None,
                 ms => Some(Duration::from_millis(ms.into())),
@@ -1147,8 +1148,8 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
-            quote(self.ocr.as_deref().unwrap_or(""))
+            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nocr = {}   # eng for English OCR in windows with no tree; off to disable it (default)\n",
+            quote(self.ocr.as_deref().unwrap_or("off"))
         )
     }
 
@@ -1194,6 +1195,11 @@ impl Config {
         let _ = write!(
             out,
             "\n[pixels]\ndetector = \"{detector}\"   # windows with no accessibility tree: \"full\", \"fast\" for slower CPUs, or \"off\"\n"
+        );
+        let _ = writeln!(
+            out,
+            "terminal_hint = {}   # one terminal focus tag, even when detector is off",
+            self.terminal_hint
         );
         let _ = writeln!(
             out,
@@ -1473,24 +1479,27 @@ mod tests {
     }
 
     #[test]
-    fn ocr_is_english_unless_set_and_round_trips() {
+    fn ocr_is_off_by_default_and_only_accepts_english() {
         let read = |text: &str| Config::parse(text, &us()).unwrap().ocr;
-        assert_eq!(read("").as_deref(), Some("eng"));
-        assert_eq!(
-            read("[text]\nocr = \"eng+ell\"").as_deref(),
-            Some("eng+ell")
-        );
-        assert_eq!(read("[text]\nocr = \"\""), None);
-        for bad in ["\"eng+\"", "\"eng ell\"", "\"../eng\""] {
+        assert_eq!(read(""), None);
+        assert_eq!(read("[text]\nocr = \"off\""), None);
+        assert_eq!(read("[text]\nocr = \"eng\"").as_deref(), Some("eng"));
+        for bad in ["", "ell", "eng+ell", "eng+", "eng ell", "../eng", "on"] {
             let err = format!(
                 "{:#}",
-                Config::parse(&format!("[text]\nocr = {bad}"), &us()).unwrap_err()
+                Config::parse(&format!("[text]\nocr = {bad:?}"), &us()).unwrap_err()
             );
             assert!(err.contains("[text] ocr"), "{bad}: {err}");
         }
-        for text in ["", "[text]\nocr = \"eng+ell\"", "[text]\nocr = \"\""] {
+        for text in ["", "[text]\nocr = \"eng\"", "[text]\nocr = \"off\""] {
             let config = Config::parse(text, &us()).unwrap();
-            let again = Config::parse(&config.render(), &us()).unwrap();
+            let rendered = config.render();
+            assert!(rendered.contains(if config.ocr.is_some() {
+                "ocr = \"eng\""
+            } else {
+                "ocr = \"off\""
+            }));
+            let again = Config::parse(&rendered, &us()).unwrap();
             assert_eq!(again.ocr, config.ocr, "{text:?} reads back the same");
         }
     }
@@ -1534,6 +1543,22 @@ mod tests {
                 Config::parse(&format!("[pixels]\nterminal_processes = {list}"), &us()).is_err()
             );
         }
+    }
+
+    #[test]
+    fn terminal_hint_is_independent_of_the_pixel_detector() {
+        assert!(Config::parse("", &us()).unwrap().terminal_hint);
+        for detector in ["full", "fast", "off"] {
+            for enabled in [true, false] {
+                let text = format!("[pixels]\ndetector = {detector:?}\nterminal_hint = {enabled}");
+                let config = Config::parse(&text, &us()).unwrap();
+                assert_eq!(config.terminal_hint, enabled);
+                let again = Config::parse(&config.render(), &us()).unwrap();
+                assert_eq!(again.terminal_hint, enabled);
+                assert_eq!(again.pixels, config.pixels);
+            }
+        }
+        assert!(Config::parse("[pixels]\nterminal_hint = \"off\"", &us()).is_err());
     }
 
     #[test]
