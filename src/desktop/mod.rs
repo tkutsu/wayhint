@@ -50,7 +50,7 @@ pub use self::{
         Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors,
         window_by_address,
     },
-    kitty::is_kitty,
+    kitty::{is_kitty, listen_on},
     notify::{log, warn},
     recheck::Verdict,
     surfaces::Stack,

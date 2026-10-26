@@ -20,11 +20,13 @@
 //! | `keyboard`  | your keymap, and modifiers held around a click           |
 //! | `run`       | the loop: scan, pick, re-check, click, again             |
 //! | `dump`      | `wayhint dump`, printing each seam as JSON               |
+//! | `doctor`    | `wayhint doctor`, checking the setup a run needs         |
 
 mod action;
 mod cli;
 mod config;
 mod desktop;
+mod doctor;
 mod dump;
 mod geometry;
 mod keyboard;
@@ -102,6 +104,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::Dump(args)) => dump::run(args, cli.config.as_deref()),
+        Some(Command::Doctor) => doctor::run(config(), cli.config.as_deref()),
         Some(Command::Overlay { from }) => overlay_from(&config()?, from),
         Some(Command::Click { at, verb }) => run::click_at(*at, *verb),
     }
