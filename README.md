@@ -215,6 +215,67 @@ Its second line has messages, each with its own icon and colour:
 
 Each message can be turned off under `[info]`.
 
+`[input] visible = false` stops drawing the first line, and
+`[info] visible = false` the messages. With both off there's no box. Either
+way, a bar listening for the input box still gets all of it (next section).
+With `hints` on and the first line hidden, the letters you type show only
+in that bar.
+
+### The input box in a bar
+
+wayhint can send the input box to another program, such as a Quickshell
+bar, to show in its own style. Whenever the box changes, wayhint writes
+the whole of it as one line of JSON to the Unix socket
+`$XDG_RUNTIME_DIR/wayhint-$WAYLAND_DISPLAY.sock`. The bar listens there;
+wayhint connects when a run starts and closes the connection when it
+ends, crash included, so the bar clears its copy when the connection
+closes. Nothing is sent while nobody listens, and a listener that stops
+reading loses its connection instead of slowing your typing. wayhint
+tries again with the next change, and a new connection always starts with
+a whole line, so the latest line is all a bar needs.
+
+A line with `right` armed and `AB` typed:
+
+```json
+{"version":1,"monitor":"HDMI-A-1","mode":"tags","input":"AB","verb":"right","holding":false,"segments":[{"role":"verb","text":"right ","dimmed":true},{"role":"tag_input","text":"AB","dimmed":false}],"matches":null,"info":null}
+```
+
+| Field | Holds |
+|---|---|
+| `version` | `1`; ignore lines with another |
+| `monitor` | The output the run is on, as `HDMI-A-1` |
+| `mode` | `tags`, `text`, or `null` between rounds (reading the windows, clicking) |
+| `input` | The tag letters typed, or the text query, even when the tags show the letters (`hints = false`) |
+| `verb` | The armed verb's name, or `null` |
+| `holding` | A hold keeps a button down: the box says `drop` |
+| `segments` | The first line as the box draws it, in parts with a `role` (`verb`, `drop`, `tag_input`, `query`, `placeholder`, `prefix`, `suffix`, `match_count`) and whether it's `dimmed`. Joined, the texts give the line |
+| `matches` | In text mode once something is typed: `current` (from 1) and `total`, both `null` while the matches are being found (`pending: true`) |
+| `info` | The message, `kind` (`scanning`, `no_targets`, `no_match`, `help`) and `text`, or `null`. The key list's `text` has tabs between columns and a newline per key |
+
+A listener in Quickshell 0.3:
+
+```qml
+SocketServer {
+    active: true
+    path: Quickshell.env("XDG_RUNTIME_DIR") + "/wayhint-" + Quickshell.env("WAYLAND_DISPLAY") + ".sock"
+    handler: Socket {
+        onConnectedChanged: if (!connected) pill.state = null
+        parser: SplitParser {
+            onRead: line => {
+                const state = JSON.parse(line);
+                if (state.version === 1)
+                    pill.state = state;
+            }
+        }
+    }
+}
+```
+
+Quickshell replaces a socket file a crashed bar left behind, and drops
+half a line when a connection closes. Show each segment with a
+`Text { textFormat: Text.PlainText }`, so a typed `<` or `&` shows as
+itself.
+
 ### Moving a click
 
 Arrows typed before the last letter move the click: `Right Right Down`
@@ -383,8 +444,8 @@ The sections:
 | `[style]` | The tags: font, size, colours, border, radius, padding, letter case, position on the control, offset |
 | `[style.leader]` | The line and dot from a moved tag or a nudged click to where it lands |
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
-| `[input]` | The box for what you type: look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
-| `[info]` | The messages under the input box: which show, for how long, their icons and colours |
+| `[input]` | The box for what you type: whether it's drawn, look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
+| `[info]` | The messages under the input box: whether they're drawn, which show, for how long, their icons and colours |
 | `[text]` | Where `Enter` acts on a match, `pick_unique`, tags on targets with no text, and OCR (`eng` or `off`, the default) |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
 | `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |

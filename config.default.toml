@@ -112,6 +112,7 @@
 # messages are its second line. Once called [text.input], which a file may
 # still say. Unset look fields follow [style]; position and offset are on
 # the screen here.
+# visible = true            # false hides the first line; a listening bar still gets it (README: "The input box in a bar")
 # hints = true              # typed tag letters show here, and leave the tags; false dims them on the tags
 # placeholder = "text"      # shown, dimmed, while nothing is typed in text mode
 # prefix = ""               # before the query, as "find: "
@@ -133,6 +134,7 @@
 # What wayhint has to say, as the input box's second line: an icon and a
 # few words in the message's colour, at most two lines. Each kind of
 # message can be turned off.
+# visible = true            # false hides the messages; a listening bar still gets them
 # scanning = true           # "scanning" once a scan takes over half a second
 # no_targets = true         # "no targets" while nothing on the monitor has a tag
 # no_match = true           # named here: a key that matches no tag (dropped), or text nothing matches

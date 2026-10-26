@@ -85,6 +85,7 @@ impl FileText {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
+    visible: Option<bool>,
     hints: Option<bool>,
     placeholder: Option<String>,
     prefix: String,
@@ -133,6 +134,7 @@ impl FileInput {
             );
         }
         Ok(Input {
+            visible: self.visible.unwrap_or(base.visible),
             hints: self.hints.unwrap_or(base.hints),
             prefix: self.prefix,
             suffix: self.suffix,
@@ -147,6 +149,7 @@ impl FileInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInfo {
+    visible: Option<bool>,
     scanning: Option<bool>,
     no_targets: Option<bool>,
     no_match: Option<bool>,
@@ -192,6 +195,7 @@ impl FileInfo {
         };
         let b = base.badges;
         Ok(Info {
+            visible: self.visible.unwrap_or(base.visible),
             scanning: self.scanning.unwrap_or(base.scanning),
             no_targets: self.no_targets.unwrap_or(base.no_targets),
             no_match: self.no_match.unwrap_or(base.no_match),
@@ -2151,6 +2155,27 @@ offset = [-13, 17]
         assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
         assert!(legend.contains("r tag\tright click"), "{legend}");
         assert!(legend.contains("/\ttext mode"), "{legend}");
+    }
+
+    #[test]
+    fn each_line_of_the_input_box_can_be_hidden_on_its_own() {
+        let both = Config::parse("", &us()).unwrap();
+        assert!(both.input.visible && both.info.visible, "drawn by default");
+        for (file, input, info) in [
+            ("[input]\nvisible = false", false, true),
+            ("[info]\nvisible = false", true, false),
+            (
+                "[input]\nvisible = false\n[info]\nvisible = false",
+                false,
+                false,
+            ),
+        ] {
+            let config = Config::parse(file, &us()).unwrap();
+            assert_eq!((config.input.visible, config.info.visible), (input, info));
+            assert!(config.input.hints, "where letters go is apart: {file}");
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!((again.input.visible, again.info.visible), (input, info));
+        }
     }
 
     #[test]
