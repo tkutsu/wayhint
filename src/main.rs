@@ -112,7 +112,7 @@ fn dispatch(cli: &Cli) -> Result<()> {
 struct Saved;
 
 impl pick::Source for Saved {
-    fn rescan(&mut self) -> Result<Option<Snapshot>> {
+    fn rescan(&mut self, _: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
         Ok(None)
     }
 

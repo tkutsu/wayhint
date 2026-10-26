@@ -9,12 +9,15 @@
 //!                 Esc: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
 //!                 one match left (with [text] pick_unique): as Enter
+//!                 a character that matches nothing: dropped, and named
 //! ```
 //!
 //! The text is read once, as text mode starts. Where a match is, the app is
 //! asked only for matches it wasn't asked about before, and only once the
 //! keys typed so far are all in. Nothing is scanned again while text mode
 //! is up; the match is checked again before acting on it (see `run.rs`).
+
+use std::time::Instant;
 
 use anyhow::{Result, bail};
 
@@ -28,7 +31,7 @@ use crate::{
     pick::{Pick, Source},
     selection::Selector,
     snapshot::{Snapshot, Target},
-    style::Input,
+    style::{Input, Notice},
     text::{Check, Place, Search},
 };
 
@@ -82,13 +85,17 @@ fn keys(
     let (input, cursor) = (&config.input, config.text_cursor);
     let verb = selector.armed().map(Action::name);
     // The tags go before the text is read: none is left to be typed.
-    overlay.update(&frame(None, false, verb, input))?;
+    overlay.update(&frame(None, false, verb, input, None))?;
     let mut search = Search::new(source.read_text(shown));
-    overlay.update(&frame(Some(&search), false, verb, input))?;
+    overlay.update(&frame(Some(&search), false, verb, input, None))?;
     // The query changed since the matches were found.
     let mut stale = false;
+    // What was typed that matched nothing, and until when it's named.
+    let mut missed: Option<(String, Instant)> = None;
     loop {
-        let Some(event) = overlay.next_event(None)? else {
+        let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
+            missed = None;
+            overlay.update(&frame(Some(&search), stale, verb, input, None))?;
             continue;
         };
         let (key, mods, typed) = match event {
@@ -135,8 +142,17 @@ fn keys(
         if stale && (!edit || !overlay.has_events()?) {
             find(&mut search, shown, source);
             stale = false;
-            // Typed into one match, not backed into it.
+            let dropped = config.info.no_match
+                && key.code != KeyCode::BACKSPACE
+                && drop_unmatched(&mut search, shown, source).is_some_and(|tried| {
+                    let until = Instant::now() + config.info.duration;
+                    missed = Some((format!("no text has \"{tried}\""), until));
+                    true
+                });
+            // Typed into one match, not backed into it or left there by
+            // a miss.
             if config.pick_unique
+                && !dropped
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
                 && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
@@ -157,8 +173,24 @@ fn keys(
             KeyCode::END => search.last(),
             _ => {}
         }
-        overlay.update(&frame(Some(&search), stale, verb, input))?;
+        let said = missed.as_ref().map(|m| m.0.as_str());
+        overlay.update(&frame(Some(&search), stale, verb, input, said))?;
     }
+}
+
+/// Takes back the characters at the query's end that leave nothing to
+/// match, as typed with the keys that matched nothing: a fast typist's
+/// keys after a miss go with it. The query as typed if any went.
+fn drop_unmatched(
+    search: &mut Search,
+    shown: &Snapshot,
+    source: &mut dyn Source,
+) -> Option<String> {
+    let tried = search.query().to_owned();
+    while search.matches().is_empty() && search.pop() {
+        find(search, shown, source);
+    }
+    (search.query() != tried).then_some(tried)
 }
 
 /// Whether the query is long enough, `UNIQUE` characters, and has just one
@@ -237,12 +269,19 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
 }
 
 /// What text mode shows: every match's lines, the current one's marked,
-/// and the pill. `search` is `None` while the text is being read, and
-/// `stale` while the query's matches are being found: the pill shows `...`
-/// for the count then, and nothing is marked. The pill names the armed
+/// and the input box. `search` is `None` while the text is being read, and
+/// `stale` while the query's matches are being found: the box shows `...`
+/// for the count then, and nothing is marked. The box names the armed
 /// `verb`, dimmed, before the query; with no query yet, it shows
-/// `[text.input] placeholder`, dimmed too.
-fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, input: &Input) -> Frame {
+/// `[input] placeholder`, dimmed too. Under it, `missed` says what was
+/// typed that matched nothing.
+fn frame(
+    search: Option<&Search>,
+    stale: bool,
+    verb: Option<&str>,
+    input: &Input,
+    missed: Option<&str>,
+) -> Frame {
     let prefix = verb.map(|v| format!("{v} ")).unwrap_or_default();
     let (status, placeholder) = match search {
         None => (format!("{} ...", input.placeholder), true),
@@ -284,6 +323,7 @@ fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, input: &Input
             text: format!("{prefix}{status}"),
             typed,
         }),
+        info: missed.map(|m| (Notice::NoMatch, m.to_owned())),
         ..Frame::default()
     }
 }
@@ -291,7 +331,11 @@ fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>, input: &Input
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{geometry::Rect, style::Style, text::Text};
+    use crate::{
+        geometry::Rect,
+        style::Style,
+        text::{Span, Text},
+    };
 
     fn search(contents: &[&str]) -> Search {
         let texts = contents
@@ -329,7 +373,67 @@ mod tests {
     }
 
     fn frame(search: Option<&Search>, stale: bool, verb: Option<&str>) -> Frame {
-        super::frame(search, stale, verb, &Input::new(&Style::default()))
+        super::frame(search, stale, verb, &Input::new(&Style::default()), None)
+    }
+
+    /// Apps that place every span on its text's row, 10 px a character,
+    /// all in view.
+    struct Rows;
+
+    impl Source for Rows {
+        fn rescan(&mut self, _: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
+            unreachable!("text mode never scans")
+        }
+
+        fn keep(&self, _: &mut Snapshot) {
+            unreachable!("text mode opens no block")
+        }
+
+        fn read_text(&mut self, _: &Snapshot) -> Vec<Text> {
+            unreachable!("the texts are given")
+        }
+
+        #[allow(clippy::cast_possible_wrap)]
+        fn locate(&mut self, _: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
+            spans
+                .iter()
+                .map(|s| {
+                    let y = texts[s.text].rect.y;
+                    let x = s.start as i32 * 10;
+                    vec![Rect::new(x, y, (s.end - s.start) as i32 * 10, 20)]
+                })
+                .collect()
+        }
+
+        fn shows(&self, _: &Snapshot, _: usize, _: Point) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn characters_that_match_nothing_are_dropped_together() {
+        let shown = Snapshot::build(1, 0, std::iter::empty());
+        let mut found = search(&["contact", "falcon"]);
+        "con".chars().for_each(|c| found.push(c));
+        find(&mut found, &shown, &mut Rows);
+        assert_eq!(drop_unmatched(&mut found, &shown, &mut Rows), None);
+        // Typed fast: t matches contact, then x and y match nothing.
+        "txy".chars().for_each(|c| found.push(c));
+        find(&mut found, &shown, &mut Rows);
+        assert_eq!(
+            drop_unmatched(&mut found, &shown, &mut Rows).as_deref(),
+            Some("contxy")
+        );
+        assert_eq!(found.query(), "cont");
+        assert_eq!(found.matches().len(), 1, "contact is still found");
+        let mut nothing = search(&["contact"]);
+        nothing.push('q');
+        find(&mut nothing, &shown, &mut Rows);
+        assert_eq!(
+            drop_unmatched(&mut nothing, &shown, &mut Rows).as_deref(),
+            Some("q")
+        );
+        assert_eq!(nothing.query(), "", "nothing left to match");
     }
 
     #[test]
@@ -381,7 +485,7 @@ mod tests {
             ..Input::new(&Style::default())
         };
         let display = |stale| {
-            super::frame(Some(&found), stale, Some("double"), &input)
+            super::frame(Some(&found), stale, Some("double"), &input, None)
                 .input
                 .unwrap()
         };
@@ -393,9 +497,9 @@ mod tests {
             placeholder: "find…".into(),
             ..input
         };
-        let waiting = super::frame(Some(&search(&["x"])), false, None, &empty);
+        let waiting = super::frame(Some(&search(&["x"])), false, None, &empty, None);
         assert_eq!(waiting.input.unwrap().text, "find…");
-        let reading = super::frame(None, false, None, &empty);
+        let reading = super::frame(None, false, None, &empty, None);
         assert_eq!(reading.input.unwrap().text, "find… ...");
     }
 

@@ -67,7 +67,7 @@ pub struct Note {
 }
 
 impl Note {
-    #[allow(dead_code)] // pick's input box isn't wired yet
+    #[cfg(test)]
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
