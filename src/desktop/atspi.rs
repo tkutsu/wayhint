@@ -33,12 +33,13 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use atspi::{
-    AccessibilityConnection, CoordType, Granularity, Interface, ObjectRefOwned, State, StateSet,
+    CoordType, Granularity, Interface, ObjectRefOwned, State, StateSet,
     proxy::{
         accessible::AccessibleProxy, action::ActionProxy, application::ApplicationProxy,
         component::ComponentProxy, text::TextProxy,
     },
 };
+use atspi_connection::AccessibilityConnection;
 use futures::{StreamExt as _, future, stream};
 use serde::Serialize;
 use zbus::proxy::CacheProperties;
