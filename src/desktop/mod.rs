@@ -255,7 +255,7 @@ impl Desktop {
         monitor: &Monitor,
         pixels: Option<Detector>,
         terminals: &[String],
-    ) -> (Snapshot, Vec<anyhow::Error>) {
+    ) -> (Snapshot, Vec<Unread>) {
         // A layer with no frame only covers.
         let readable: Vec<&Window> = stack
             .windows
@@ -275,7 +275,14 @@ impl Desktop {
         let mut seen = Vec::new();
         // `anyhow!` copies the text into the error: `Error::msg` takes it
         // as it is, and an error can't hold a borrowed `&String`.
-        let mut failed: Vec<_> = stack.unplaced.iter().map(|u| anyhow!("{u}")).collect();
+        let mut failed: Vec<_> = stack
+            .unplaced
+            .iter()
+            .map(|u| Unread {
+                app: None,
+                error: anyhow!("{u}"),
+            })
+            .collect();
         for (window, read) in readable.into_iter().zip(reads) {
             let detector = pixels.filter(|_| window.kind == Kind::Client);
             match (read, detector) {
@@ -283,13 +290,15 @@ impl Desktop {
                     let filtered = filter::filter(&tree);
                     seen.push(Seen::Tree(tree, filtered, stats));
                 }
-                (Err(e), None) => failed.push(e),
+                (Err(e), None) => failed.push(Unread::new(window, e)),
                 (Err(no_tree), Some(detector)) => {
                     match look(&mut self.camera, window, detector, terminals) {
                         Ok((found, picture, stats)) => {
                             seen.push(Seen::Pixels(window.clone(), found, picture, stats));
                         }
-                        Err(e) => failed.push(anyhow!("{no_tree:#}, and {e:#}")),
+                        Err(e) => {
+                            failed.push(Unread::new(window, anyhow!("{no_tree:#}, and {e:#}")));
+                        }
                     }
                 }
             }
@@ -543,7 +552,7 @@ impl Desktop {
                 }
             }
             let Some(languages) = ocr else {
-                unread.extend(kitty.map(|e| e.context(window.class.clone())));
+                unread.extend(kitty.map(|e| Unread::new(window, e.context(window.class.clone()))));
                 continue;
             };
             let started = self.shoot(&window.address).and_then(|frame| {
@@ -555,9 +564,14 @@ impl Desktop {
                     jobs.push((index, job));
                     self.pictures.push((window.address.clone(), frame));
                 }
-                (Err(e), None) => unread.push(e.context(window.class.clone())),
+                (Err(e), None) => {
+                    unread.push(Unread::new(window, e.context(window.class.clone())));
+                }
                 (Err(e), Some(kitty)) => {
-                    unread.push(anyhow!("{}: {kitty:#}, and {e:#}", window.class));
+                    unread.push(Unread::new(
+                        window,
+                        anyhow!("{}: {kitty:#}, and {e:#}", window.class),
+                    ));
                 }
             }
         }
@@ -576,7 +590,7 @@ impl Desktop {
                     start: 0,
                     content,
                 }),
-                Err(e) => unread.push(e.context(window.class.clone())),
+                Err(e) => unread.push(Unread::new(window, e.context(window.class.clone()))),
             }
         }
         Reading {
@@ -734,7 +748,24 @@ pub struct Reading {
     /// Why reading the accessible objects stopped early, if it did.
     pub incomplete: Option<String>,
     /// The windows whose text couldn't be read, and why.
-    pub unread: Vec<anyhow::Error>,
+    pub unread: Vec<Unread>,
+}
+
+/// A failed read keeps its app separately from the error's wording, so
+/// warnings from several windows can share one notification.
+pub struct Unread {
+    /// Unknown for compositor placement failures that have no window.
+    pub app: Option<String>,
+    pub error: anyhow::Error,
+}
+
+impl Unread {
+    fn new(window: &Window, error: anyhow::Error) -> Self {
+        Self {
+            app: Some(window.class.clone()),
+            error,
+        }
+    }
 }
 
 /// Whether the frame `scanned`'s tags came from is still clearly the
