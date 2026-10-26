@@ -210,5 +210,5 @@
 
 
 [scan]
-# refresh = 500             # ms the tags stay up before the windows are scanned again; 0 for only after a click
+# refresh = 500             # ms the tags stay up before the windows are scanned again, doubling up to 2 s while nothing changes; 0 for only after a click
 # merge_distance = 0        # px between hint centres that share one tag; 0 keeps every hint

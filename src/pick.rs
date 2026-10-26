@@ -2,7 +2,7 @@
 //! the user leaves. The glue between `overlay` (pixels and keys) and
 //! `selection` (what the keys mean), so neither has to know the other.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
@@ -27,6 +27,9 @@ const EDGE: i32 = 5;
 /// ticks (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` a tick.
 const SPEED_UP: u16 = 8;
 const TOP_SPEED: u16 = 4;
+/// The longest a screen that stays the same waits between refreshes: each
+/// one that finds nothing changed doubles `[scan] refresh`, up to this.
+const IDLE_REFRESH: Duration = Duration::from_secs(2);
 
 /// How a pick ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +155,8 @@ pub trait Source {
 ///
 /// Every `[scan] refresh` with no pick, `source` scans again and the tags
 /// follow: a target found again keeps its tag, and what was typed for it
-/// stays typed (see `Selector::relabel`).
+/// stays typed (see `Selector::relabel`). While nothing changes, the scans
+/// come further apart (see `IDLE_REFRESH`).
 ///
 /// A block's tag (a pixel target with lines in `opens`) opens it instead
 /// of picking: `shown` becomes the block opened, its lines filtered by
@@ -208,8 +212,9 @@ pub fn pick(
     overlay.show(&tags(&selector, shown, pointer, &said))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
-    let next = || config.refresh.map(|every| Instant::now() + every);
-    let mut due = next();
+    let mut every = config.refresh;
+    let next = |every: Option<Duration>| every.map(|every| Instant::now() + every);
+    let mut due = next(every);
     loop {
         let wake = due.into_iter().chain(said.until()).min();
         let Some(event) = overlay.next_event(wake)? else {
@@ -224,7 +229,7 @@ pub fn pick(
             // A scan holds up the keys for as long as it takes, so none
             // while an arrow is held: the nudge would freeze mid-move.
             if overlay.holding() {
-                due = next();
+                due = next(every);
                 continue;
             }
             // A source that can't change is asked once.
@@ -256,7 +261,11 @@ pub fn pick(
                     overlay.update(&frame)?;
                 }
             }
-            due = next();
+            every = match refresh {
+                Refresh::Unchanged => every.map(slower),
+                Refresh::Redraw | Refresh::Retag => config.refresh,
+            };
+            due = next(every);
             continue;
         };
         let (key, mods, ticks) = match event {
@@ -356,6 +365,12 @@ fn open(shown: &mut Snapshot, index: usize, source: &dyn Source, config: &Config
     }
     *shown = opened;
     true
+}
+
+/// The wait after a refresh that found nothing changed: twice `every`, up
+/// to `IDLE_REFRESH`, and never shorter than `every`.
+fn slower(every: Duration) -> Duration {
+    (every * 2).min(IDLE_REFRESH).max(every)
 }
 
 /// Brings `shown` up to date with a fresh scan from `source`: a target
@@ -691,6 +706,16 @@ mod tests {
         }
         let selector = Selector::new(3, config.alphabet.len(), Action::Left);
         (config, snapshot, selector)
+    }
+
+    #[test]
+    fn an_unchanged_screen_is_refreshed_less_often_up_to_two_seconds() {
+        let ms = Duration::from_millis;
+        assert_eq!(slower(ms(500)), ms(1000));
+        assert_eq!(slower(ms(1500)), ms(2000));
+        assert_eq!(slower(ms(2000)), ms(2000));
+        // A setting slower than that stays as it is.
+        assert_eq!(slower(ms(5000)), ms(5000));
     }
 
     #[test]

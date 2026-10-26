@@ -15,7 +15,9 @@
 //! during the run counts as a window right above its own. While the tags
 //! are up, the windows are scanned again every `[scan] refresh`, so a page that
 //! loaded or a window that opened gets tags without a key, and a target
-//! found again keeps its tag. When the monitor switches to another
+//! found again keeps its tag. While nothing changes, the scans come further
+//! apart, up to 2 s, and they place labels by the windows' pictures from
+//! the round's first scan. When the monitor switches to another
 //! workspace (a Super bind still reaches Hyprland while wayhint holds the
 //! keys), the tags follow it at once. A window with no accessibility tree
 //! gets tags from its pixels; a block of text there gets one tag, which
@@ -501,7 +503,8 @@ struct Scans<'a> {
 
 impl<'a> Scans<'a> {
     /// Scans the windows `monitor` shows, calling `slow` if that takes a
-    /// while.
+    /// while. The windows' pictures are taken afresh, and the refreshes
+    /// place labels by them.
     fn new(
         desktop: &'a mut Desktop,
         warned: &'a mut HashSet<String>,
@@ -509,6 +512,7 @@ impl<'a> Scans<'a> {
         config: &'a Config,
         slow: &mut dyn FnMut(),
     ) -> Result<Self> {
+        desktop.forget_pictures();
         let (stack, latest) = scan(desktop, warned, monitor, config, slow)?;
         Ok(Self {
             desktop,
