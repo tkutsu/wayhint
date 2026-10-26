@@ -127,6 +127,11 @@ hl.bind("SUPER + CTRL + W", hl.dsp.exec_cmd("wayhint --text"))
 Pressing the keybind again closes wayhint. On an empty workspace it keeps
 listening for controls to appear.
 
+`wayhint doctor` checks the setup: the config, Hyprland, each Wayland
+protocol above, the accessibility bus, the fonts, Tesseract when OCR is
+on, and kitty's remote control. It prints one line per check and says
+what to install or set for each one that fails.
+
 ## Getting tags in every app
 
 An app gets exact tags only if it puts its controls on the accessibility
@@ -173,21 +178,40 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | arrows, before the last letter or `Space` | Move where that one click lands, 10 px a press; held, faster |
 | the repeat key, if you set one | The last command again on the same control, even after its tag changed |
 | `/` | Text mode |
+| `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
 | `Esc` | Exits; while a hold is down, lets go where it is instead |
 
 ### Verbs and modifiers
 
 A verb can come anywhere before a tag's last letter: `a t s` double-clicks
-`as`, as `t a s` does. The typed verb shows in front of every tag (`tAS`)
-and its name shows at the bottom of the screen. Typing another verb
-replaces it. Typing the same verb again before any letter does it where
+`as`, as `t a s` does. The verb's name shows in the input box. Typing
+another verb replaces it. Typing the same verb again before any letter does it where
 the last command was, or at the pointer if there was none yet, so
 `PageDown PageDown` scrolls the same pane again.
 
 Ctrl-click opens a link in a background tab, Shift-click extends a
 selection, Ctrl-scroll zooms. Right Alt doesn't count as Alt, since on many
 layouts it's AltGr.
+
+### The input box
+
+A box near the bottom of the screen shows what you've typed: the verb's
+name, dimmed, then the tag letters so far, while the tags keep only the
+letters still to type. With `[input] hints = false` the letters stay on
+the tags instead, dimmed, after the verb's key (`tAS`). In text mode the
+box holds the query and the match count.
+
+Its second line has messages, each with its own icon and colour:
+
+- `scanning`, when reading the windows has taken over half a second.
+- `no targets`, while nothing on the monitor has a tag.
+- A letter no tag starts with, or text nothing on screen matches. The key
+  is dropped, so a typo costs nothing, and the message goes after two
+  seconds.
+- The key list, while `?` has it up.
+
+Each message can be turned off under `[info]`.
 
 ### Moving a click
 
@@ -201,7 +225,7 @@ follows the pointer.
 ### Holding and dragging
 
 A hold keeps its button down across rounds. The tags come back with
-`drop` at the bottom of the screen, and whatever you pick next (a tag,
+`drop` in the input box, and whatever you pick next (a tag,
 `Space`, a text match, a verb typed twice) is where it lets go, moving
 there in small steps so apps see a drag. `, ,` or `Esc` lets go where it
 went down: a long press. A scroll never clicks, so it never ends the run.
@@ -386,18 +410,11 @@ compositor's IPC and capture windows with `ext-image-copy-capture-v1`.
 
 ## Roadmap
 
-These settings are read and checked, but nothing acts on them yet:
-
-- `[info]`: the "scanning", "no targets" and "no match" messages, and
-  dropping a key that matches no tag.
-- `[input] hints`: typed tag letters moving from the tags to the input
-  box. For now they show dimmed on the tags.
-- `[keys] help`: the key list in the info box.
-- `[pointer] settle`: the wait after a click is still a fixed 150 ms.
-
-Also planned: tags drawn sharp on scaled monitors, and `wayhint doctor`,
-which checks the setup (the protocols, the accessibility bus, Tesseract,
-kitty's socket) and says what's missing.
+- An ignore key: type it before a tag and that control (its app, role and
+  name) never gets a tag again, with `wayhint ignore --list` and
+  `--clear` to undo it.
+- A package for the AUR.
+- Other compositors, as above.
 
 ## Limitations
 
@@ -405,8 +422,10 @@ kitty's socket) and says what's missing.
 
 - Hyprland only (see [Other compositors](#other-compositors)).
 - One monitor at scale 1 is the tested setup. Only the focused monitor
-  gets tags. On a scaled monitor the tags are drawn at scale 1 and look
-  blurry. Several monitors and rotated ones are untested.
+  gets tags. On a scaled monitor the tags are drawn at its full
+  resolution through `wp_viewporter`; without it, a fractional scale is
+  drawn at 1 and looks blurry. Several monitors and rotated ones are
+  untested.
 - If the monitor changes size or scale during a run, the run ends.
 - A key held down while the tags change is ignored; press it again once
   the new tags show. The same goes when a paragraph opens into lines.
