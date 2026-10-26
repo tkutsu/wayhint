@@ -5,7 +5,8 @@
 //! ```text
 //! text key -> tags hidden -> text read once -> keys: query edits, arrows
 //!                                                |
-//!                 Esc / Backspace with nothing typed: back to the tags
+//!                 Backspace with nothing typed: back to the tags
+//!                 Esc: leave wayhint
 //!                 Enter: the armed verb (or the default) on the current match
 //! ```
 //!
@@ -44,8 +45,9 @@ pub struct Chosen {
     pub check: Option<Check>,
 }
 
-/// Text mode, from the text key until a match is chosen (`Some` pick), or
-/// until Esc or Backspace with nothing typed go back to the tags (`None`).
+/// Text mode, from the text key until a match is chosen or Esc leaves
+/// (`Some` pick), or until Backspace with nothing typed goes back to the
+/// tags (`None`).
 /// `selector` holds the verb and the nudge typed before the text key.
 pub fn search(
     overlay: &mut Overlay,
@@ -95,14 +97,9 @@ fn keys(
             Event::Workspace => return Ok(Some(Pick::Rescan)),
         };
         let edit = match key.code {
-            // Esc clears the query and Backspace takes back its last
-            // character; with nothing typed, both go back to the tags.
-            KeyCode::ESC => {
-                if !search.clear() {
-                    return Ok(None);
-                }
-                true
-            }
+            // Esc leaves, as with the tags. Backspace takes back the last
+            // character; with nothing typed, it goes back to the tags.
+            KeyCode::ESC => return Ok(Some(Pick::Leave)),
             KeyCode::BACKSPACE => {
                 if !search.pop() {
                     return Ok(None);
@@ -400,7 +397,7 @@ mod tests {
                 .is_empty(),
             "stale: none"
         );
-        found.clear();
+        while found.pop() {}
         found.update(&|_, _| true);
         let cleared = frame(Some(&found), false, None, SCREEN);
         assert!(

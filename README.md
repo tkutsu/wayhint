@@ -78,7 +78,7 @@ bind = SUPER, slash, exec, wayhint
 | the repeat key, if you set one | Does the last command again on the same control, even after its tag changed |
 | `/` | Text mode: the tags go, and what you type finds text on screen |
 | `Backspace` | Removes the last letter or verb typed |
-| `Esc` | Clears typed letters, the verb and the arrows' move; with none, exits |
+| `Esc` | Exits, whatever was typed |
 
 A verb can also come between a tag's letters: `a t s` double-clicks
 `as`, as `t a s` does. A typed verb shows in front of every tag (`tAS`
@@ -114,8 +114,8 @@ and `End` go to the first and last. `Enter` clicks the middle of the
 current match's first line, with the verb typed before `/` if there was
 one (`t/save Enter` double-clicks "save"), and `Shift`, `Ctrl` or `Alt`
 held on `Enter` hold that key through the click. Nothing is clicked until
-`Enter`. `Backspace` takes back the last character and `Esc` clears the
-query; with nothing typed, either one goes back to the tags. The bottom of
+`Enter`. `Backspace` takes back the last character; with nothing typed,
+it goes back to the tags. `Esc` exits, as it does from the tags. The bottom of
 the screen shows the query and where you are, as in `con  2/5`.
 
 A query in lower case ignores case, and one capital letter makes it exact.
