@@ -27,8 +27,13 @@
 //!
 //! The rule behind both: a missing tag is fine, a click that lands on
 //! something other than the tagged control is not.
+//!
+//! An app's own menus are popups of its window, which Hyprland doesn't
+//! list either. The app announces each one as it opens (`menus`), with
+//! a box relative to its window, so a menu goes right above that window
+//! ([`add_menus`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::{
     desktop::{Kind, Window, tree::ObjectId},
@@ -168,6 +173,76 @@ pub fn popup(frame: &Frame, pid: u32, monitor: i64) -> Window {
         focused: false,
         kind: Kind::Popup,
         frames: vec![frame.object.clone()],
+    }
+}
+
+/// An app's open menu: its process, and its frame with the box relative to
+/// the corner of the app's window, as the app reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Menu {
+    pub pid: u32,
+    pub frame: Frame,
+}
+
+/// Puts each of `menus` right above its app's window in `stack`, in the
+/// order they opened: a menu is drawn with its window, over it and under
+/// whatever is over the window. The window is the app's only one there,
+/// else its focused one, the one a menu opens for. An app with none there
+/// has its menus on another monitor; one with several, none focused, gets
+/// an [`unknown`] blocker. An X11 app's menu (its window in `xwayland`) is
+/// skipped: Hyprland lists it as a client of its own.
+pub fn add_menus(
+    stack: &mut Stack,
+    menus: &[Menu],
+    xwayland: &BTreeSet<String>,
+    screen: Rect,
+    monitor: i64,
+) {
+    for menu in menus {
+        let windows = || {
+            let all = stack.windows.iter().enumerate();
+            all.filter(|(_, w)| w.kind == Kind::Client && w.pid == menu.pid)
+        };
+        let parent = match windows().count() {
+            0 => continue,
+            1 => windows().next(),
+            _ => windows().find(|(_, w)| w.focused),
+        };
+        let Some((at, parent)) = parent else {
+            stack.unplaced.push(format!(
+                "pid {}: a menu is open in one of its windows, and which can't be told",
+                menu.pid
+            ));
+            stack.windows.push(unknown(menu.pid, monitor, screen));
+            continue;
+        };
+        if xwayland.contains(&parent.address) {
+            continue;
+        }
+        let rect = menu.frame.rect.offset(parent.rect.origin());
+        if rect.intersect(screen).is_none() {
+            continue;
+        }
+        let surface = Window {
+            address: format!("menu {}{}", menu.frame.object.bus, menu.frame.object.path),
+            pid: menu.pid,
+            class: "menu".into(),
+            title: String::new(),
+            rect,
+            monitor,
+            focused: false,
+            kind: Kind::Menu,
+            frames: vec![menu.frame.object.clone()],
+        };
+        // Past the menus already open over the same window.
+        let mut to = at + 1;
+        while stack.windows.get(to).is_some_and(|w| w.kind == Kind::Menu) {
+            to += 1;
+        }
+        stack.windows.insert(to, surface);
+        if to <= stack.popup_floor {
+            stack.popup_floor += 1;
+        }
     }
 }
 
@@ -454,5 +529,89 @@ mod tests {
         let placed = place(&layers, &frames, &corners());
         assert_eq!(placed.layers.len(), 1);
         assert_eq!((placed.popups.len(), placed.unplaced), (0, 1));
+    }
+
+    /// Dolphin's context menu, 392x302 at 238,353 in its window.
+    fn menu(pid: u32) -> Menu {
+        Menu {
+            pid,
+            frame: frame("/menu", Rect::new(238, 353, 392, 302)),
+        }
+    }
+
+    /// Two windows of pid 7 side by side, `float` (pid 8) over the left one,
+    /// a top bar.
+    fn desk(focused: Option<&str>) -> Stack {
+        let window = |address: &str, pid, rect| Window {
+            pid,
+            focused: Some(address) == focused,
+            ..surface(address, Kind::Client, rect)
+        };
+        Stack {
+            windows: vec![
+                window("left", 7, Rect::new(0, 38, 1280, 1402)),
+                window("right", 7, Rect::new(1280, 38, 1280, 1402)),
+                window("float", 8, Rect::new(400, 600, 300, 200)),
+                layer("bar", 2, BAR),
+            ],
+            popup_floor: 4,
+            ..Stack::default()
+        }
+    }
+
+    fn addresses(stack: &Stack) -> Vec<&str> {
+        stack.windows.iter().map(|w| w.address.as_str()).collect()
+    }
+
+    #[test]
+    fn a_menu_goes_right_above_its_window() {
+        let mut stack = desk(Some("left"));
+        add_menus(&mut stack, &[menu(7)], &BTreeSet::new(), SCREEN, 0);
+        let menu = "menu :1.9/menu";
+        assert_eq!(addresses(&stack), ["left", menu, "right", "float", "bar"]);
+        assert_eq!(stack.windows[1].rect, Rect::new(238, 391, 392, 302));
+        assert_eq!(stack.popup_floor, 5, "still just past the bar");
+        // It hides the window's tags under it, the window over it its own.
+        assert_eq!(uncovered(&stack, "left", Point::new(300, 400)), None);
+        assert!(uncovered(&stack, menu, Point::new(300, 400)).is_some());
+        assert_eq!(uncovered(&stack, menu, Point::new(500, 650)), None);
+    }
+
+    #[test]
+    fn a_later_menu_goes_above_an_earlier_one() {
+        let mut stack = desk(Some("right"));
+        let sub = Menu {
+            pid: 7,
+            frame: frame("/sub", Rect::new(600, 353, 200, 100)),
+        };
+        add_menus(&mut stack, &[menu(7), sub], &BTreeSet::new(), SCREEN, 0);
+        assert_eq!(
+            addresses(&stack),
+            [
+                "left",
+                "right",
+                "menu :1.9/menu",
+                "menu :1.9/sub",
+                "float",
+                "bar"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_menu_of_one_of_several_unfocused_windows_hides_everything() {
+        let mut stack = desk(None);
+        add_menus(&mut stack, &[menu(7)], &BTreeSet::new(), SCREEN, 0);
+        assert_eq!(stack.windows.last().map(|w| w.rect), Some(SCREEN));
+        assert_eq!(stack.unplaced.len(), 1);
+    }
+
+    #[test]
+    fn menus_of_x11_apps_and_apps_elsewhere_are_left_out() {
+        let mut stack = desk(Some("left"));
+        let xwayland = BTreeSet::from(["left".to_string()]);
+        add_menus(&mut stack, &[menu(7), menu(9)], &xwayland, SCREEN, 0);
+        assert_eq!(addresses(&stack), ["left", "right", "float", "bar"]);
+        assert_eq!(stack.unplaced.len(), 0);
     }
 }

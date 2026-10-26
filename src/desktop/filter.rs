@@ -330,7 +330,10 @@ impl Candidate<'_> {
             Some(Reason::TheWindow)
         } else if !s.enabled && !s.sensitive {
             Some(Reason::Disabled)
-        } else if !self.is_control() && !editable_like && !self.is_body() {
+        } else if !self.is_control() && !editable_like && !self.is_body()
+            // Firefox gives a menu's separators a `click`.
+            || self.role() == "separator"
+        {
             Some(Reason::NoAction)
         } else {
             None
@@ -644,6 +647,28 @@ mod tests {
             !is_candidate(&tree.nodes[text]),
             "plain text is never read in full"
         );
+    }
+
+    #[test]
+    fn a_separator_is_no_target_whatever_it_lists() {
+        let mut b = Builder::new();
+        let item = b.add(
+            Some(0),
+            "menu item",
+            "Reload",
+            &["click"],
+            Rect::new(10, 10, 80, 30),
+        );
+        let line = b.add(
+            Some(0),
+            "separator",
+            "",
+            &["click"],
+            Rect::new(10, 40, 80, 17),
+        );
+        let tree = b.tree();
+        assert_eq!(kept(&tree), vec![item]);
+        assert_eq!(reason(&tree, line), Some(Reason::NoAction));
     }
 
     #[test]

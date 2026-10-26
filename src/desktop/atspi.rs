@@ -7,7 +7,8 @@
 //! 2. Find the window's frame among the app's children: by title, else (for
 //!    the focused window only) the one marked active. Two candidates is
 //!    ambiguous: refuse, never guess. A layer's or popup's frame is known
-//!    before the scan (see `surfaces::place`), so it skips 1 and 2.
+//!    before the scan (see `surfaces::place`), and so is an open menu
+//!    (see `menus`), so they skip 1 and 2.
 //! 3. Walk the frame breadth first, one level at a time, at most
 //!    [`IN_FLIGHT`] requests at once, reading role, states and interfaces.
 //! 4. For candidates only (see `filter::is_candidate`), read name, box and
@@ -44,10 +45,10 @@ use zbus::proxy::CacheProperties;
 
 use crate::{
     desktop::{
-        Window,
+        Kind, Window,
         filter::{self, DOCUMENT_ROLES},
         recheck::Fresh,
-        surfaces::Frame,
+        surfaces::{Frame, Menu},
         tree::{Details, Node, ObjectId, States, Tree},
     },
     geometry::{Point, Rect},
@@ -112,7 +113,7 @@ impl Scanner {
     }
 
     /// Reads the tree under `frame`, a frame already known to be `window`'s
-    /// (a layer's or a popup's, see `surfaces::place`).
+    /// (a layer's, a popup's or a menu's, see `surfaces`).
     pub async fn scan_frame(
         &self,
         window: &Window,
@@ -120,8 +121,46 @@ impl Scanner {
         bounds: Bounds,
     ) -> (Tree, Stats) {
         let started = Instant::now();
-        let walk = Walk::new(self.a11y.connection(), started + bounds.time);
+        let mut walk = Walk::new(self.a11y.connection(), started + bounds.time);
+        if window.kind == Kind::Menu
+            && let Err(e) = walk.enter_menu(frame).await
+        {
+            walk.mark_incomplete(format!("the menu didn't answer: {e:#}"));
+            let tree = Tree {
+                window: window.clone(),
+                nodes: Vec::new(),
+            };
+            return (tree, walk.stats(0, started));
+        }
         walk.scan(window, frame.clone(), bounds, started).await
+    }
+
+    /// Each of `open` menus with its app's process and its box relative to
+    /// the app's window, all within `timeout`; `None` for one that didn't
+    /// answer. On Wayland an app's screen is its window: Qt and Firefox
+    /// both put the window's corner at 0,0 there.
+    pub async fn menus(&self, open: &[ObjectId], timeout: Duration) -> Vec<Option<Menu>> {
+        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let read = |object: &ObjectId| {
+            let walk = &walk;
+            let object = object.clone();
+            async move {
+                let dbus = zbus::fdo::DBusProxy::new(walk.conn).await.ok()?;
+                let bus = object.bus.as_str().try_into().ok()?;
+                let (pid, rect) = tokio::join!(
+                    walk.call(dbus.get_connection_unix_process_id(bus)),
+                    walk.extents_in(&object, CoordType::Screen)
+                );
+                Some(Menu {
+                    pid: pid.ok()?,
+                    frame: Frame {
+                        object,
+                        rect: rect.ok()?,
+                    },
+                })
+            }
+        };
+        future::join_all(open.iter().map(read)).await
     }
 
     /// The top-level frames that are showing, of each app whose process is
@@ -146,14 +185,19 @@ impl Scanner {
     }
 
     /// Asks one object again: role, name, states and box, and the boxes of
-    /// the scroll areas in `clips`, in one bounded go.
+    /// the scroll areas in `clips`, in one bounded go. In an open `menu`,
+    /// as the menu's scan read it.
     pub async fn read(
         &self,
         object: &ObjectId,
         clips: &[ObjectId],
+        menu: Option<&ObjectId>,
         timeout: Duration,
     ) -> Result<Fresh> {
-        let walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        let mut walk = Walk::new(self.a11y.connection(), Instant::now() + timeout);
+        if let Some(menu) = menu {
+            walk.enter_menu(menu).await?;
+        }
         walk.read_fresh(object, clips).await
     }
 
@@ -246,6 +290,12 @@ struct Walk<'c> {
     deadline: Instant,
     requests: Cell<usize>,
     incomplete: RefCell<Option<String>>,
+    /// In an open menu: its corner, in the coordinates its items report.
+    /// Their boxes are measured from it, so they fit the menu's surface:
+    /// Qt measures from the menu's own corner, Firefox from its window's.
+    /// And what's visible counts as showing: Firefox never says a menu
+    /// shows on Wayland, though it said it opened.
+    menu: Option<Point>,
 }
 
 /// A node waiting to be read, with what the walk knows from its parent.
@@ -262,6 +312,22 @@ impl<'c> Walk<'c> {
             deadline,
             requests: Cell::new(0),
             incomplete: RefCell::new(None),
+            menu: None,
+        }
+    }
+
+    /// Reads boxes from here on as inside the open `menu` (see `Walk::menu`).
+    async fn enter_menu(&mut self, menu: &ObjectId) -> Result<()> {
+        self.menu = Some(self.extents(menu).await?.origin());
+        Ok(())
+    }
+
+    fn stats(&self, nodes: usize, started: Instant) -> Stats {
+        Stats {
+            ms: millis(started.elapsed()),
+            nodes,
+            requests: self.requests.get(),
+            incomplete: self.incomplete.take(),
         }
     }
 
@@ -441,12 +507,7 @@ impl<'c> Walk<'c> {
         };
         self.read_candidates(&mut tree).await;
         self.read_scroll_areas(&mut tree).await;
-        let stats = Stats {
-            ms: millis(started.elapsed()),
-            nodes: tree.nodes.len(),
-            requests: self.requests.get(),
-            incomplete: self.incomplete.take(),
-        };
+        let stats = self.stats(tree.nodes.len(), started);
         (tree, stats)
     }
 
@@ -513,7 +574,8 @@ impl<'c> Walk<'c> {
             // the name instead.
             Err(_) => self.call(proxy.get_role_name()).await?,
         };
-        let (states, interfaces) = (states_from(states?), interfaces?);
+        let (mut states, interfaces) = (states_from(states?), interfaces?);
+        states.showing |= self.menu.is_some() && states.visible;
         let component = interfaces.contains(Interface::Component);
 
         let document = DOCUMENT_ROLES.contains(&role.as_str());
@@ -553,7 +615,13 @@ impl<'c> Walk<'c> {
     async fn extents_in(&self, object: &ObjectId, coords: CoordType) -> Result<Rect> {
         let component: ComponentProxy = self.proxy(object).await?;
         let (x, y, w, h) = self.call(component.get_extents(coords)).await?;
-        Ok(Rect::new(x, y, w, h))
+        let rect = Rect::new(x, y, w, h);
+        Ok(match self.menu {
+            Some(corner) if coords == CoordType::Window => {
+                rect.offset(Point::new(-corner.x, -corner.y))
+            }
+            _ => rect,
+        })
     }
 
     /// The coordinates to ask an object's text in, and how far to move
@@ -773,10 +841,12 @@ impl<'c> Walk<'c> {
             Ok(role) => role.name().to_string(),
             Err(_) => self.call(accessible.get_role_name()).await?,
         };
+        let mut states = states_from(states?);
+        states.showing |= self.menu.is_some() && states.visible;
         Ok(Fresh {
             role,
             name: name?,
-            states: states_from(states?),
+            states,
             bounds: bounds?,
             clips,
         })
