@@ -12,10 +12,7 @@ use std::{
     io::{Read as _, Write as _},
     os::{
         linux::net::SocketAddrExt as _,
-        unix::{
-            fs::DirBuilderExt as _,
-            net::{SocketAddr, UnixStream},
-        },
+        unix::net::{SocketAddr, UnixStream},
     },
     path::PathBuf,
     time::{Duration, Instant},
@@ -24,7 +21,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use super::Window;
+use super::{Window, runtime_dir};
 use crate::{geometry::Point, text::Cells};
 
 /// The kitten, written out where kitty can run it from.
@@ -198,13 +195,7 @@ fn listen_on(pid: u32) -> Result<String> {
 /// has it. In the runtime directory: only this user can change it, and
 /// kitty runs whatever it holds.
 fn kitten() -> Result<PathBuf> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR isn't set")?;
-    let dir = PathBuf::from(runtime).join("wayhint");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
-    let path = dir.join("kitty.py");
+    let path = runtime_dir()?.join("kitty.py");
     if fs::read_to_string(&path).ok().as_deref() != Some(KITTEN) {
         fs::write(&path, KITTEN)?;
     }
