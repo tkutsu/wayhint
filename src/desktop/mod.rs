@@ -26,7 +26,7 @@ pub mod surfaces;
 pub mod tree;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     os::unix::fs::DirBuilderExt as _,
     path::PathBuf,
@@ -95,8 +95,43 @@ pub struct Desktop {
     scans: u32,
     /// Made the first time a window has no tree: most runs never need it.
     camera: Option<Camera>,
+    /// Each client's picture for placing labels, by address, until
+    /// [`Desktop::forget_pictures`].
+    pictures: HashMap<String, Picture>,
     /// The apps' open menus, once a run starts following them.
     menus: Option<Menus>,
+}
+
+/// A client's picture as `layout` reads it, and what it read there. A
+/// refresh places labels around the ink it showed then instead of taking
+/// another: one picture, its ink and its cells cost tens of ms a window.
+struct Picture {
+    /// The window's size when it was taken: a resized window takes another.
+    size: (i32, i32),
+    /// Shrunk, with its pixels per logical pixel.
+    frame: Frame,
+    scale: f64,
+    /// Where it shows ink, in its own pixels.
+    ink: Vec<Rect>,
+    /// Its cells, read the first time a document body asks.
+    cells: Option<Space>,
+}
+
+impl Picture {
+    fn new((frame, scale): (Frame, f64), window: &Window) -> Self {
+        Self {
+            size: (window.rect.w, window.rect.h),
+            ink: Space::pixels(&frame).obstacles(),
+            frame,
+            scale,
+            cells: None,
+        }
+    }
+
+    fn cells(&mut self) -> &Space {
+        self.cells
+            .get_or_insert_with(|| pixels::cell_space(&self.frame))
+    }
 }
 
 /// One window as the scan saw it, until the snapshot is built from it.
@@ -144,6 +179,7 @@ impl Desktop {
             bounds: Bounds::default(),
             scans: 0,
             camera: None,
+            pictures: HashMap::new(),
             menus: None,
         })
     }
@@ -330,17 +366,22 @@ impl Desktop {
             }
         }
         keep_visible(&mut snapshot, stack, monitor);
-        let pictures: Vec<_> = seen
-            .iter()
-            .filter_map(|s| match s {
-                Seen::Pixels(window, _, picture, _) => {
-                    Some((window.address.as_str(), picture.as_ref()))
+        // A picture taken this scan is the one `layout` reads; a window
+        // seen without one needs none.
+        let mut unpictured = Vec::new();
+        for seen in seen {
+            match seen {
+                Seen::Pixels(window, _, Some(picture), _) => {
+                    let picture = Picture::new(picture, &window);
+                    self.pictures.insert(window.address, picture);
                 }
-                Seen::Untagged(window) => Some((window.address.as_str(), None)),
-                Seen::Tree(..) => None,
-            })
-            .collect();
-        self.layout(&mut snapshot, monitor, stack, &pictures);
+                Seen::Pixels(window, _, None, _) | Seen::Untagged(window) => {
+                    unpictured.push(window.address);
+                }
+                Seen::Tree(..) => {}
+            }
+        }
+        self.layout(&mut snapshot, monitor, stack, &unpictured);
         let unscanned = stack.windows.iter().filter(|w| {
             !snapshot
                 .windows
@@ -357,15 +398,16 @@ impl Desktop {
     /// Capture what labels may cover separately from target detection. An
     /// unreadable window stays fully protected instead of guessing it is blank.
     /// The same picture puts each document body's tag in its clearest spot
-    /// that no surface in `stack` may cover. A client in `pictures` (by
-    /// address, shrunk, with its scale) was taken this scan already;
-    /// `None` skips capture for a terminal cursor or fixed fallback hint.
+    /// that no surface in `stack` may cover. A client's picture is taken
+    /// once until [`Desktop::forget_pictures`], or again if it resized;
+    /// one in `unpictured` (by address) gets none, as a terminal cursor or
+    /// fixed fallback hint needs none.
     pub fn layout(
         &mut self,
         snapshot: &mut Snapshot,
         monitor: &Monitor,
         stack: &Stack,
-        pictures: &[(&str, Option<&(Frame, f64)>)],
+        unpictured: &[String],
     ) {
         let mut obstacles = Vec::new();
         // Text sources kept: a button only where its picture shows letters.
@@ -375,26 +417,20 @@ impl Desktop {
             if window.rect.intersect(monitor.rect).is_none() {
                 continue;
             }
-            let taken = pictures.iter().find(|(a, _)| *a == window.address);
             let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
-            if matches!(taken, Some((_, None))) {
+            if unpictured.contains(&window.address) {
                 obstacles.extend(in_view([window.rect], &covers));
                 continue;
             }
             let is_body = |t: &Target| t.window == index && filter::is_body(&t.role, t.editable);
             let bodies = snapshot.targets.iter().any(is_body);
-            let captured = (|| -> Result<_> {
-                if window.kind != Kind::Client {
-                    bail!("only clients can be exported");
-                }
-                let shot;
-                let (frame, scale) = if let Some((_, Some((frame, scale)))) = taken {
-                    (frame, *scale)
-                } else {
-                    shot = pixels::shrink(self.shoot(&window.address)?, window.rect.w);
-                    (&shot.0, shot.1)
-                };
-                let cells = bodies.then(|| pixels::cell_space(frame));
+            // Hyprland's window export only takes pictures of clients.
+            let picture = match window.kind {
+                Kind::Client => self.picture(window).ok(),
+                _ => None,
+            };
+            if let Some(picture) = &picture {
+                let scale = picture.scale;
                 for (i, text) in snapshot.texts.iter().enumerate() {
                     if let Some(button) = text.button.filter(|_| text.window == index) {
                         let r = button.rect;
@@ -402,18 +438,18 @@ impl Desktop {
                         let at = |v: i32, from: i32| (f64::from(v - from) * scale).round() as i32;
                         let (x, y) = (window.rect.x, window.rect.y);
                         let corners = [at(r.x, x), at(r.y, y), at(r.right(), x), at(r.bottom(), y)];
-                        keep[i] = pixels::shows_letters(frame, corners, button.letters);
+                        keep[i] = pixels::shows_letters(&picture.frame, corners, button.letters);
                     }
                 }
-                Ok((Space::pixels(frame), cells, scale))
-            })();
+            }
             let origin = window.rect.origin();
             // What a window shows only blocks tags where it's on top: an
             // unreadable background layer would otherwise block them all.
-            match &captured {
+            match &picture {
                 #[allow(clippy::cast_possible_truncation)]
-                Ok((space, _, scale)) => {
-                    let ink = space.obstacles().into_iter().map(|r| {
+                Some(picture) => {
+                    let scale = picture.scale;
+                    let ink = picture.ink.iter().map(|r| {
                         let x = (f64::from(r.x) / scale).floor() as i32;
                         let y = (f64::from(r.y) / scale).floor() as i32;
                         let right = (f64::from(r.right()) / scale).ceil() as i32;
@@ -422,12 +458,12 @@ impl Desktop {
                     });
                     obstacles.extend(in_view(ink, &covers));
                 }
-                Err(_) => obstacles.extend(in_view([window.rect], &covers)),
+                None => obstacles.extend(in_view([window.rect], &covers)),
             }
-            let cells = captured
-                .as_ref()
-                .ok()
-                .and_then(|(_, cells, scale)| Some((cells.as_ref()?, *scale)));
+            let cells = picture.filter(|_| bodies).map(|picture| {
+                let scale = picture.scale;
+                (picture.cells(), scale)
+            });
             for target in snapshot.targets.iter_mut().filter(|t| is_body(t)) {
                 focus_body(target, origin, cells, monitor.rect, &covers);
             }
@@ -581,6 +617,28 @@ impl Desktop {
             empty => empty.insert(Camera::connect(until)?),
         };
         camera.shoot(address, until)
+    }
+
+    /// `window`'s picture for placing labels: the one kept, unless the
+    /// window resized since, else a new one.
+    fn picture(&mut self, window: &Window) -> Result<&mut Picture> {
+        let picture = match self.pictures.remove(&window.address) {
+            Some(kept) if kept.size == (window.rect.w, window.rect.h) => kept,
+            _ => {
+                let shot = pixels::shrink(self.shoot(&window.address)?, window.rect.w);
+                Picture::new(shot, window)
+            }
+        };
+        Ok(self
+            .pictures
+            .entry(window.address.clone())
+            .or_insert(picture))
+    }
+
+    /// Lets go of the pictures kept for placing labels, so the next scan
+    /// takes new ones: a round's first scan does, its refreshes don't.
+    pub fn forget_pictures(&mut self) {
+        self.pictures.clear();
     }
 
     /// The text of every object in `snapshot.texts` that shows some, and

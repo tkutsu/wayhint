@@ -276,7 +276,8 @@ impl FileMarks {
 #[serde(default, deny_unknown_fields)]
 struct FileScan {
     /// Ms from the end of one scan to the next while the tags are up, `0`
-    /// for no rescans but the one after each click.
+    /// for no rescans but the one after each click. It doubles, up to 2 s,
+    /// while nothing changes (`pick::IDLE_REFRESH`).
     refresh: Option<u32>,
     /// Logical px between nearby hint centers, `0` to keep every hint.
     merge_distance: Option<u16>,
@@ -1187,7 +1188,7 @@ impl Config {
         let refresh = self.refresh.map_or(0, |every| every.as_millis());
         let _ = write!(
             out,
-            "\n[scan]\nrefresh = {refresh}   # ms the tags stay up before a rescan; 0 for only after a click\n"
+            "\n[scan]\nrefresh = {refresh}   # ms the tags stay up before a rescan, doubling up to 2 s while nothing changes; 0 for only after a click\n"
         );
         let _ = writeln!(
             out,
