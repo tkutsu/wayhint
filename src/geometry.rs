@@ -112,6 +112,24 @@ impl Rect {
         (!r.is_empty()).then_some(r)
     }
 
+    /// What's left of this rectangle with `other` cut out: itself if they
+    /// don't overlap, else up to four pieces, the bands above and below
+    /// `other` across the full width, then the parts left and right of it.
+    pub fn minus(self, other: Self) -> Vec<Self> {
+        let Some(cut) = self.intersect(other) else {
+            return vec![self];
+        };
+        [
+            Self::new(self.x, self.y, self.w, cut.y - self.y),
+            Self::new(self.x, cut.bottom(), self.w, self.bottom() - cut.bottom()),
+            Self::new(self.x, cut.y, cut.x - self.x, cut.h),
+            Self::new(cut.right(), cut.y, self.right() - cut.right(), cut.h),
+        ]
+        .into_iter()
+        .filter(|r| !r.is_empty())
+        .collect()
+    }
+
     /// Area as `i64`: 2560 x 1440 fits an `i32`, but sums of areas may not.
     pub fn area(self) -> i64 {
         if self.is_empty() {
@@ -173,6 +191,27 @@ mod tests {
             a.intersect(Rect::new(10, 0, 5, 5)),
             None,
             "touching edges don't overlap"
+        );
+    }
+
+    #[test]
+    fn minus_leaves_the_bands_around_the_cut() {
+        let a = Rect::new(0, 0, 10, 10);
+        assert_eq!(
+            a.minus(Rect::new(4, 4, 2, 2)),
+            [
+                Rect::new(0, 0, 10, 4),
+                Rect::new(0, 6, 10, 4),
+                Rect::new(0, 4, 4, 2),
+                Rect::new(6, 4, 4, 2),
+            ]
+        );
+        assert_eq!(a.minus(Rect::new(5, -5, 20, 20)), [Rect::new(0, 0, 5, 10)]);
+        assert_eq!(a.minus(Rect::new(-1, -1, 12, 12)), []);
+        assert_eq!(
+            a.minus(Rect::new(10, 0, 5, 5)),
+            [a],
+            "touching cuts nothing"
         );
     }
 
