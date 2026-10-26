@@ -9,7 +9,7 @@
 # these defaults. A misspelt setting is an error, shown before wayhint takes
 # the keyboard, so a typo can never leave you stuck.
 #
-# Colours are "#RRGGBB" or "#RRGGBBAA"; the last pair is opacity.
+# Colours are "#RGB", "#RGBA", "#RRGGBB" or "#RRGGBBAA"; A is opacity.
 # Sizes and distances are logical px.
 
 

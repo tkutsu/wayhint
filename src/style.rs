@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, Rect};
 
-/// A colour from `#RRGGBB` or `#RRGGBBAA`.
+/// A colour from `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`.
 ///
 /// `try_from = "String"` makes serde read a string and hand it to our
 /// `TryFrom<String>`, so a bad colour fails while the file loads, with our
@@ -36,19 +36,28 @@ impl TryFrom<String> for Color {
     type Error = String;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
-        let bad = || format!("{text:?} isn't a colour: write #RRGGBB or #RRGGBBAA");
+        let bad = || format!("{text:?} isn't a colour: write #RGB, #RGBA, #RRGGBB or #RRGGBBAA");
         let hex = text.strip_prefix('#').ok_or_else(bad)?;
-        if !matches!(hex.len(), 6 | 8) || !hex.is_ascii() {
+        if !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(bad());
         }
-        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
-        let a = if hex.len() == 8 { byte(6)? } else { 0xff };
-        Ok(Self {
-            r: byte(0)?,
-            g: byte(2)?,
-            b: byte(4)?,
-            a,
-        })
+        // A channel written with one digit is that digit twice: #f80 is #ff8800.
+        let (digits, scale) = match hex.len() {
+            3 | 4 => (1, 0x11),
+            6 | 8 => (2, 1),
+            _ => return Err(bad()),
+        };
+        let channel = |i: usize| {
+            u8::from_str_radix(&hex[i * digits..(i + 1) * digits], 16)
+                .map(|value| value * scale)
+                .map_err(|_| bad())
+        };
+        let a = if hex.len() == 4 * digits {
+            channel(3)?
+        } else {
+            0xff
+        };
+        Ok(Self::rgba(channel(0)?, channel(1)?, channel(2)?, a))
     }
 }
 
@@ -511,8 +520,21 @@ mod tests {
             Color::try_from("#ffffff66".to_string()),
             Ok(Color::rgba(255, 255, 255, 0x66))
         );
+        assert_eq!(
+            Color::try_from("#f80".to_string()),
+            Ok(Color::rgba(0xff, 0x88, 0x00, 0xff))
+        );
+        assert_eq!(
+            Color::try_from("#f808".to_string()),
+            Ok(Color::rgba(0xff, 0x88, 0x00, 0x88))
+        );
         assert!(Color::try_from("1e1e2e".to_string()).is_err());
         assert!(Color::try_from("#12345".to_string()).is_err());
+        assert!(Color::try_from("#12".to_string()).is_err());
+        assert!(
+            Color::try_from("#+1+2+3".to_string()).is_err(),
+            "a sign isn't a digit"
+        );
         assert!(Color::try_from("#gggggg".to_string()).is_err());
         assert!(
             Color::try_from("#ééé".to_string()).is_err(),
