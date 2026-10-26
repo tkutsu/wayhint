@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(input(57, false), Some(Input::Here(Mods::NONE)));
         assert_eq!(input(28, true), Some(Input::Confirm(shift)));
         assert_eq!(
-            input(19, false),
+            input(51, false),
             Some(Input::Verb(Action::Right, Mods::NONE))
         );
         assert_eq!(input(12, true), Some(Input::Verb(Action::Hover, shift)));

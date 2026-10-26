@@ -7,6 +7,7 @@
 //!                                                |
 //!                 Backspace with nothing typed: back to the tags
 //!                 close key: leave wayhint
+//!                 a verb key before any text, or a named one any time: armed
 //!                 Enter: the armed verb (or the default) on the current match
 //!                 one match left (with [text] auto_accept): as Enter
 //!                 a whole tag typed (with [text] hints): its target, as a tag
@@ -36,7 +37,7 @@ use crate::{
     keys::KeyCode,
     overlay::{Event, Frame, Highlight, Overlay, Tag},
     pick::{self, Pick, Source},
-    selection::{Selector, free_labels},
+    selection::{self, Selector, Step, free_labels},
     snapshot::{Snapshot, Target},
     status::{Message, Status},
     style::{Input, Notice},
@@ -176,6 +177,9 @@ impl Hints {
 /// (`Some` pick), or until Backspace with nothing typed goes back to the
 /// tags (`None`).
 /// `selector` holds the verb and the nudge typed before the text key.
+/// A verb typed here comes first, before the text, as it comes before a
+/// tag's letters: a key that types a letter or digit is always text, so
+/// a verb on one is for the tags only.
 pub fn search(
     overlay: &mut Overlay,
     shown: &Snapshot,
@@ -202,18 +206,22 @@ fn keys(
     config: &Config,
 ) -> Result<Option<Pick>> {
     let (input, cursor) = (&config.input, config.text_cursor);
-    let verb = selector.armed().map(Action::name);
+    // Verbs typed here arm a copy, so going back to the tags leaves the
+    // verb typed there.
+    let mut command = selector.clone();
+    let verb = |command: &Selector| command.armed().map(Action::name);
     // The tags go before the text is read: none is left to be typed.
-    overlay.update(&frame(None, false, verb, input, None))?;
+    overlay.update(&frame(None, false, verb(&command), input, None))?;
     let mut search = Search::new(source.read_text(shown));
     let hints = Hints::new(&search, shown, config);
     // For each character of the query, the tag letter its key is, if any.
     let mut pressed: Vec<Option<usize>> = Vec::new();
-    let draw = |search: &Search, pressed: &[_], stale, missed: Option<&str>| Frame {
-        tags: hints.tags(pressed, shown, config),
-        ..frame(Some(search), stale, verb, input, missed)
-    };
-    overlay.update(&draw(&search, &pressed, false, None))?;
+    let draw =
+        |search: &Search, pressed: &[_], command: &Selector, stale, missed: Option<&str>| Frame {
+            tags: hints.tags(pressed, shown, config),
+            ..frame(Some(search), stale, verb(command), input, missed)
+        };
+    overlay.update(&draw(&search, &pressed, &command, false, None))?;
     // The query changed since the matches were found.
     let mut stale = false;
     // What was typed that matched nothing, and until when it's named.
@@ -221,7 +229,7 @@ fn keys(
     loop {
         let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
             missed = None;
-            overlay.update(&draw(&search, &pressed, stale, None))?;
+            overlay.update(&draw(&search, &pressed, &command, stale, None))?;
             continue;
         };
         let (key, mods, typed) = match event {
@@ -246,24 +254,41 @@ fn keys(
         if config.verbs.is_close(key) {
             return Ok(Some(Pick::Leave));
         }
+        // A verb: a named key (PageDown) any time; a character only before
+        // any text, and only one that's no letter or digit (`,`), which
+        // costs just the searches that start with it. Typed twice, it's
+        // done again where the last command was.
+        if let Some(action) = config.verbs.action_of(key)
+            && (crate::keys::name_of(key.code).is_some()
+                || search.query().is_empty() && typed.is_some_and(|c| !c.is_alphanumeric()))
+        {
+            if let Step::Again(act) = command.press(selection::Input::Verb(action, mods)) {
+                return Ok(Some(Pick::Again { act }));
+            }
+            let said = missed.as_ref().map(|m| m.0.as_str());
+            overlay.update(&draw(&search, &pressed, &command, stale, said))?;
+            continue;
+        }
         let edit = match key.code {
             // Backspace takes back the last character; with nothing
-            // typed, it goes back to the tags.
+            // typed, a verb typed here, then it goes back to the tags.
             KeyCode::BACKSPACE => {
-                if !search.pop() {
+                if search.pop() {
+                    pressed.pop();
+                    true
+                } else if command.armed() != selector.armed() {
+                    command = selector.clone();
+                    false
+                } else {
                     return Ok(None);
                 }
-                pressed.pop();
-                true
             }
             KeyCode::ENTER
             | KeyCode::RIGHT
             | KeyCode::DOWN
             | KeyCode::LEFT
             | KeyCode::UP
-            | KeyCode::TAB
-            | KeyCode::HOME
-            | KeyCode::END => false,
+            | KeyCode::TAB => false,
             // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
             // tag, as a Ctrl- or Alt-click, as with the tags.
             _ => {
@@ -282,7 +307,7 @@ fn keys(
                         if config.hint_auto_accept {
                             return Ok(Some(Pick::Target {
                                 index,
-                                act: selector.act(mods),
+                                act: command.act(mods),
                             }));
                         }
                         // Ctrl/Alt may type no character. Keep the tag's
@@ -301,7 +326,7 @@ fn keys(
             && key.code != KeyCode::BACKSPACE
             && let Some(index) = hints.choice(&pressed, &search, config, false)
         {
-            let act = selector.act(mods);
+            let act = command.act(mods);
             return Ok(Some(Pick::Target { index, act }));
         }
         // Every key typed so far first: fast typing asks the apps once.
@@ -328,7 +353,7 @@ fn keys(
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
                 && !hints.open(&pressed)
-                && let Some(chosen) = choose(&search, shown, selector.act(Mods::NONE), cursor)
+                && let Some(chosen) = choose(&search, shown, command.act(Mods::NONE), cursor)
             {
                 return Ok(Some(Pick::Text(Box::new(chosen))));
             }
@@ -338,22 +363,20 @@ fn keys(
                 if let Some(index) = hints.choice(&pressed, &search, config, true) {
                     return Ok(Some(Pick::Target {
                         index,
-                        act: selector.act(mods),
+                        act: command.act(mods),
                     }));
                 }
-                if let Some(chosen) = choose(&search, shown, selector.act(mods), cursor) {
+                if let Some(chosen) = choose(&search, shown, command.act(mods), cursor) {
                     return Ok(Some(Pick::Text(Box::new(chosen))));
                 }
             }
             KeyCode::RIGHT | KeyCode::DOWN => search.next(),
             KeyCode::TAB if !mods.shift => search.next(),
             KeyCode::LEFT | KeyCode::UP | KeyCode::TAB => search.previous(),
-            KeyCode::HOME => search.first(),
-            KeyCode::END => search.last(),
             _ => {}
         }
         let said = missed.as_ref().map(|m| m.0.as_str());
-        overlay.update(&draw(&search, &pressed, stale, said))?;
+        overlay.update(&draw(&search, &pressed, &command, stale, said))?;
     }
 }
 

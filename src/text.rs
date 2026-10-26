@@ -507,14 +507,6 @@ impl Search {
             self.current = (self.current + self.matches.len() - 1) % self.matches.len();
         }
     }
-
-    pub fn first(&mut self) {
-        self.current = 0;
-    }
-
-    pub fn last(&mut self) {
-        self.current = self.matches.len().saturating_sub(1);
-    }
 }
 
 /// The parts of a match's `boxes` that can show: each cut to its text's
@@ -670,10 +662,6 @@ mod tests {
         assert_eq!(search.position(), (3, 3), "back from the first is the last");
         search.next();
         assert_eq!(search.position(), (1, 3), "on from the last is the first");
-        search.last();
-        assert_eq!(search.position(), (3, 3));
-        search.first();
-        assert_eq!(search.position(), (1, 3));
     }
 
     #[test]
