@@ -26,7 +26,7 @@ use crate::{
     selection::Selector,
     snapshot::{Snapshot, Target},
     style::Input,
-    text::{Place, Search},
+    text::{Check, Place, Search},
 };
 
 /// A match chosen with Enter: what to do, the target it makes, and what its
@@ -42,15 +42,6 @@ pub struct Chosen {
     /// What the match must still read. `None` for a text that is a name:
     /// the re-check reads the name anyway.
     pub check: Option<Check>,
-}
-
-/// Characters `start..end` of the text at `place`, and what they held.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Check {
-    pub place: Place,
-    pub start: u32,
-    pub end: u32,
-    pub text: String,
 }
 
 /// Text mode, from the text key until a match is chosen (`Some` pick), or
@@ -197,6 +188,7 @@ fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
             )
         }
         Place::Cells(_) => (None, "terminal".into(), false, Vec::new(), Some(check)),
+        Place::Glyphs(_) => (None, "picture".into(), false, Vec::new(), Some(check)),
     };
     Some(Chosen {
         target: Target {

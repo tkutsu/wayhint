@@ -248,24 +248,18 @@ impl Session {
     }
 
     /// Does a match chosen in text mode, if its text still reads the same
-    /// (in kitty, in the same cells) and its object passes a target's
-    /// re-check (in kitty, its window). Not kept for the repeat
+    /// (in kitty, in the same cells; read by OCR, in the same pixels) and
+    /// its object passes a target's re-check (in kitty or OCR, its
+    /// window). Not kept for the repeat
     /// key: that finds targets by their object, and a text's object is
     /// rarely one.
     fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
         let Chosen { target, act, check } = chosen;
-        if let Some(check) = &check {
-            let now = self.desktop.read_range(
-                snapshot,
-                target.window,
-                &check.place,
-                check.start,
-                check.end,
-            );
-            if now.as_ref().ok() != Some(&check.text) {
-                eprintln!("wayhint: refreshing {:?}: the text changed", check.text);
-                return Ok(Done::Refused);
-            }
+        if let Some(check) = &check
+            && let Err(e) = self.desktop.still_reads(snapshot, target.window, check)
+        {
+            eprintln!("wayhint: refreshing {:?}: {e:#}", check.text);
+            return Ok(Done::Refused);
         }
         let done = self.command(config, snapshot, &target, Command { object: None, act });
         self.last = None;
@@ -430,7 +424,7 @@ impl pick::Source for Scans<'_> {
     }
 
     fn read_text(&mut self, shown: &Snapshot) -> Vec<Text> {
-        let reading = self.desktop.read_text(shown);
+        let reading = self.desktop.read_text(shown, self.config.ocr.as_deref());
         if let Some(why) = reading.incomplete {
             eprintln!("wayhint: reading the text stopped early ({why}); some may be missing");
         }

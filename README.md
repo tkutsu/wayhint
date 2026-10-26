@@ -126,8 +126,8 @@ anywhere inside words, so `con` finds "contact", "Control" and "falcon".
 Text mode reads the text the apps give the accessibility tree once, as it
 starts, and asks an app where a match is only the first time that match
 comes up. Before the click it reads the text at that spot again and skips
-the click if it changed. Windows tagged from their pixels have no text to
-search yet, except kitty; see Known gaps.
+the click if it changed. kitty is asked for its panes' text, and other
+windows tagged from their pixels are read by OCR.
 
 kitty has no accessibility tree, so text mode asks kitty itself what its
 panes show, through its remote control. wayhint finds the socket kitty
@@ -140,7 +140,20 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 
 Then restart kitty. wayhint writes a small kitten to
 `$XDG_RUNTIME_DIR/wayhint/kitty.py` and has kitty run it. A kitty without
-the socket gets a notification once per run, and no text.
+the socket is read by OCR instead, and gets a notification once per run
+only if that fails too.
+
+A window with no accessibility tree is read by Tesseract when text mode
+starts. Install it with `pacman -S tesseract tesseract-data-eng`. On a
+monitor with a scale under 2, the window's picture is doubled first:
+Tesseract misreads small interface text at its real size. Reading took
+about 0.5 s for a terminal and 1.5 s for a full-screen spreadsheet on a
+Ryzen 7 7700. The pill shows `text ...` until it's done, and keys typed in
+the meantime wait for it. OCR still misreads some words (`cmp::Ordering`
+and `main.rs` in one terminal capture), and a misread word isn't found.
+Before the click, wayhint takes the window's picture again and skips the
+click if the pixels under the match changed. For Greek as well, install
+`tesseract-data-ell` and set `ocr = "eng+ell"` under `[text]`.
 
 A key held across a change to the targets is ignored. Press it again
 after the new tags appear. The same rule applies when a paragraph opens
@@ -181,7 +194,8 @@ to top, with each one's tag count and what couldn't be read; add
 does. The output can contain private text from your windows.
 `wayhint dump --pixels` prints the tags the window's pixels give, whether
 or not it has a tree. `wayhint dump --text con` prints the text text mode
-would search in the focused window, and where `con` is in it.
+would search in the focused window, and where `con` is in it. A window
+with no tree is read by OCR there, as in a run.
 
 ## Configuration
 
@@ -229,6 +243,9 @@ background = "#1e1e2ef0"
 border = "#d0d0d0ff"
 position = "bottom-right"  # on the target: center, top, bottom, left, right, or a corner
 offset = [0, 0]         # px from there, right and down
+
+[text]
+ocr = "eng"             # Tesseract's languages for windows with no tree, as "eng+ell"; "" for no OCR
 
 [text.style]            # text mode's boxes over matches
 background = "#ffff0080"
@@ -376,10 +393,11 @@ the arrows are never command keys.
 - A window's rounded corners show up as small pixel tags at its corners.
 - A document's hint clicks a cell or a line of text, which moves the
   active cell or the text cursor there.
-- Text mode finds only text an app gives the accessibility tree, and
-  kitty's. Other terminals, windows tagged from their pixels, pictures and
-  canvases have none for it yet, and Chromium and Electron apps need their
-  accessibility flag as for tags. kitty's quick-access panel is a layer,
+- Text mode reads a window with no tree by OCR, only when the scan read
+  it from its pixels: with `[pixels] detector = "off"` it isn't read at
+  all. Pictures and canvases inside a window that has a tree aren't read,
+  and Chromium and Electron apps need their accessibility flag as for
+  tags. kitty's quick-access panel is a layer,
   not a window, so text mode doesn't search it. Qt gives most labels and list items only a name, so text mode
   searches the names of labels, list items, cells, tabs, menu items,
   links and headings, and boxes the whole item, not the matched letters.

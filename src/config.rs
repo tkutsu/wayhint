@@ -41,12 +41,36 @@ struct File {
     text: FileText,
 }
 
-/// `[text]`: how text mode looks.
+/// `[text]`: how text mode reads windows and how it looks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileText {
+    /// Tesseract's languages for windows read from pixels, `""` for none.
+    ocr: Option<String>,
     style: FileMarks,
     input: FileInput,
+}
+
+/// The OCR languages unless the file says: the one Tesseract ships with.
+const OCR: &str = "eng";
+
+impl FileText {
+    /// The OCR languages, `None` for no OCR. Tesseract's names, joined by
+    /// `+`: `eng`, `eng+ell`.
+    fn ocr(&self) -> Result<Option<String>> {
+        let languages = self.ocr.as_deref().unwrap_or(OCR);
+        let name = |n: &str| {
+            !n.is_empty()
+                && n.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        };
+        if !languages.is_empty() && !languages.split('+').all(name) {
+            bail!(
+                "[text] ocr = {languages:?}: Tesseract's language names joined by +, as \"eng+ell\", or \"\" for no OCR"
+            );
+        }
+        Ok(Some(languages.to_owned()).filter(|l| !l.is_empty()))
+    }
 }
 
 /// `[text.input]`: query decorations and a look independent of the tags.
@@ -214,17 +238,28 @@ impl FilePixels {
 
 /// Pixel dumps use the same terminal list without needing a keyboard keymap.
 pub fn terminal_processes(explicit: Option<&Path>) -> Result<Vec<String>> {
+    let file = unkeyed(explicit)?;
+    file.pixels.validate()?;
+    Ok(file.pixels.terminal_processes)
+}
+
+/// Text dumps read with the same OCR languages, also without a keymap.
+pub fn ocr(explicit: Option<&Path>) -> Result<Option<String>> {
+    unkeyed(explicit)?.text.ocr()
+}
+
+/// The file at `explicit`, else the default one if it's there, else all
+/// defaults: undecoded, since the keys need a keymap.
+fn unkeyed(explicit: Option<&Path>) -> Result<File> {
     let path = explicit
         .map(Path::to_path_buf)
         .or_else(|| default_path().filter(|p| p.exists()));
     let Some(path) = path else {
-        return Ok(FilePixels::default().terminal_processes);
+        return Ok(File::default());
     };
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let file: File = toml::from_str(&text).with_context(|| format!("config {}", path.display()))?;
-    file.pixels.validate()?;
-    Ok(file.pixels.terminal_processes)
+    toml::from_str(&text).with_context(|| format!("config {}", path.display()))
 }
 
 /// Tags for windows with no accessibility tree, found in their pixels:
@@ -351,6 +386,9 @@ pub struct Config {
     pub marks: Marks,
     /// Text mode's query display: `[text.input]`.
     pub input: Input,
+    /// Tesseract's languages for text mode in windows read from pixels,
+    /// `None` for no OCR: `[text] ocr`.
+    pub ocr: Option<String>,
     pub after: After,
     /// Px one arrow press moves a command: `[pointer] nudge`.
     pub nudge: i32,
@@ -815,6 +853,7 @@ impl Config {
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
         let marks = file.text.style.resolve(&file.style)?;
+        let ocr = file.text.ocr()?;
         let input = file.text.input.resolve(&file.style)?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
@@ -828,6 +867,7 @@ impl Config {
             style: file.style,
             marks,
             input,
+            ocr,
             after: file.pointer.after,
             nudge: nudge.into(),
             pixels: match file.pixels.detector {
@@ -842,6 +882,14 @@ impl Config {
             },
             merge_distance: file.scan.merge_distance.unwrap_or(MERGE_DISTANCE),
         })
+    }
+
+    /// `[text]`'s own settings, for `wayhint config`.
+    fn render_text(&self) -> String {
+        format!(
+            "\n[text]\nocr = {}   # Tesseract's languages for windows with no tree, as \"eng+ell\"; \"\" for no OCR\n",
+            quote(self.ocr.as_deref().unwrap_or(""))
+        )
     }
 
     /// The config in effect, as a TOML file you could save: `wayhint config`.
@@ -902,6 +950,7 @@ impl Config {
         }
         out.push('\n');
         out.push_str(&self.style.render());
+        out.push_str(&self.render_text());
         out.push_str(&self.marks.render());
         out.push_str(&self.input.render());
         let after = match self.after {
@@ -1136,6 +1185,29 @@ mod tests {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
+        }
+    }
+
+    #[test]
+    fn ocr_is_english_unless_set_and_round_trips() {
+        let read = |text: &str| Config::parse(text, &us()).unwrap().ocr;
+        assert_eq!(read("").as_deref(), Some("eng"));
+        assert_eq!(
+            read("[text]\nocr = \"eng+ell\"").as_deref(),
+            Some("eng+ell")
+        );
+        assert_eq!(read("[text]\nocr = \"\""), None);
+        for bad in ["\"eng+\"", "\"eng ell\"", "\"../eng\""] {
+            let err = format!(
+                "{:#}",
+                Config::parse(&format!("[text]\nocr = {bad}"), &us()).unwrap_err()
+            );
+            assert!(err.contains("[text] ocr"), "{bad}: {err}");
+        }
+        for text in ["", "[text]\nocr = \"eng+ell\"", "[text]\nocr = \"\""] {
+            let config = Config::parse(text, &us()).unwrap();
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.ocr, config.ocr, "{text:?} reads back the same");
         }
     }
 
