@@ -1,0 +1,144 @@
+# wayhint's default config.
+#
+# Every setting below is shown at its default, commented out. Copy this file
+# to ~/.config/wayhint/config.toml and uncomment only what you change:
+#
+#     wayhint config --default > ~/.config/wayhint/config.toml
+#
+# `wayhint config` prints the settings in effect: your file merged with
+# these defaults. A misspelt setting is an error, shown before wayhint takes
+# the keyboard, so a typo can never leave you stuck.
+#
+# Colours are "#RRGGBB" or "#RRGGBBAA"; the last pair is opacity.
+# Sizes and distances are logical px.
+
+
+[keys]
+# Keys are matched by position, read with your keyboard's first layout, and
+# written here as that layout prints them. The defaults below are what a US
+# layout prints; on another layout they are the same positions.
+
+# Tag letters, in priority order: earlier letters are used more, and short
+# tags come first. The default is your home row.
+# alphabet = "asdfghjkl"
+
+# The verbs. Type one anywhere before a tag's last letter to do it there
+# instead of a left click, before Space to do it at the pointer, or twice to
+# do it again where the last command was (PageDown PageDown scrolls the same
+# pane again). A key is one character, Shift included ("_"), or a name:
+# PageUp, PageDown, Home, End, Delete.
+# "" makes a verb what a bare tag does; exactly one verb is "".
+# A key a verb takes leaves the alphabet. A default key that is one of your
+# tag letters, or that you gave another command, is simply left unbound.
+# left = ""                 # left click: a bare tag does this
+# right = "r"               # right click
+# middle = "m"              # middle click
+# double = "t"              # double click
+# hover = "o"               # move there and stay, for tooltips
+# back = "b"                # the mouse's back button
+# forward = "n"             # the mouse's forward button
+# scroll_up = "PageUp"      # the wheel up, [pointer] scroll notches
+# scroll_down = "PageDown"  # the wheel down, [pointer] scroll notches
+# hold = ","                # press and keep down; the next tag or Space lets go there (a drag), Esc lets go in place
+
+# Commands of their own.
+# repeat = ""               # the last command again, on the same target; "" for none
+# text = "/"                # text mode: type text on screen, Enter acts on it; "" for none
+
+# Built in, never bindable: Esc leaves (from text mode too; while a hold is
+# down it lets go first), Backspace takes back the last key, Space acts at
+# the pointer, Enter and Tab work in text mode, and the arrows move where a
+# click lands, held for faster.
+
+# Other keys that type a tag letter, for a layer that sends a different
+# character from the same key: "key" = "letter".
+# [keys.aliases]
+# ";" = "c"
+
+
+[style]
+# How a tag looks.
+# font = "sans-serif:bold"  # a fontconfig pattern, as fc-match takes it
+# size = 13
+# text = "#ffffffff"
+# dimmed = "#ffffff66"      # typed letters, a verb's name, a placeholder
+# background = "#1e1e2ef0"
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+# position = "bottom-right" # on the target: center, top, bottom, left, right, or a corner as top-left
+# offset = [0, 0]           # px from there, right and down
+
+[style.leader]
+# The line from a tag to the dot where it clicks: shown when an arrow moves
+# a click, or when a tag had to move off its target to stay readable. Each
+# is drawn inside an outline, so it shows on light and dark windows alike.
+# Unset colours follow the tags: the line and dot take [style] text, the
+# outline takes [style] background.
+# line = "#ffffffff"
+# dot = "#ffffffff"
+# outline = "#1e1e2ef0"
+# width = 1                 # the line's, in px
+# radius = 3                # the dot's, in px
+# outline_width = 2         # px, around the dot and across the line; 0 for none
+
+
+[text]
+# Text mode: the tags go, typing finds text on screen, Enter acts on the
+# current match, Tab and the arrows move between matches. Backspace with
+# nothing typed goes back to the tags; Esc leaves wayhint.
+# ocr = "eng"               # Tesseract's languages for windows with no accessibility tree, as "eng+ell"; "" for no OCR
+
+[text.matches]
+# The box over every match. Unset radius and padding follow [style].
+# background = "#ffff0080"
+# border = "#d0d0d0ff"
+# border_width = 0
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+
+[text.matches.current]
+# The box over the selected match. Unset fields follow [text.matches], in orange.
+# background = "#ff963280"
+# border = "#d0d0d0ff"
+# border_width = 0
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+
+[text.input]
+# The query you type, shown on the screen apart from the tags. Unset look
+# fields follow [style]; position and offset are on the screen here.
+# placeholder = "text"      # shown, dimmed, while nothing is typed
+# prefix = ""               # before the query, as "find: "
+# suffix = ""               # after the query, before the match count
+# font = "sans-serif:bold"
+# size = 13
+# text = "#ffffffff"
+# dimmed = "#ffffff66"      # the armed verb's name and the placeholder
+# background = "#1e1e2ef0"
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
+# offset = [0, -48]         # px from there, right and down
+
+
+[pointer]
+# after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
+# nudge = 10                # px one arrow press moves a click; held, it goes on, faster
+# scroll = 5                # wheel notches one scroll_up or scroll_down turns
+
+
+[pixels]
+# Windows with no accessibility tree get tags found in their pixels.
+# detector = "full"         # "full", "fast" for slower CPUs, or "off"
+# Programs read as terminals (input areas, not buttons). Setting it replaces
+# the whole list; [] turns terminal detection off.
+# terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]
+
+
+[scan]
+# refresh = 500             # ms the tags stay up before the windows are scanned again; 0 for only after a click
+# merge_distance = 0        # px between hint centres that share one tag; 0 keeps every hint

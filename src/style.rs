@@ -138,8 +138,10 @@ pub struct Style {
     /// Text size in px.
     pub size: f32,
     pub text: Color,
-    /// Letters already typed, dimmed.
-    pub matched: Color,
+    /// Letters already typed, an armed verb's name, a placeholder. Once
+    /// called `matched`, which a file may still say.
+    #[serde(alias = "matched")]
+    pub dimmed: Color,
     pub background: Color,
     pub border: Color,
     pub border_width: f32,
@@ -149,6 +151,97 @@ pub struct Style {
     pub position: Position,
     /// Moves every tag from its position, right then down, in px.
     pub offset: [i32; 2],
+    /// The line from a tag to its dot, and the dot: `[style.leader]`.
+    pub leader: Leader,
+}
+
+/// `[style.leader]`: the line from a tag to where it clicks, and the dot
+/// there, drawn when an arrow moves a click or a tag had to move off its
+/// target. Each is a stroke inside an outline, so it shows on light and
+/// dark windows alike. An unset colour is the tags' own: the letters' for
+/// the line and dot, the background's for the outline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Leader {
+    pub line: Option<Color>,
+    pub dot: Option<Color>,
+    pub outline: Option<Color>,
+    /// The line's width, in px.
+    pub width: f32,
+    /// The dot's radius, in px.
+    pub radius: f32,
+    /// The outline's width, in px: all of it around the dot, half on each
+    /// side of the line. 0 for none.
+    pub outline_width: f32,
+}
+
+impl Default for Leader {
+    fn default() -> Self {
+        Self {
+            line: None,
+            dot: None,
+            outline: None,
+            width: 1.0,
+            radius: 3.0,
+            outline_width: 2.0,
+        }
+    }
+}
+
+impl Leader {
+    /// The line's, the dot's and the outline's colours, unset ones taken
+    /// from the tags' `style`.
+    pub fn colors(&self, style: &Style) -> (Color, Color, Color) {
+        (
+            self.line.unwrap_or(style.text),
+            self.dot.unwrap_or(style.text),
+            self.outline.unwrap_or(style.background),
+        )
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("width", self.width),
+            ("radius", self.radius),
+            ("outline_width", self.outline_width),
+        ] {
+            if !(0.0..=50.0).contains(&value) {
+                bail!("[style.leader] {name}: {value} px is outside 0-50");
+            }
+        }
+        Ok(())
+    }
+
+    /// The table as TOML, for `wayhint config`. An unset colour is written
+    /// commented out, as the tags' colour it is now, so the file still
+    /// follows the tags.
+    fn render(&self, style: &Style) -> String {
+        let (line, dot, outline) = self.colors(style);
+        let mut out =
+            String::from("\n[style.leader]   # the line from a tag to its dot, and the dot\n");
+        for (name, set, now, from) in [
+            ("line", self.line, line, "text"),
+            ("dot", self.dot, dot, "text"),
+            ("outline", self.outline, outline, "background"),
+        ] {
+            match set {
+                Some(color) => {
+                    let _ = writeln!(out, "{name} = \"{color}\"");
+                }
+                None => {
+                    let _ = writeln!(out, "# {name} = \"{now}\"   # unset: the tags' {from}");
+                }
+            }
+        }
+        let _ = writeln!(out, "width = {}   # the line's, in px", self.width);
+        let _ = writeln!(out, "radius = {}   # the dot's, in px", self.radius);
+        let _ = writeln!(
+            out,
+            "outline_width = {}   # px, around the dot and across the line; 0 for none",
+            self.outline_width
+        );
+        out
+    }
 }
 
 impl Default for Style {
@@ -157,7 +250,7 @@ impl Default for Style {
             font: "sans-serif:bold".into(),
             size: 13.0,
             text: Color::rgba(0xff, 0xff, 0xff, 0xff),
-            matched: Color::rgba(0xff, 0xff, 0xff, 0x66),
+            dimmed: Color::rgba(0xff, 0xff, 0xff, 0x66),
             background: Color::rgba(0x1e, 0x1e, 0x2e, 0xf0),
             border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
             border_width: 1.0,
@@ -165,6 +258,7 @@ impl Default for Style {
             padding: [2.0, 5.0],
             position: Position::default(),
             offset: [0, 0],
+            leader: Leader::default(),
         }
     }
 }
@@ -199,12 +293,12 @@ impl Style {
         if self.font.trim().is_empty() {
             bail!("[{table}] font: empty");
         }
-        Ok(())
+        self.leader.validate()
     }
 
-    /// The table as TOML, for `wayhint config`.
+    /// The table as TOML, `[style.leader]` too, for `wayhint config`.
     pub fn render(&self) -> String {
-        self.render_table("style", "on the target")
+        self.render_table("style", "on the target") + &self.leader.render(self)
     }
 
     /// A complete look under its owning table, for `wayhint config`.
@@ -216,13 +310,17 @@ impl Style {
             crate::config::quote(&self.font)
         );
         let _ = writeln!(out, "size = {}", self.size);
-        for (name, color) in [
-            ("text", self.text),
-            ("matched", self.matched),
-            ("background", self.background),
-            ("border", self.border),
+        for (name, color, what) in [
+            ("text", self.text, ""),
+            (
+                "dimmed",
+                self.dimmed,
+                "   # typed letters, a verb's name, a placeholder",
+            ),
+            ("background", self.background, ""),
+            ("border", self.border, ""),
         ] {
-            let _ = writeln!(out, "{name} = \"{color}\"");
+            let _ = writeln!(out, "{name} = \"{color}\"{what}");
         }
         let _ = writeln!(out, "border_width = {}", self.border_width);
         let _ = writeln!(out, "radius = {}", self.radius);
@@ -250,6 +348,8 @@ impl Style {
 pub struct Input {
     pub prefix: String,
     pub suffix: String,
+    /// Shown, dimmed, while nothing is typed.
+    pub placeholder: String,
     pub style: Style,
 }
 
@@ -259,6 +359,7 @@ impl Input {
         Self {
             prefix: String::new(),
             suffix: String::new(),
+            placeholder: "text".into(),
             style: Style {
                 position: Position::Bottom,
                 offset: [0, -48],
@@ -271,16 +372,21 @@ impl Input {
     pub fn render(&self) -> String {
         let look = self.style.render_table("text.input", "on the screen");
         let (header, fields) = look.split_once('\n').unwrap();
+        let quote = crate::config::quote;
         format!(
-            "\n{header}\nprefix = {}\nsuffix = {}\n{fields}",
-            crate::config::quote(&self.prefix),
-            crate::config::quote(&self.suffix),
+            "\n{header}   # the query you type, apart from the tags\n\
+             placeholder = {}   # shown while nothing is typed\n\
+             prefix = {}   # before the query, as \"find: \"\n\
+             suffix = {}   # after the query, before the match count\n{fields}",
+            quote(&self.placeholder),
+            quote(&self.prefix),
+            quote(&self.suffix),
         )
     }
 }
 
 /// How text mode marks a match: a translucent box over its text, which
-/// shows through. `[text.style]` for every match, `[text.style.current]`
+/// shows through. `[text.matches]` for every match, `[text.matches.current]`
 /// for the selected one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mark {
@@ -300,7 +406,7 @@ pub struct Marks {
 }
 
 impl Marks {
-    /// The marks a file with no `[text.style]` gets.
+    /// The marks a file with no `[text.matches]` gets.
     #[cfg(test)]
     pub const fn new(style: &Style) -> Self {
         let all = Mark::new(style);
@@ -314,8 +420,8 @@ impl Marks {
     pub fn render(&self) -> String {
         format!(
             "\n{}\n{}",
-            self.all.render("text.style"),
-            self.current.render("text.style.current")
+            self.all.render("text.matches"),
+            self.current.render("text.matches.current")
         )
     }
 }

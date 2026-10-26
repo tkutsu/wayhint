@@ -209,7 +209,8 @@ fn choose(search: &Search, shown: &Snapshot, act: Act) -> Option<Chosen> {
 /// and the pill. `search` is `None` while the text is being read, and
 /// `stale` while the query's matches are being found: the pill shows `...`
 /// for the count then, and nothing is marked. The pill names the armed
-/// `verb`, dimmed, before the query.
+/// `verb`, dimmed, before the query; with no query yet, it shows
+/// `[text.input] placeholder`, dimmed too.
 fn frame(
     search: Option<&Search>,
     stale: bool,
@@ -218,21 +219,26 @@ fn frame(
     input: &Input,
 ) -> Frame {
     let prefix = verb.map(|v| format!("{v} ")).unwrap_or_default();
-    let typed = prefix.chars().count();
-    let status = match search {
-        None => "text ...".to_string(),
-        Some(search) if search.query().is_empty() => "text".to_string(),
-        Some(search) if stale => format!("{}{}{}  ...", input.prefix, search.query(), input.suffix),
+    let (status, placeholder) = match search {
+        None => (format!("{} ...", input.placeholder), true),
+        Some(search) if search.query().is_empty() => (input.placeholder.clone(), true),
+        Some(search) if stale => (
+            format!("{}{}{}  ...", input.prefix, search.query(), input.suffix),
+            false,
+        ),
         Some(search) => {
             let (at, count) = search.position();
-            format!(
+            let status = format!(
                 "{}{}{}  {at}/{count}",
                 input.prefix,
                 search.query(),
                 input.suffix
-            )
+            );
+            (status, false)
         }
     };
+    let dimmed = if placeholder { status.as_str() } else { "" };
+    let typed = prefix.chars().count() + dimmed.chars().count();
     let search = search.filter(|_| !stale);
     let current = search.and_then(Search::current).map(|m| m.span);
     let highlights = search
@@ -323,6 +329,11 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(pill(&found, false).text, "double text");
+        assert_eq!(
+            pill(&found, false).typed,
+            "double text".len(),
+            "the placeholder is dimmed"
+        );
         typed(&mut found, "con");
         assert_eq!(pill(&found, false).text, "double con  1/2");
         assert_eq!(
@@ -351,6 +362,14 @@ mod tests {
         assert_eq!(display(true).text, "double find [αλλ]  ...");
         assert_eq!(display(false).typed, 7, "only the armed verb is dimmed");
         assert_eq!(found.query(), "αλλ", "decorations are display only");
+        let empty = Input {
+            placeholder: "find…".into(),
+            ..input
+        };
+        let waiting = super::frame(Some(&search(&["x"])), false, None, SCREEN, &empty);
+        assert_eq!(waiting.input.unwrap().text, "find…");
+        let reading = super::frame(None, false, None, SCREEN, &empty);
+        assert_eq!(reading.input.unwrap().text, "find… ...");
     }
 
     #[test]
