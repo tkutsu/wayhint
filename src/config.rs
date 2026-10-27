@@ -25,7 +25,7 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::{Badge, Badges, Color, Info, Input, Mark, Marks, Position, Style},
+    style::{Badge, Badges, Color, Info, Input, Mark, Marks, Position, StartMark, Starts, Style},
 };
 
 /// The default config, every setting explained and commented out:
@@ -69,6 +69,7 @@ struct FileText {
     /// `[text.matches]`, once `[text.style]`, which a file may still say.
     #[serde(alias = "style")]
     matches: FileMarks,
+    starts: FileStarts,
     /// `[input]`'s old name, from when it showed only the query.
     input: Option<FileInput>,
 }
@@ -120,6 +121,11 @@ impl FileInput {
             ..base.style
         };
         style.validate_table(table)?;
+        if style.position == Position::Auto {
+            bail!(
+                "[{table}] position: auto is for tags; give center, top, bottom, left, right or a corner"
+            );
+        }
         let placeholder = self.placeholder.unwrap_or(base.placeholder);
         if [&placeholder, &self.prefix, &self.suffix]
             .iter()
@@ -247,10 +253,45 @@ struct FileMark {
     padding: Option<[f32; 2]>,
 }
 
+/// `[text.starts]`: unset fields take [`Starts::new`]'s.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileStarts {
+    mark: StartMark,
+    line: Option<Color>,
+    thickness: Option<f32>,
+    background: Option<Color>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+}
+
+impl FileStarts {
+    fn resolve(&self) -> Result<Starts> {
+        let base = Starts::new();
+        let starts = Starts {
+            mark: self.mark,
+            line: self.line.unwrap_or(base.line),
+            thickness: self.thickness.unwrap_or(base.thickness),
+            look: Mark {
+                background: self.background.unwrap_or(base.look.background),
+                border: self.border.unwrap_or(base.look.border),
+                border_width: self.border_width.unwrap_or(base.look.border_width),
+                radius: self.radius.unwrap_or(base.look.radius),
+                padding: self.padding.unwrap_or(base.look.padding),
+            },
+        };
+        starts.validate()?;
+        Ok(starts)
+    }
+}
+
 impl FileMarks {
     /// The marks, with whatever the file leaves out filled in: radius and
-    /// padding from the tags' `style`.
-    fn resolve(&self, style: &Style) -> Result<Marks> {
+    /// padding from the tags' `style`. The words' first letters' are
+    /// `starts`.
+    fn resolve(&self, style: &Style, starts: Starts) -> Result<Marks> {
         let base = Mark::new(style);
         let all = Mark {
             background: self.background.unwrap_or(base.background),
@@ -270,7 +311,11 @@ impl FileMarks {
         };
         all.validate("text.matches")?;
         current.validate("text.matches.current")?;
-        Ok(Marks { all, current })
+        Ok(Marks {
+            all,
+            current,
+            starts,
+        })
     }
 }
 
@@ -1102,7 +1147,8 @@ impl Config {
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         file.style.validate()?;
-        let marks = file.text.matches.resolve(&file.style)?;
+        let starts = file.text.starts.resolve()?;
+        let marks = file.text.matches.resolve(&file.style, starts)?;
         let input = match (file.input, file.text.input) {
             (Some(_), Some(_)) => {
                 bail!("[input] and [text.input] are the same table; keep [input]")
@@ -1761,6 +1807,46 @@ mod tests {
         );
         assert!(err("[text.matches]\nopacity = 0.5").contains("unknown field"));
         assert!(err("[text.matches]\nborder = \"red\"").contains("isn't a colour"));
+    }
+
+    #[test]
+    fn word_starts_are_unmarked_unless_asked_and_round_trip() {
+        let config = Config::parse("", &us()).unwrap();
+        assert_eq!(config.marks.starts, Starts::new());
+        assert_eq!(config.marks.starts.mark, StartMark::Off);
+        let set = Config::parse(
+            "[text.starts]\nmark = \"underline\"\nline = \"#f38ba8\"\nthickness = 3\nradius = 0",
+            &us(),
+        )
+        .unwrap();
+        let starts = set.marks.starts;
+        assert_eq!(starts.mark, StartMark::Underline);
+        assert_eq!(starts.line, Color::rgba(0xf3, 0x8b, 0xa8, 0xff));
+        assert!((starts.thickness - 3.0).abs() < f32::EPSILON);
+        assert_eq!(starts.look.padding, Starts::new().look.padding, "unset");
+        let again = Config::parse(&set.render(), &us()).unwrap();
+        assert_eq!(again.marks.starts, starts);
+        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
+        assert!(err("[text.starts]\nmark = \"dots\"").contains("unknown variant"));
+        assert!(err("[text.starts]\nthickness = 0").contains("[text.starts] thickness"));
+        assert!(err("[text.starts]\npadding = [-1, 0]").contains("[text.starts] padding"));
+    }
+
+    #[test]
+    fn tags_go_beside_their_control_unless_placed_and_the_input_box_never_does() {
+        assert_eq!(
+            Config::parse("", &us()).unwrap().style.position,
+            Position::Auto
+        );
+        let placed = Config::parse("[style]\nposition = \"bottom-right\"", &us()).unwrap();
+        assert_eq!(placed.style.position, Position::BottomRight);
+        let again = Config::parse(&placed.render(), &us()).unwrap();
+        assert_eq!(again.style.position, Position::BottomRight);
+        let err = format!(
+            "{:#}",
+            Config::parse("[input]\nposition = \"auto\"", &us()).unwrap_err()
+        );
+        assert!(err.contains("[input] position: auto is for tags"), "{err}");
     }
 
     #[test]

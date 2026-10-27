@@ -534,52 +534,42 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
 
 /// `target`'s tag, reading `text` with its first `typed` characters dimmed.
 pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag {
-    Tag {
-        at: spot(target, config),
-        target: Some(target.hit),
-        position: if target.role == "terminal" {
-            Position::Center
-        } else {
-            config.style.position
-        },
-        text,
-        typed,
-        verb: 0,
+    let tag = Tag {
         kind: if target.in_pixels() {
             Kind::Pixels
         } else {
             Kind::Plain
         },
+        ..tag_on(target.shown(), target.hit, text, typed, config)
+    };
+    if target.role == "terminal" {
+        // On the cursor, wherever the tags go elsewhere.
+        return Tag {
+            at: target.hit,
+            position: Position::Center,
+            control: None,
+            ..tag
+        };
     }
+    tag
 }
 
 /// A label on the box `shown`, for the point `hit`, placed as a target's
-/// tag is: text mode's labels on its matches, in `[style.labels]`.
+/// tag is: at `[style] position` on the box, moved by `[style] offset`.
+/// Text mode's labels on its matches, in `[style.labels]`.
 pub fn tag_on(shown: Rect, hit: Point, text: String, typed: usize, config: &Config) -> Tag {
+    let [x, y] = config.style.offset;
+    let position = config.style.position;
     Tag {
-        at: spot_on(shown, config),
+        at: position.on(shown).offset(Point::new(x, y)),
+        position,
+        control: (position == Position::Auto).then_some(shown),
         target: Some(hit),
-        position: config.style.position,
         text,
         typed,
         verb: 0,
         kind: Kind::Label,
     }
-}
-
-/// Where `target`'s tag goes: at `[style] position` on its visible box,
-/// moved by `[style] offset`; a terminal's on its cursor.
-fn spot(target: &Target, config: &Config) -> Point {
-    if target.role == "terminal" {
-        return target.hit;
-    }
-    spot_on(target.shown(), config)
-}
-
-/// The same for a box.
-fn spot_on(shown: Rect, config: &Config) -> Point {
-    let [x, y] = config.style.offset;
-    config.style.position.on(shown).offset(Point::new(x, y))
 }
 
 /// The input box with the tags up: the armed verb's name, dimmed, or

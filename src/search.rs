@@ -57,8 +57,8 @@ use crate::{
     selection::{self, Selector, Step, relabel_free},
     snapshot::{Snapshot, Target},
     status::{Message, Status},
-    style::{Input, Notice},
-    text::{Check, Match, Place, Search},
+    style::{Input, Notice, StartMark},
+    text::{Check, Match, Place, Search, Span},
 };
 
 /// How many characters `[text] auto_accept` waits for before acting on
@@ -353,7 +353,7 @@ impl Typing {
         let before: HashMap<usize, Vec<usize>> = self.hints.0.iter().cloned().collect();
         *shown = fresh;
         overlay.set_layout(shown);
-        self.search = Search::new(source.read_text(shown));
+        self.search = read(shown, source, config);
         let kept = |i: usize| survivors[i].and_then(|was| before.get(&was).cloned());
         let hints = Hints::keeping(&self.search, shown, config, &kept);
         // A label now on another target: a key typed for the old one
@@ -419,7 +419,7 @@ fn keys(
     // Nothing shows while the text is read: no tag to type yet.
     let verb = selector.armed().map(Action::name);
     overlay.update(&frame(None, false, verb, holding, &config.input, None))?;
-    let search = Search::new(source.read_text(shown));
+    let search = read(shown, source, config);
     let mut now = Typing {
         hints: Hints::new(&search, shown, config),
         search,
@@ -694,6 +694,28 @@ fn unique(search: &Search) -> bool {
     search.query().chars().count() >= UNIQUE && search.matches().len() == 1
 }
 
+/// The windows' texts, and with `[text.starts]`, where each word's first
+/// letter shows, asked of the apps now: the first letter typed then asks
+/// nothing. A text read from a name has no letters to ask about.
+fn read(shown: &Snapshot, source: &mut dyn Source, config: &Config) -> Search {
+    let mut search = Search::new(source.read_text(shown));
+    if config.marks.starts.mark == StartMark::Off {
+        return search;
+    }
+    let spans: Vec<Span> = search
+        .word_starts()
+        .into_iter()
+        .filter(|span| match search.texts()[span.text].place {
+            Place::Object(index) => !shown.texts[index].named,
+            Place::Cells(_) => true,
+        })
+        .collect();
+    let boxes = source.locate(shown, search.texts(), &spans);
+    search.located(&spans, boxes);
+    search.mark_starts(&spans, &|window, at| source.shows(shown, window, at));
+    search
+}
+
 /// Finds the query's matches: asks the apps where the new ones are, then
 /// keeps those that show.
 fn find(search: &mut Search, shown: &Snapshot, source: &mut dyn Source) {
@@ -777,7 +799,8 @@ fn choose(
 }
 
 /// What text mode shows: every match's lines, the current one's marked,
-/// and the input box. `search` is `None` while the text is being read, and
+/// and the input box; with no query, each word's first letter marked if
+/// `[text.starts]` says. `search` is `None` while the text is being read, and
 /// `stale` while the query's matches are being found: the box shows `...`
 /// for the count then, and nothing is marked. The box names the armed
 /// `verb`, or `drop` while `holding`, dimmed, before the query; with no
@@ -815,8 +838,14 @@ fn frame(
                 .collect()
         })
         .unwrap_or_default();
+    // The words' first letters, until a query's matches take over.
+    let starts = search
+        .filter(|search| search.query().is_empty())
+        .map(|search| search.starts().to_vec())
+        .unwrap_or_default();
     Frame {
         highlights,
+        starts,
         status,
         ..Frame::default()
     }

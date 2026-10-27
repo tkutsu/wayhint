@@ -83,9 +83,16 @@ impl fmt::Display for Color {
 /// Where a tag sits on its target: `[style] position`. The tag's own
 /// matching point goes on the target's, so `BottomRight` puts the tag in
 /// the box's bottom-right corner, inside it if it fits.
+///
+/// `Auto` starts as `Left`, at the box's start, then the overlay moves the
+/// tag out beside the box: to its left, under it or over it, the first
+/// where no other control is (see `overlay::draw::Side`). Boxed in, it
+/// stays at the start. The input box has no `Auto`: nothing is beside it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Position {
+    #[default]
+    Auto,
     TopLeft,
     Top,
     TopRight,
@@ -94,7 +101,6 @@ pub enum Position {
     Right,
     BottomLeft,
     Bottom,
-    #[default]
     BottomRight,
 }
 
@@ -106,7 +112,7 @@ impl Position {
             Self::TopLeft => (0, 0),
             Self::Top => (1, 0),
             Self::TopRight => (2, 0),
-            Self::Left => (0, 1),
+            Self::Auto | Self::Left => (0, 1),
             Self::Center => (1, 1),
             Self::Right => (2, 1),
             Self::BottomLeft => (0, 2),
@@ -124,6 +130,7 @@ impl Position {
     /// As the config writes it: `"bottom-right"`.
     const fn name(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::TopLeft => "top-left",
             Self::Top => "top",
             Self::TopRight => "top-right",
@@ -465,7 +472,10 @@ impl Style {
     pub fn render(&self) -> String {
         format!(
             "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}{}",
-            self.render_table("style", "on the target"),
+            self.render_table(
+                "style",
+                "on the target: auto (beside it, where no other control is), or "
+            ),
             self.case.name(),
             self.leader.render(self),
             self.pixels.render(
@@ -510,7 +520,7 @@ impl Style {
         );
         let _ = writeln!(
             out,
-            "position = \"{}\"   # {anchor}: center, top, bottom, left, right, or a corner as top-left",
+            "position = \"{}\"   # {anchor}center, top, bottom, left, right, or a corner as top-left",
             self.position.name()
         );
         let _ = writeln!(
@@ -559,7 +569,7 @@ impl Input {
 
     /// The resolved box as editable TOML.
     pub fn render(&self) -> String {
-        let look = self.style.render_table("input", "on the screen");
+        let look = self.style.render_table("input", "on the screen: ");
         let (header, fields) = look.split_once('\n').unwrap();
         let quote = crate::config::quote;
         format!(
@@ -712,30 +722,101 @@ pub struct Mark {
     pub padding: [f32; 2],
 }
 
-/// Every match's mark, and the current one's.
+/// Every match's mark, the current one's, and the words' first letters'.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Marks {
     pub all: Mark,
     pub current: Mark,
+    pub starts: Starts,
 }
 
 impl Marks {
-    /// The marks a file with no `[text.matches]` gets.
+    /// The marks a file with no `[text.matches]` or `[text.starts]` gets.
     #[cfg(test)]
     pub const fn new(style: &Style) -> Self {
         let all = Mark::new(style);
         Self {
             all,
             current: all.for_current(),
+            starts: Starts::new(),
         }
     }
 
-    /// Both tables as TOML, each after a blank line, for `wayhint config`.
+    /// The tables as TOML, each after a blank line, for `wayhint config`.
     pub fn render(&self) -> String {
         format!(
-            "\n{}\n{}",
+            "\n{}\n{}\n{}",
             self.all.render("text.matches"),
-            self.current.render("text.matches.current")
+            self.current.render("text.matches.current"),
+            self.starts.render(),
+        )
+    }
+}
+
+/// How text mode marks the first letter of each word, what typing starts a
+/// match from, while nothing is typed: `[text.starts]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Starts {
+    pub mark: StartMark,
+    /// The underline's colour, and its height in px.
+    pub line: Color,
+    pub thickness: f32,
+    /// The box over the letter.
+    pub look: Mark,
+}
+
+/// Which mark `[text.starts]` draws.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartMark {
+    #[default]
+    Off,
+    Underline,
+    Box,
+}
+
+impl Starts {
+    /// Off; drawn, a blue line 2 px high, or a box of the same blue, see-through.
+    pub const fn new() -> Self {
+        Self {
+            mark: StartMark::Off,
+            line: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
+            thickness: 2.0,
+            look: Mark {
+                background: Color::rgba(0x89, 0xb4, 0xfa, 0x66),
+                border: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
+                border_width: 0.0,
+                radius: 2.0,
+                padding: [0.0, 1.0],
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !(0.5..=20.0).contains(&self.thickness) {
+            bail!(
+                "[text.starts] thickness: {} px is outside 0.5-20",
+                self.thickness
+            );
+        }
+        self.look.validate("text.starts")
+    }
+
+    /// The table as TOML, for `wayhint config`.
+    fn render(&self) -> String {
+        let mark = match self.mark {
+            StartMark::Off => "off",
+            StartMark::Underline => "underline",
+            StartMark::Box => "box",
+        };
+        let look = self.look.render("text.starts");
+        let (header, fields) = look.split_once('\n').unwrap();
+        format!(
+            "{header}   # the first letter of each word, while nothing is typed\n\
+             mark = \"{mark}\"   # off, underline, or box: the fields below\n\
+             line = \"{}\"   # the underline\n\
+             thickness = {}   # the underline's, in px\n{fields}",
+            self.line, self.thickness,
         )
     }
 }
@@ -931,6 +1012,11 @@ mod tests {
     #[test]
     fn positions_name_points_on_a_box() {
         let rect = Rect::new(10, 20, 40, 30);
+        assert_eq!(
+            Position::Auto.on(rect),
+            Position::Left.on(rect),
+            "the start"
+        );
         assert_eq!(Position::TopLeft.on(rect), Point::new(10, 20));
         assert_eq!(Position::Center.on(rect), rect.center());
         assert_eq!(Position::Right.on(rect), Point::new(50, 35));
