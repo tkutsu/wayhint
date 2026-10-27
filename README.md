@@ -7,9 +7,8 @@ Use your keyboard to click what you see on a Hyprland desktop.
 
 Launch `wayhint`, type a word on screen, and press `Enter` to click it.
 Icons and controls without searchable text keep short letter hints: type a
-hint to reach those too. When several matches are left, each gets a
-capital label, and `Shift` with that label picks it. Text and hints work
-together across the visible windows on the focused monitor.
+hint to reach those too. Text and hints work together across the visible
+windows on the focused monitor.
 
 wayhint reads the accessibility tree used by screen readers, plus Kitty's
 remote control. Windows without accessible controls get hints estimated
@@ -135,17 +134,14 @@ Punctuation can start a query too, unless its first key is bound to a
 verb. The items of an open menu are searched by their names.
 
 Matches get yellow boxes, with the current match in orange, and the
-pointer moves onto the current match. When two or more are visible, each
-also gets a capital label: hold `Shift` and type the label to pick that
-match. Text is read when a round starts, and again whenever the windows
-change while nothing is typed. Once you type, it stays as read until the
+pointer moves onto the current match. Text is read when a round starts,
+and again whenever the windows change while nothing is typed. Once you type, it stays as read until the
 next round. Before acting, wayhint reads the selected text again and
 skips the action if it changed.
 
 | Key | Action |
 |---|---|
 | `Enter` | Click where the pointer is: the current match, or where the arrows moved it. With nothing typed, click at the pointer. |
-| `Shift` and a match's label | Pick that match. |
 | `Tab`, `Shift+Tab` | Move between matches, taking the pointer along. |
 | Arrows | Move the pointer from the match; held, faster. Another match starts over. |
 | A complete hint | Act on a control without searchable text. |
@@ -156,7 +152,7 @@ skips the action if it changed.
 
 Hints use letters that no searchable word starts with. Typing therefore
 narrows both text and hints until one identifies a target. By default,
-hints and match labels act as soon as they are complete, and text matches
+hints act as soon as they are complete, and text matches
 wait for `Enter`. `[hints] auto_accept` and `[text] auto_accept` change
 each.
 
@@ -225,13 +221,12 @@ cursor = "start"       # start, center (default), or end of the match
 auto_accept = false    # true acts on a unique match after 3 characters
 ```
 
-Set `[hints] auto_accept = false` to confirm completed hints and match
-labels with `Enter`. This applies in either mode. Set `[text] hints = false` to show only text
+Set `[hints] auto_accept = false` to confirm completed hints with
+`Enter`. This applies in either mode. Set `[text] hints = false` to show only text
 matches. Appearance is configured under `[style]`, `[text.matches]`,
-`[text.starts]`, `[input]` and `[info]`; colours accept hex RGB or RGBA. Hints, match labels
-and verbs each have their own colour: `[style] text` for hints, `[style.labels]`
-for match labels (mauve by default), and `verb` in `[style]` and `[input]` for
-an armed verb (peach by default). Invalid settings are reported before
+`[text.starts]`, `[input]` and `[info]`; colours accept hex RGB or RGBA. Hints and verbs
+each have their own colour: `[style] text` for hints, and `verb` in `[style]`
+and `[input]` for an armed verb (peach by default). Invalid settings are reported before
 wayhint takes the keyboard.
 
 A hint goes beside the start of its control: to its left, or under it, or

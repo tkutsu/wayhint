@@ -17,7 +17,6 @@
 //!                   a named one any time: armed
 //!                 Enter: the armed verb (or the default) on the current match,
 //!                        where the pointer is if the arrows moved it
-//!                 Shift on a match's label: that match, as Enter
 //!                 one match left (with [text] auto_accept): as Enter
 //!                 a whole tag typed (with [text] hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
@@ -28,10 +27,6 @@
 //! word. Their labels are ones no word on screen starts with, so a whole
 //! label is never a query, and what's typed is both until one of them
 //! wins ([`Hints`]).
-//!
-//! Two matches or more get labels of their own, typed with Shift on the
-//! tag letters: case means nothing to the search, so a capital is free to
-//! pick with. They go in reading order, and change as the query does.
 //!
 //! The text is read as text mode starts, and again whenever a refresh
 //! finds the windows changed while nothing is typed: the first key freezes
@@ -206,34 +201,6 @@ impl Hints {
     }
 }
 
-/// The matches' labels, in their order: none for fewer than two, which
-/// Enter tells apart alone.
-fn match_labels(search: &Search, config: &Config) -> Vec<Vec<usize>> {
-    match search.matches().len() {
-        0 | 1 => Vec::new(),
-        count => selection::labels(count, config.alphabet.len()),
-    }
-}
-
-/// The matches' labels still open after `picking`, in capitals, since
-/// Shift types them, with what's typed of them dimmed.
-fn label_tags(search: &Search, picking: &[usize], config: &Config) -> Vec<Tag> {
-    let letters = config.alphabet.letters();
-    let typed: Vec<Option<usize>> = picking.iter().copied().map(Some).collect();
-    match_labels(search, config)
-        .iter()
-        .zip(search.matches())
-        .filter(|(label, _)| opens(label, &typed))
-        .map(|(label, found)| {
-            let text = label
-                .iter()
-                .flat_map(|&i| letters[i].label.to_uppercase())
-                .collect();
-            pick::tag_on(found.parts[0], found.point(), text, typed.len(), config)
-        })
-        .collect()
-}
-
 /// Text mode as it stands: what was read, typed and armed, and what the
 /// info line says.
 #[allow(clippy::struct_excessive_bools)] // independent states of one text mode
@@ -245,8 +212,6 @@ struct Typing {
     command: Selector,
     /// For each character of the query, the tag letter its key is, if any.
     pressed: Vec<Option<usize>>,
-    /// The tag letters typed with Shift so far: a match's label.
-    picking: Vec<usize>,
     /// The query changed since the matches were found.
     stale: bool,
     /// What was typed that matched nothing, and until when it's named.
@@ -294,7 +259,7 @@ impl Typing {
     }
 
     /// What text mode shows: [`frame`], with the tags on the targets with
-    /// no text and the labels on the matches.
+    /// no text.
     fn draw(&self, shown: &Snapshot, config: &Config) -> Frame {
         let info = if self.help {
             Some(Message::new(Notice::Help, config.verbs.text_legend()))
@@ -302,10 +267,7 @@ impl Typing {
             let missed = self.missed.as_ref();
             missed.map(|m| Message::new(Notice::NoMatch, m.0.clone()))
         };
-        let mut tags = self.hints.tags(&self.pressed, shown, config);
-        if !self.stale {
-            tags.extend(label_tags(&self.search, &self.picking, config));
-        }
+        let tags = self.hints.tags(&self.pressed, shown, config);
         let verb = self.command.armed().map(Action::name);
         let (search, input) = (Some(&self.search), &config.input);
         Frame {
@@ -425,7 +387,6 @@ fn keys(
         search,
         command: selector.clone(),
         pressed: Vec::new(),
-        picking: Vec::new(),
         stale: false,
         missed: None,
         help: false,
@@ -525,54 +486,10 @@ fn keys(
             overlay.update(&now.draw(shown, config))?;
             continue;
         }
-        // Shift on a tag letter picks a match by its label, once there are
-        // two or more to tell apart; with fewer, it's text.
-        if key.shift
-            && !mods.ctrl
-            && !mods.alt
-            && let Some(letter) = letter
-            && !now.search.query().is_empty()
-        {
-            if now.stale {
-                find(&mut now.search, shown, source);
-                now.stale = false;
-            }
-            let labels = match_labels(&now.search, config);
-            if !labels.is_empty() {
-                // After a whole label, a letter starts the next one.
-                let from = if labels.contains(&now.picking) {
-                    &[][..]
-                } else {
-                    now.picking.as_slice()
-                };
-                let picking = [from, &[letter]].concat();
-                let keys: Vec<Option<usize>> = picking.iter().copied().map(Some).collect();
-                if let Some(index) = labels.iter().position(|label| *label == picking) {
-                    now.search.select(index);
-                    if config.hint_auto_accept
-                        && let Some(chosen) =
-                            choose(&now.search, shown, now.command.act(mods), cursor, false)
-                    {
-                        return Ok(Pick::Text(Box::new(chosen)));
-                    }
-                    now.picking = picking;
-                } else if labels.iter().any(|label| opens(label, &keys)) {
-                    now.picking = picking;
-                }
-                // A letter no label goes on with is dropped.
-                now.follow(mouse, cursor)?;
-                overlay.update(&now.draw(shown, config))?;
-                continue;
-            }
-        }
         let edit = match key.code {
-            // Backspace takes back the last letter of a label, else the
-            // last character; with nothing typed, the verb.
+            // Backspace takes back the last character; with nothing
+            // typed, the verb.
             KeyCode::BACKSPACE => {
-                if now.picking.pop().is_some() {
-                    overlay.update(&now.draw(shown, config))?;
-                    continue;
-                }
                 if now.search.pop() {
                     now.pressed.pop();
                     true
@@ -611,9 +528,6 @@ fn keys(
                 _ => continue,
             },
         };
-        if edit {
-            now.picking.clear();
-        }
         now.stale |= edit;
         if edit
             && key.code != KeyCode::BACKSPACE
@@ -679,9 +593,6 @@ fn keys(
             KeyCode::TAB if !key.shift => now.search.next(),
             KeyCode::TAB => now.search.previous(),
             _ => {}
-        }
-        if key.code == KeyCode::TAB {
-            now.picking.clear();
         }
         now.follow(mouse, cursor)?;
         overlay.update(&now.draw(shown, config))?;
@@ -1275,39 +1186,10 @@ mod tests {
     }
 
     #[test]
-    fn two_matches_or_more_get_capital_labels_in_reading_order() {
-        let config = config("");
-        let mut found = search(&["contact", "falcon"]);
-        typed(&mut found, "fa");
-        assert!(
-            match_labels(&found, &config).is_empty(),
-            "one: Enter is enough"
-        );
-        let mut found = search(&["contact", "control", "console"]);
-        typed(&mut found, "con");
-        assert_eq!(match_labels(&found, &config), [[0], [1], [2]]);
-        let texts = |picking: &[usize]| -> Vec<String> {
-            label_tags(&found, picking, &config)
-                .into_iter()
-                .map(|t| t.text)
-                .collect()
-        };
-        assert_eq!(texts(&[]), ["A", "S", "D"]);
-        assert_eq!(texts(&[1]), ["S"]);
-        let tag = &label_tags(&found, &[], &config)[1];
-        assert_eq!(tag.target, Some(found.matches()[1].point()));
-        found.select(2);
-        assert_eq!(found.position(), (3, 3));
-        found.select(7);
-        assert_eq!(found.position(), (3, 3), "no such match: the current stays");
-    }
-
-    #[test]
     fn the_key_list_says_how_text_mode_works() {
         let legend = config("").verbs.text_legend();
         assert!(legend.starts_with("text Enter\tleft click\n"), "{legend}");
         assert!(legend.contains(", text Enter\tright click"), "{legend}");
-        assert!(legend.contains("Shift+label\tpick that match"), "{legend}");
         assert!(legend.ends_with("Esc\tleave"), "{legend}");
     }
 }

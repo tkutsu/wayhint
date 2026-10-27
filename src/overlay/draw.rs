@@ -107,8 +107,6 @@ pub enum Kind {
     Plain,
     /// Found in its window's pixels: `[style.pixels]`.
     Pixels,
-    /// Text mode's match label: `[style.labels]`.
-    Label,
 }
 
 /// A rasterized letter: where it sits relative to the pen, and its pixels.
@@ -137,8 +135,6 @@ pub struct Painter {
     tags: TextPainter,
     /// Tags found in pixels: `[style.pixels]`.
     pixels: TextPainter,
-    /// Text mode's match labels: `[style.labels]`.
-    labels: TextPainter,
     input: TextPainter,
     /// The messages' icons: `[info] icon_font`, at the input box's size.
     icons: TextPainter,
@@ -222,7 +218,6 @@ impl Painter {
         Ok(Self {
             tags: TextPainter::new(style, scale)?,
             pixels: TextPainter::new(&style.for_pixels(), scale)?,
-            labels: TextPainter::new(&style.for_labels(), scale)?,
             input: TextPainter::new(input, scale)?,
             icons: TextPainter::new(&icons, scale)?,
             marks: *marks,
@@ -236,13 +231,12 @@ impl Painter {
         })
     }
 
-    /// The font and look `tag` is drawn in: `[style]`, `[style.pixels]`
-    /// or `[style.labels]`, by its kind.
+    /// The font and look `tag` is drawn in: `[style]` or `[style.pixels]`,
+    /// by its kind.
     const fn look(&self, tag: &Tag) -> &TextPainter {
         match tag.kind {
             Kind::Plain => &self.tags,
             Kind::Pixels => &self.pixels,
-            Kind::Label => &self.labels,
         }
     }
 
@@ -275,7 +269,7 @@ impl Painter {
                     .unwrap_or(screen)
             })
             .collect();
-        // Text mode's matches are controls too: a label goes beside its own.
+        // Text mode's matches are controls too: tags keep off them.
         let controls: Vec<_> = self
             .controls
             .iter()
@@ -428,7 +422,6 @@ impl Painter {
             let look = match tag.kind {
                 Kind::Plain => &mut self.tags,
                 Kind::Pixels => &mut self.pixels,
-                Kind::Label => &mut self.labels,
             };
             look.paint_tag(pixmap, tag, area);
         }
@@ -1566,14 +1559,14 @@ offset = [20, 20]
     }
 
     #[test]
-    fn tags_in_pixels_and_match_labels_have_their_own_looks() {
+    fn tags_in_pixels_have_their_own_look() {
         let style = Style {
             text: Color::rgba(255, 0, 0, 255),
             background: Color::rgba(0, 0, 0, 255),
             position: Position::TopLeft,
             ..Style::default()
         };
-        let (teal, mauve) = (style.for_pixels().text, style.for_labels().text);
+        let teal = style.for_pixels().text;
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         let tag = |x, kind| Tag {
@@ -1587,11 +1580,7 @@ offset = [20, 20]
             kind,
         };
         let frame = Frame {
-            tags: vec![
-                tag(20, Kind::Plain),
-                tag(120, Kind::Pixels),
-                tag(220, Kind::Label),
-            ],
+            tags: vec![tag(20, Kind::Plain), tag(120, Kind::Pixels)],
             ..Frame::default()
         };
         let mut pixmap = Pixmap::new(300, 60).unwrap();
@@ -1601,15 +1590,10 @@ offset = [20, 20]
         };
         let red = bounds(&pixmap, is(style.text));
         let pixels = bounds(&pixmap, is(teal));
-        let labels = bounds(&pixmap, is(mauve));
         assert!(red[2] <= 100, "[style] letters only on the first: {red:?}");
         assert!(
             (120..200).contains(&pixels[0]) && pixels[2] <= 200,
             "teal letters only on the second: {pixels:?}"
-        );
-        assert!(
-            labels[0] >= 220,
-            "mauve letters only on the third: {labels:?}"
         );
     }
 

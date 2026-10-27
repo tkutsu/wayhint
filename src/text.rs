@@ -5,8 +5,8 @@
 //!
 //! - Accents go: `é` is `e` plus a combining accent (Unicode's canonical
 //!   decomposition), and the accent is dropped, so `α` finds `άλλο`.
-//! - Case goes: a query finds text in any case. Shift is for verbs and
-//!   for picking a match by its label, never for the text.
+//! - Case goes: a query finds text in any case. Shift is for verbs,
+//!   never for the text.
 //! - Every run of white space is one space, so a space finds a line break.
 //!
 //! AT-SPI counts in characters, Rust strings in bytes, and folding changes
@@ -451,13 +451,6 @@ impl Search {
     pub fn position(&self) -> (usize, usize) {
         let count = self.matches.len();
         (if count == 0 { 0 } else { self.current + 1 }, count)
-    }
-
-    /// Makes match `index` current, if there is one.
-    pub fn select(&mut self, index: usize) {
-        if index < self.matches.len() {
-            self.current = index;
-        }
     }
 
     /// The next match, from the last back to the first.

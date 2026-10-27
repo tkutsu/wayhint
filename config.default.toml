@@ -69,8 +69,7 @@
 
 
 [hints]
-# Completed tags, in tag mode and on text mode's targets with no text, and
-# text mode's match labels.
+# Completed tags, in tag mode and on text mode's targets with no text.
 # auto_accept = true        # false waits for Enter after the whole tag; modifiers on Enter apply to the action
 
 
@@ -113,21 +112,6 @@
 # font = "sans-serif:bold"
 # size = 13
 # text = "#94e2d5ff"        # teal
-# dimmed = "#ffffff66"
-# verb = "#fab387ff"
-# background = "#1e1e2ef0"
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-
-[style.labels]
-# Text mode's match labels, typed with Shift to pick a match: their own
-# letters keep them apart from the tags. Unset fields follow [style]; by
-# default only the letters differ.
-# font = "sans-serif:bold"
-# size = 13
-# text = "#cba6f7ff"        # mauve
 # dimmed = "#ffffff66"
 # verb = "#fab387ff"
 # background = "#1e1e2ef0"
@@ -187,8 +171,8 @@
 # Text mode is what `wayhint` runs; `wayhint --hints` runs tags alone, on a
 # compositor shortcut of its own, and launching one closes the other.
 # Typing finds text on screen from the start of a word, in any case. Enter
-# acts on the current match, Tab and Shift+Tab move between matches, and
-# Shift on a tag letter picks the match with that label. The pointer goes
+# acts on the current match, and Tab and Shift+Tab move between matches.
+# The pointer goes
 # to the current match, the arrows move it from there, and Enter clicks
 # where it is; another match takes it again. Targets with no
 # text to type keep a tag. A verb goes first, before the text, and

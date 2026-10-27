@@ -184,13 +184,11 @@ fn wayland(checks: &mut Vec<Check>, monitors: &[Monitor]) {
     }
 }
 
-/// The fonts the tags, pixel tags, match labels and input box are drawn
-/// in, and whether the icon font has the messages' icons.
+/// The fonts the tags, pixel tags and input box are drawn in, and whether the icon font has the messages' icons.
 fn fonts(checks: &mut Vec<Check>, config: &Config) {
     let looks = [
         ("[style] font", &config.style.font),
         ("[style.pixels] font", &config.style.for_pixels().font),
-        ("[style.labels] font", &config.style.for_labels().font),
         ("[input] font", &config.input.style.font),
     ];
     for (what, pattern) in looks {

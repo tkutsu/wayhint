@@ -533,14 +533,25 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
 }
 
 /// `target`'s tag, reading `text` with its first `typed` characters dimmed.
+/// The tag goes at `[style] position` on the target's box, moved by
+/// `[style] offset`.
 pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag {
+    let [x, y] = config.style.offset;
+    let position = config.style.position;
+    let shown = target.shown();
     let tag = Tag {
+        at: position.on(shown).offset(Point::new(x, y)),
+        position,
+        control: (position == Position::Auto).then_some(shown),
+        target: Some(target.hit),
+        text,
+        typed,
+        verb: 0,
         kind: if target.in_pixels() {
             Kind::Pixels
         } else {
             Kind::Plain
         },
-        ..tag_on(target.shown(), target.hit, text, typed, config)
     };
     if target.role == "terminal" {
         // On the cursor, wherever the tags go elsewhere.
@@ -552,24 +563,6 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
         };
     }
     tag
-}
-
-/// A label on the box `shown`, for the point `hit`, placed as a target's
-/// tag is: at `[style] position` on the box, moved by `[style] offset`.
-/// Text mode's labels on its matches, in `[style.labels]`.
-pub fn tag_on(shown: Rect, hit: Point, text: String, typed: usize, config: &Config) -> Tag {
-    let [x, y] = config.style.offset;
-    let position = config.style.position;
-    Tag {
-        at: position.on(shown).offset(Point::new(x, y)),
-        position,
-        control: (position == Position::Auto).then_some(shown),
-        target: Some(hit),
-        text,
-        typed,
-        verb: 0,
-        kind: Kind::Label,
-    }
 }
 
 /// The input box with the tags up: the armed verb's name, dimmed, or
