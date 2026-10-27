@@ -131,19 +131,22 @@ impl Status {
         }
     }
 
-    /// Text mode: the armed `verb`, dimmed, then the `query` between
-    /// `[input] prefix` and `suffix`, and its `position`, the current
-    /// match and how many there are; `None` while they're being found.
-    /// With nothing typed, `[input] placeholder`, dimmed. `query` is
-    /// `None` while the windows' text is being read.
+    /// Text mode: `drop` while `holding`, else the armed `verb`, dimmed,
+    /// then the `query` between `[input] prefix` and `suffix`, and its
+    /// `position`, the current match and how many there are; `None` while
+    /// they're being found. With nothing typed, `[input] placeholder`,
+    /// dimmed. `query` is `None` while the windows' text is being read.
     pub fn text(
         verb: Option<&'static str>,
+        holding: bool,
         query: Option<&str>,
         position: Option<(usize, usize)>,
         input: &Input,
     ) -> Self {
         let mut segments = Vec::new();
-        if let Some(verb) = verb {
+        if holding {
+            segments.push(Segment::new(Role::Drop, "drop ", true));
+        } else if let Some(verb) = verb {
             segments.push(Segment::new(Role::Verb, format!("{verb} "), true));
         }
         let pending = Matches {
@@ -186,6 +189,7 @@ impl Status {
             mode: Some(Mode::Text),
             input: query.unwrap_or_default().to_owned(),
             verb,
+            holding,
             segments,
             matches,
             ..Self::default()
@@ -317,13 +321,20 @@ mod tests {
             suffix: "]".into(),
             ..Input::new(&Style::default())
         };
-        let reading = Status::text(Some("double"), None, None, &input);
+        let reading = Status::text(Some("double"), false, None, None, &input);
         assert_eq!(reading.line(), Some(("double text ...".into(), 15)));
         assert!(reading.matches.unwrap().pending);
-        let empty = Status::text(None, Some(""), Some((0, 0)), &input);
+        let holding = Status::text(Some("double"), true, Some(""), None, &input);
+        assert_eq!(
+            holding.line(),
+            Some(("drop text".into(), 9)),
+            "drop beats a verb"
+        );
+        assert!(holding.holding);
+        let empty = Status::text(None, false, Some(""), Some((0, 0)), &input);
         assert_eq!(empty.line(), Some(("text".into(), 4)));
         assert_eq!(empty.matches, None, "nothing typed, nothing counted");
-        let found = Status::text(Some("double"), Some("αλλ"), Some((1, 2)), &input);
+        let found = Status::text(Some("double"), false, Some("αλλ"), Some((1, 2)), &input);
         assert_eq!(
             roles(&found),
             [
@@ -343,7 +354,7 @@ mod tests {
                 pending: false
             })
         );
-        let finding = Status::text(None, Some("αλλ"), None, &input);
+        let finding = Status::text(None, false, Some("αλλ"), None, &input);
         assert_eq!(finding.line().unwrap().0, "find [αλλ]  ...");
         assert_eq!(
             finding.matches,
@@ -356,6 +367,7 @@ mod tests {
         );
         let plain = Status::text(
             None,
+            false,
             Some("x"),
             Some((0, 0)),
             &Input::new(&Style::default()),

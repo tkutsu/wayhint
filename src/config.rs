@@ -790,6 +790,30 @@ impl Verbs {
         lines.join("\n")
     }
 
+    /// The same for text mode, where a verb goes before the text and
+    /// `Enter` acts on the current match.
+    pub fn text_legend(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!("text Enter\t{}", self.default.short()));
+        for (action, _, label) in &self.keys {
+            lines.push(format!("{label} text Enter\t{}", action.short()));
+        }
+        for (key, what) in [
+            ("tag", "a control with no text"),
+            ("Shift+label", "pick that match"),
+            (
+                "Tab, arrows",
+                "the next match; with nothing typed, move the pointer",
+            ),
+            ("Enter", "with nothing typed, at the pointer"),
+            ("Backspace", "take back a key"),
+        ] {
+            lines.push(format!("{key}\t{what}"));
+        }
+        lines.push(format!("{}\tleave", self.close.1));
+        lines.join("\n")
+    }
+
     /// The key that arms `action`, as `wayhint config` prints it (`k`,
     /// `_`, `Home`), for the prefix drawn in front of the tags. `None` for
     /// a verb with no key, such as the default action.
@@ -1680,8 +1704,8 @@ mod tests {
 
     #[test]
     fn text_mode_has_no_key() {
-        // Text mode is a run of its own (`--text`), on a compositor
-        // shortcut, since 2026-10-26.
+        // Text mode is what `wayhint` runs, and `--hints` runs tags alone,
+        // each on a compositor shortcut: no key switches between them.
         let err = format!(
             "{:#}",
             Config::parse("[keys]\ntext = \"q\"", &us()).unwrap_err()

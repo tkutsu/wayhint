@@ -176,7 +176,6 @@ impl Match {
     }
 }
 
-
 /// Whether `c` is part of a word: letters, numbers and `_`. Anything else
 /// (spaces, `-`, `/`, brackets) parts words, except an apostrophe inside
 /// one: `can't` is one word.
@@ -408,6 +407,13 @@ impl Search {
     pub fn position(&self) -> (usize, usize) {
         let count = self.matches.len();
         (if count == 0 { 0 } else { self.current + 1 }, count)
+    }
+
+    /// Makes match `index` current, if there is one.
+    pub fn select(&mut self, index: usize) {
+        if index < self.matches.len() {
+            self.current = index;
+        }
     }
 
     /// The next match, from the last back to the first.

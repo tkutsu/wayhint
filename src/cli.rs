@@ -10,9 +10,9 @@ use crate::{action::Action, geometry::Point, pixels::Detector};
 
 /// Keyboard hints for everything clickable on a Wayland desktop.
 ///
-/// With no command: tag the controls of every window on the focused
-/// monitor, click the one whose tag you type, and keep going until the
-/// configured close key (Esc by default).
+/// With no command: type text you see on the focused monitor, or the tag
+/// of a control with no text, and Enter clicks it; then keep going until
+/// the configured close key (Esc by default).
 #[derive(Debug, Parser)]
 #[command(version, about, long_about)]
 pub struct Cli {
@@ -28,9 +28,9 @@ pub struct Cli {
     #[arg(long, value_name = "ACTION")]
     pub verb: Option<Action>,
 
-    /// Start in text mode: type text on screen, Enter acts on it
+    /// Tags on every control and no text search: type a tag to click it
     #[arg(long)]
-    pub text: bool,
+    pub hints: bool,
 
     /// Config file to use instead of ~/.config/wayhint/config.toml
     #[arg(long, global = true, value_name = "PATH")]

@@ -90,8 +90,8 @@ enum Refresh {
     Retag,
 }
 
-/// How a pick starts: with a verb armed (`--verb`), in text mode
-/// (`--text`), and whether a hold keeps a button down, so the next
+/// How a pick starts: with a verb armed (`--verb`), in text mode (unless
+/// `--hints`), and whether a hold keeps a button down, so the next
 /// command lets go of it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Start {
@@ -157,7 +157,7 @@ pub trait Mouse {
 
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
 /// `start.verb` (from `--verb`) is armed as if its key were the first one
-/// typed, and `start.text` (from `--text`) makes it a text-mode pick
+/// typed, and `start.text` (no `--hints`) makes it a text-mode pick
 /// ([`text`]). `mouse` reads where the pointer is, and an arrow with
 /// nothing typed moves it (`Step::Move`). The overlay never sees the mouse
 /// move, so it's read again at every key: a dot shows where a nudged
@@ -217,7 +217,15 @@ pub fn pick(
     if start.text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-        return text(overlay, config, shown, selector, mouse, source);
+        return text(
+            overlay,
+            config,
+            shown,
+            selector,
+            start.holding,
+            mouse,
+            source,
+        );
     }
     overlay.show(&tags(&selector, shown, pointer, &said))?;
     // When the tags are next brought up to date. The wait starts once a
@@ -383,7 +391,7 @@ fn open(shown: &mut Snapshot, index: usize, source: &dyn Source, config: &Config
 
 /// The wait after a refresh that found nothing changed: twice `every`, up
 /// to `IDLE_REFRESH`, and never shorter than `every`.
-fn slower(every: Duration) -> Duration {
+pub fn slower(every: Duration) -> Duration {
     (every * 2).min(IDLE_REFRESH).max(every)
 }
 
@@ -433,17 +441,19 @@ fn rescan(
 
 /// A text run's pick: text mode (`search::search`) until a match, a tag
 /// or the close key. A block's tag opens it, as in [`pick`], and text mode
-/// goes on in its lines.
+/// goes on in its lines. While a hold keeps a button down (`holding`),
+/// the close key lets go where it is.
 fn text(
     overlay: &mut Overlay,
     config: &Config,
     shown: &mut Snapshot,
     mut selector: Selector,
+    holding: bool,
     mouse: &mut dyn Mouse,
     source: &mut dyn Source,
 ) -> Result<Pick> {
     loop {
-        match search::search(overlay, shown, &selector, mouse, source, config)? {
+        match search::search(overlay, shown, &selector, holding, mouse, source, config)? {
             Pick::Target { index, .. } if !shown.targets[index].opens.is_empty() => {
                 if open(shown, index, &*source, config) {
                     selector.reopen(shown.targets.len(), config.alphabet.len());
@@ -598,18 +608,32 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
     }
 }
 
+/// A tag on the box `shown`, for the point `hit`, placed as a target's
+/// is: text mode's labels on its matches.
+pub fn tag_on(shown: Rect, hit: Point, text: String, typed: usize, config: &Config) -> Tag {
+    Tag {
+        at: spot_on(shown, config),
+        target: Some(hit),
+        position: config.style.position,
+        text,
+        typed,
+        pixels: false,
+    }
+}
+
 /// Where `target`'s tag goes: at `[style] position` on its visible box,
 /// moved by `[style] offset`; a terminal's on its cursor.
 fn spot(target: &Target, config: &Config) -> Point {
     if target.role == "terminal" {
         return target.hit;
     }
+    spot_on(target.shown(), config)
+}
+
+/// The same for a box.
+fn spot_on(shown: Rect, config: &Config) -> Point {
     let [x, y] = config.style.offset;
-    config
-        .style
-        .position
-        .on(target.shown())
-        .offset(Point::new(x, y))
+    config.style.position.on(shown).offset(Point::new(x, y))
 }
 
 /// The input box with the tags up: the armed verb's name, dimmed, or
