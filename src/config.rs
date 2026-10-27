@@ -84,7 +84,6 @@ struct FileInput {
     hints: Option<bool>,
     placeholder: Option<String>,
     prefix: String,
-    suffix: String,
     font: Option<String>,
     size: Option<f32>,
     text: Option<Color>,
@@ -127,19 +126,18 @@ impl FileInput {
             );
         }
         let placeholder = self.placeholder.unwrap_or(base.placeholder);
-        if [&placeholder, &self.prefix, &self.suffix]
+        if [&placeholder, &self.prefix]
             .iter()
             .any(|s| s.chars().any(char::is_control))
         {
             bail!(
-                "[{table}] placeholder, prefix and suffix must be single-line text without control characters"
+                "[{table}] placeholder and prefix must be single-line text without control characters"
             );
         }
         Ok(Input {
             visible: self.visible.unwrap_or(base.visible),
             hints: self.hints.unwrap_or(base.hints),
             prefix: self.prefix,
-            suffix: self.suffix,
             placeholder,
             style,
         })
@@ -1859,7 +1857,7 @@ mod tests {
         look.position = Position::Bottom;
         look.offset = [0, -48];
         assert_eq!(config.input.style, look);
-        assert!(config.input.prefix.is_empty() && config.input.suffix.is_empty());
+        assert_eq!(config.input.prefix, "");
     }
 
     #[test]
@@ -1876,7 +1874,6 @@ radius = 6
 padding = [3, 4]
 [text.input]
 prefix = "find \""
-suffix = '" \literal'
 font = "serif"
 size = 28
 text = "#abcdef"
@@ -1926,7 +1923,6 @@ offset = [-13, 17]
             ("position = 'nowhere'", "unknown variant"),
             ("colour = '#ffffff'", "unknown field"),
             (r#"prefix = "line\nline""#, "single-line"),
-            (r#"suffix = "\t""#, "single-line"),
         ] {
             let error = Config::parse(&format!("[text.input]\n{field}"), &us()).unwrap_err();
             assert!(
