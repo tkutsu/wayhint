@@ -3,13 +3,15 @@
 //! (what the keys find) and the apps ([`Source`]), as `pick` is for tags.
 //!
 //! ```text
-//! --text -> text read once -> keys: query edits, arrows
+//! --text -> text read once -> keys: query edits, Tab, arrows
 //!                                |
-//!                 an arrow with nothing typed or armed: moves the pointer
+//!                 a new current match: the pointer goes to it
+//!                 an arrow: moves the pointer from there
 //!                 Backspace with nothing typed: takes back a verb
 //!                 close key: leave wayhint
 //!                 a verb key before any text, or a named one any time: armed
-//!                 Enter: the armed verb (or the default) on the current match
+//!                 Enter: the armed verb (or the default) on the current match,
+//!                        where the pointer is if the arrows moved it
 //!                 one match left (with [text] auto_accept): as Enter
 //!                 a whole tag typed (with [text] hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
@@ -34,7 +36,7 @@ use crate::{
     action::{Act, Action, Mods},
     config::{Config, TextCursor},
     desktop,
-    geometry::Point,
+    geometry::{Point, Rect},
     keys::KeyCode,
     overlay::{Event, Frame, Highlight, Overlay, Tag},
     pick::{self, Mouse, Pick, Source},
@@ -42,7 +44,7 @@ use crate::{
     snapshot::{Snapshot, Target},
     status::{Message, Status},
     style::{Input, Notice},
-    text::{Check, Place, Search},
+    text::{Check, Match, Place, Search},
 };
 
 /// How many characters `[text] auto_accept` waits for before acting on
@@ -59,6 +61,9 @@ pub struct Chosen {
     /// tag found in pixels.
     pub target: Target,
     pub act: Act,
+    /// The arrows moved the pointer off the match: the click goes where
+    /// the pointer is, the match still re-checked.
+    pub aimed: bool,
     /// What the match must still read. `None` for a text that is a name:
     /// the re-check reads the name anyway.
     pub check: Option<Check>,
@@ -178,8 +183,12 @@ impl Hints {
 /// `selector` holds the verb from `--verb`, if any. A verb typed here
 /// comes first, before the text, as it comes before a tag's letters: a key
 /// that types a letter or digit is always text, so a verb on one is for
-/// tag runs only. Before any text or verb, an arrow moves the pointer, as
-/// it does with the tags, and a verb typed twice acts where it went.
+/// hint runs only.
+///
+/// The pointer goes to the current match each time another one becomes
+/// current, a typed character or Tab away, and the arrows move it from
+/// there, held for faster. Enter then clicks where they took it; a new
+/// current match takes the pointer again and starts their count over.
 pub fn search(
     overlay: &mut Overlay,
     shown: &Snapshot,
@@ -228,6 +237,10 @@ fn keys(
     let mut stale = false;
     // What was typed that matched nothing, and until when it's named.
     let mut missed: Option<(String, Instant)> = None;
+    // The match the pointer last went to (its text and where it starts)
+    // and where, and whether the arrows moved it since.
+    let mut jumped: Option<((usize, u32), Point)> = None;
+    let mut aimed = false;
     loop {
         let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
             missed = None;
@@ -257,16 +270,9 @@ fn keys(
         if config.verbs.is_close(key) {
             return Ok(Pick::Leave);
         }
-        // Before any text or verb, an arrow moves the pointer, held for
-        // faster; after, it goes through the matches, once a press.
-        if let Some(by) = pick::arrow(key.code, ticks, config)
-            && search.query().is_empty()
-            && command.is_blank()
-        {
+        if let Some(by) = pick::arrow(key.code, ticks, config) {
             mouse.move_by(by)?;
-            continue;
-        }
-        if ticks > 0 {
+            aimed = true;
             continue;
         }
         // A verb: a named key (PageDown) any time; a character only before
@@ -296,12 +302,7 @@ fn keys(
                     false
                 }
             }
-            KeyCode::ENTER
-            | KeyCode::RIGHT
-            | KeyCode::DOWN
-            | KeyCode::LEFT
-            | KeyCode::UP
-            | KeyCode::TAB => false,
+            KeyCode::ENTER | KeyCode::TAB => false,
             // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
             // tag, as a Ctrl- or Alt-click, as with the tags.
             _ => {
@@ -366,7 +367,7 @@ fn keys(
                 && key.code != KeyCode::BACKSPACE
                 && unique(&search)
                 && !hints.open(&pressed)
-                && let Some(chosen) = choose(&search, shown, command.act(Mods::NONE), cursor)
+                && let Some(chosen) = choose(&search, shown, command.act(Mods::NONE), cursor, false)
             {
                 return Ok(Pick::Text(Box::new(chosen)));
             }
@@ -379,14 +380,27 @@ fn keys(
                         act: command.act(mods),
                     });
                 }
-                if let Some(chosen) = choose(&search, shown, command.act(mods), cursor) {
+                if let Some(chosen) = choose(&search, shown, command.act(mods), cursor, aimed) {
                     return Ok(Pick::Text(Box::new(chosen)));
                 }
             }
-            KeyCode::RIGHT | KeyCode::DOWN => search.next(),
             KeyCode::TAB if !mods.shift => search.next(),
-            KeyCode::LEFT | KeyCode::UP | KeyCode::TAB => search.previous(),
+            KeyCode::TAB => search.previous(),
             _ => {}
+        }
+        // Another match is current: the pointer goes to it, and the arrows
+        // start over from there. The same one, typed longer or shorter,
+        // takes the pointer along only if the arrows haven't moved it.
+        if !stale
+            && let Some(found) = search.current()
+            && let Some((_, at)) = spot(found, cursor)
+        {
+            let id = (found.span.text, found.span.start);
+            let keep = jumped.is_some_and(|(was, point)| was == id && (aimed || point == at));
+            if !keep {
+                mouse.move_to(at)?;
+                (jumped, aimed) = (Some((id, at)), false);
+            }
         }
         let said = missed.as_ref().map(|m| m.0.as_str());
         overlay.update(&draw(&search, &pressed, &command, stale, said))?;
@@ -410,23 +424,33 @@ fn find(search: &mut Search, shown: &Snapshot, source: &mut dyn Source) {
     search.update(&|window, at| source.shows(shown, window, at));
 }
 
-/// The current match as a command: the text's object as the target, and
-/// the text to read again.
-fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Option<Chosen> {
-    let found = search.current()?;
-    let text = &search.texts()[found.span.text];
+/// Where a click on `found` goes, at `cursor` on its first line (its last
+/// for `End`), and that line's box.
+fn spot(found: &Match, cursor: TextCursor) -> Option<(Rect, Point)> {
     let part = match cursor {
         TextCursor::Start | TextCursor::Center => found.parts[0],
         TextCursor::End => *found.parts.last()?,
     };
-    let hit = Point::new(
-        match cursor {
-            TextCursor::Start => part.x,
-            TextCursor::Center => part.center().x,
-            TextCursor::End => part.right() - 1,
-        },
-        part.center().y,
-    );
+    let x = match cursor {
+        TextCursor::Start => part.x,
+        TextCursor::Center => part.center().x,
+        TextCursor::End => part.right() - 1,
+    };
+    Some((part, Point::new(x, part.center().y)))
+}
+
+/// The current match as a command: the text's object as the target, and
+/// the text to read again. `aimed` when the arrows moved the pointer off it.
+fn choose(
+    search: &Search,
+    shown: &Snapshot,
+    act: Act,
+    cursor: TextCursor,
+    aimed: bool,
+) -> Option<Chosen> {
+    let found = search.current()?;
+    let text = &search.texts()[found.span.text];
+    let (part, hit) = spot(found, cursor)?;
     // The character before the match too, where it was read: one typed
     // there since would leave the match inside a word.
     let (start, end) = (found.span.start, found.span.end);
@@ -466,6 +490,7 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
             opens: Vec::new(),
         },
         act,
+        aimed,
         check,
     })
 }
@@ -517,7 +542,7 @@ fn frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{geometry::Rect, style::Style, text::Text};
+    use crate::{style::Style, text::Text};
 
     fn search(contents: &[&str]) -> Search {
         let texts = contents
@@ -680,14 +705,13 @@ mod tests {
         let act = Act {
             action: Action::Left,
             mods: crate::action::Mods::NONE,
-            nudge: Point::default(),
         };
         for (cursor, x) in [
             (TextCursor::Start, 150),
             (TextCursor::Center, 160),
             (TextCursor::End, 169),
         ] {
-            let chosen = choose(&found, &shown, act, cursor).expect("a match");
+            let chosen = choose(&found, &shown, act, cursor, false).expect("a match");
             assert_eq!(chosen.target.object, None, "nothing to ask: a pixel target");
             assert_eq!(chosen.target.role, "terminal");
             assert_eq!(chosen.target.hit, Point::new(x, 10));
@@ -745,7 +769,6 @@ mod tests {
                 shift: true,
                 ..crate::action::Mods::NONE
             },
-            nudge: Point::new(3, -2),
         };
         for (cursor, hit, visible) in [
             (
@@ -764,14 +787,15 @@ mod tests {
                 Rect::new(-90, 20, 60, 20),
             ),
         ] {
-            let chosen = choose(&found, &shown, act, cursor).expect("a wrapped match");
+            let chosen = choose(&found, &shown, act, cursor, true).expect("a wrapped match");
             assert_eq!(chosen.target.hit, hit);
             assert_eq!(chosen.target.visible, visible);
             assert!(visible.contains(hit));
             assert_eq!(chosen.target.object, Some(object.clone()));
             assert_eq!(chosen.target.clips, std::slice::from_ref(&object));
             assert!(chosen.target.editable);
-            assert_eq!(chosen.act, act, "keep the verb, modifiers and nudge");
+            assert_eq!(chosen.act, act, "keep the verb and modifiers");
+            assert!(chosen.aimed, "the arrows moved the pointer off it");
             let check = chosen.check.expect("read the whole match again");
             assert_eq!(
                 (check.start, check.end, check.text.as_str()),

@@ -52,10 +52,9 @@ a single tag that puts the cursor in it.
 Type a verb key before a tag for a right, middle or double click, a hover,
 the mouse's back and forward buttons, a scroll, or a press-and-hold that
 becomes a drag or a long press. Hold `Shift`, `Ctrl` or `Alt` on the last
-letter to click with that modifier. The arrows move the pointer itself
-before any other key, and after one they move where that click lands, so
-a tag near a spot can click anywhere around it. A verb typed twice does
-it again in the same place, or where the arrows took the pointer.
+letter to click with that modifier. The arrows move the pointer, and
+`Space` acts where it is. A verb typed twice does it again in the same
+place, or where the arrows took the pointer.
 
 ### Tags that keep up
 
@@ -67,8 +66,9 @@ Switch workspace and the tags follow.
 ### Text mode
 
 Launch `wayhint --text` and type text you see on screen instead of a
-tag. Matches get yellow boxes, `Tab` and the arrows move between them, and
-`Enter` clicks the current one. Controls with no text to type, such as
+tag. Matches get yellow boxes, the pointer goes to the current one, `Tab`
+moves between them, the arrows fine-tune the pointer, and `Enter` clicks
+where it is. Controls with no text to type, such as
 icons, keep a tag, so one mode reaches both. The text comes from the
 accessibility tree, or from kitty's own remote control.
 
@@ -172,11 +172,10 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | `Home` / `End` then a tag | The mouse's back and forward buttons |
 | `PageUp` / `PageDown` then a tag | Turns the wheel 5 notches up or down there |
 | `;` then a tag | Hold: presses the left button and keeps it down; the next tag or `Space` lets go there |
-| a verb twice | Does it again where the last command was, or where the arrows took the pointer |
+| a verb twice | Does it again where the last command was, or where the pointer was moved since |
 | `Shift`, `Ctrl` or `Alt` on a tag's last letter | The same click with that key held |
 | `Space` | The default action, or the verb typed before it, where the pointer is |
-| arrows, before any other key | Move the pointer, 10 px a press; held, faster. During a hold, that drags |
-| arrows, after a verb or letter | Move where that one click lands, the same way |
+| arrows | Move the pointer, 10 px a press; held, faster. During a hold, that drags |
 | the repeat key, if you set one | The last command again on the same control, even after its tag changed |
 | `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
@@ -274,23 +273,24 @@ half a line when a connection closes. Show each segment with a
 `Text { textFormat: Text.PlainText }`, so a typed `<` or `&` shows as
 itself.
 
-### Moving a click
+### Moving the pointer
 
-Arrows typed before the last letter move the click: `Right Right Down`
-then a tag clicks 20 px right of the control and 10 px below. Held, an
-arrow repeats after a quarter of a second and speeds up to four times as
-fast. A dot marks where each tag would land, and a line joins it to its
-tag. A move stops 5 px inside the monitor's edge. With `Space`, the dot
-follows the pointer.
+The arrows move the pointer itself, 10 px a press. Held, an arrow repeats
+after a quarter of a second and speeds up to four times as fast, and it
+stops 5 px inside the monitor's edge. `Space` then does the default
+action, or the verb typed before it, where the pointer is, and so does a
+verb typed twice. In text mode the pointer goes to the current match
+first. With `[pointer] after = "restore"`, a click, or leaving with the
+close key, puts the pointer back where it was before wayhint moved it.
 
 ### Holding and dragging
 
 A hold keeps its button down across rounds. The tags come back with
 `drop` in the input box, and whatever you pick next (a tag,
 `Space`, a text match, a verb typed twice) is where it lets go, moving
-there in small steps so apps see a drag. The arrows, before any other key,
-drag the pointer as you press them; then `Space`, `; ;` or the close key
-lets go where it is. With no arrows, that's where it went down: a long
+there in small steps so apps see a drag. The arrows drag the pointer as
+you press them; then `Space`, `; ;` or the close key lets go where it
+is. With no arrows, that's where it went down: a long
 press. A scroll never clicks, so it never ends the run.
 
 ### Text mode
@@ -300,11 +300,12 @@ A verb comes first, before the text: `.save Enter` double-clicks
 key goes into the query, spaces and punctuation included. A verb on a
 named key (`PageDown`, `Home`) works at any point, and one on a letter or
 digit is for tag runs only, since that key is always text. Each visible
-match gets a yellow box, and the current one is orange. The arrows, `Tab`
-and `Shift+Tab` move between matches and wrap. Before any text or verb,
-the arrows move the pointer, as they do with tags. `Enter` clicks the middle
-of the current match's first line, and `Shift`, `Ctrl` or `Alt` held on
-`Enter` hold that key through the click. `Backspace` with nothing typed
+match gets a yellow box, and the current one is orange. The pointer goes
+to the current match, the middle of its first line. `Tab` and `Shift+Tab`
+move between matches and wrap, taking the pointer along. The arrows move
+the pointer from there, and `Enter` clicks where it is; another current
+match takes the pointer again and starts over. `Shift`, `Ctrl` or `Alt`
+held on `Enter` hold that key through the click. `Backspace` with nothing typed
 takes back the verb.
 
 Targets with no text you could type keep a tag: icon buttons, controls
@@ -337,7 +338,7 @@ auto_accept = false
 With `[hints] auto_accept = false`, type a whole tag, then press `Enter`
 to act on it. This also applies to tags in text mode and tags that open
 paragraphs into lines. Until Enter, `Backspace` can correct the tag; in
-tag mode, verbs and arrows can still change its action and position.
+tag mode, a verb can still change its action.
 Hold `Shift`, `Ctrl` or `Alt` on `Enter` to apply that modifier to the
 action. Enter does nothing for an incomplete tag.
 
@@ -380,8 +381,8 @@ their own tags.
 ### When a run ends
 
 A run ends on the close key, on either keybind, after a click on a text field (so
-your typing goes to it), and after a click wayhint can't vouch for: one an
-arrow moved off its control, one made with `Space`, or one in a window
+your typing goes to it), and after a click wayhint can't vouch for: one the
+arrows moved off its text match, one made with `Space`, or one in a window
 tagged from its pixels. Hovers and scrolls never end it.
 
 Flags for other keybinds:
@@ -456,14 +457,14 @@ The sections:
 |---|---|
 | `[keys]` | Tag letters, verb keys, repeat, text, help and close keys, aliases |
 | `[style]` | The tags: font, size, colours, border, radius, padding, letter case, position on the control, offset |
-| `[style.leader]` | The line and dot from a moved tag or a nudged click to where it lands |
+| `[style.leader]` | The line and dot from a tag moved off its target to where it clicks |
 | `[style.pixels]` | How tags found in pixels differ from the rest; by default only their letters, in teal |
 | `[input]` | The box for what you type: whether it's drawn, look, placeholder, prefix and suffix, screen position and offset. Once called `[text.input]`, which still loads |
 | `[info]` | The messages under the input box: whether they're drawn, which show, for how long, their icons and colours |
 | `[hints]` | `auto_accept`: act on a completed tag immediately, or wait for `Enter`, in either mode |
 | `[text]` | Where `Enter` acts on a match, `auto_accept`, and tags on targets with no text |
 | `[text.matches]`, `[text.matches.current]` | The boxes over matches and over the current one |
-| `[pointer]` | Whether the cursor goes back after a click, nudge step, scroll notches, settle time |
+| `[pointer]` | Whether the cursor goes back after a click, arrow step, scroll notches, settle time |
 | `[pixels]` | The pixel detector (`full`, `fast` or `off`), the terminal focus tag, and which programs count as terminals |
 | `[scan]` | Refresh interval, and how close hints must be to share one tag |
 
