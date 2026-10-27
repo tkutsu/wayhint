@@ -107,10 +107,11 @@ pub enum Event {
     /// The compositor closed the overlay (its monitor went away) or
     /// dismissed the popup the tags are on.
     Closed,
-    /// The monitor changed size (a new mode or scale). The tags were placed
-    /// for the old one and the drawing buffer has the old size, so the run
-    /// can't go on.
-    Resized,
+    /// The monitors changed: this one's size (a new mode or scale), or any
+    /// output added, moved, rescaled or removed. The tags, the drawing
+    /// buffer and the pointer's box over all monitors were made for the old
+    /// layout, so the run can't go on.
+    Monitors,
     /// Keyboard focus left the overlay in the Exclusive fallback.
     KeyboardLost,
     /// The monitor shows another workspace (once
