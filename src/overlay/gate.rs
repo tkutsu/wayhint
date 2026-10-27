@@ -172,7 +172,6 @@ mod tests {
         gate.synced(generation);
         let shifted = Key { shift: true, ..A };
         let mods = Mods {
-            shift: true,
             ctrl: true,
             alt: false,
         };
@@ -255,15 +254,14 @@ mod tests {
 
     #[test]
     fn a_held_modifier_holds_no_key_back() {
-        let shift = Mods {
-            shift: true,
-            ..Mods::NONE
-        };
         let mut gate = armed();
         gate.press(SHIFT, Mods::NONE);
         gate.modifier();
-        gate.press(Key { shift: true, ..A }, shift);
-        assert_eq!(gate.release(A.code), [(Key { shift: true, ..A }, shift)]);
+        gate.press(Key { shift: true, ..A }, Mods::NONE);
+        assert_eq!(
+            gate.release(A.code),
+            [(Key { shift: true, ..A }, Mods::NONE)]
+        );
         assert_eq!(gate.release(SHIFT.code), [(SHIFT, Mods::NONE)]);
     }
 

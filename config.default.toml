@@ -28,10 +28,12 @@
 # instead of a left click, before Space to do it at the pointer, or twice to
 # do it again where the last command was (PageDown PageDown scrolls the same
 # pane again). In text mode, type it before any text; a named key works
-# there any time. A verb key is a symbol, Shift included ("_"), or a name:
-# PageUp, PageDown, Home, End, Delete. Letters and digits are rejected.
-# "" makes a verb what a bare tag does; exactly one verb is "".
-# A key a verb takes leaves the alphabet. A default key that is one of your
+# there any time. A verb key is a capital ("A"), a symbol, Shift included
+# ("_"), or a name: PageUp, PageDown, Home, End, Delete. Lower-case letters
+# and digits are rejected. "" makes a verb what a bare tag does; exactly
+# one verb is "". Shift is part of the key and never held through a click.
+# An unshifted key a verb takes leaves the alphabet; a capital leaves its
+# letter a tag letter. A default key that is one of your
 # tag letters, that you gave another command, or that types a letter or
 # digit on your layout is simply left unbound.
 # left = ""                 # left click: a bare tag does this

@@ -359,8 +359,8 @@ fn keys(
                 missed = Some((format!("no text has \"{}\"", search.query()), until));
             }
             // Typed into one match, not backed into it. An Enter that
-            // comes after the typing acts below, with its own Ctrl, Shift
-            // and Alt.
+            // comes after the typing acts below, with its own Ctrl and
+            // Alt.
             if config.text_auto_accept
                 && edit
                 && key.code != KeyCode::BACKSPACE
@@ -384,7 +384,7 @@ fn keys(
                 }
             }
             KeyCode::RIGHT | KeyCode::DOWN => search.next(),
-            KeyCode::TAB if !mods.shift => search.next(),
+            KeyCode::TAB if !key.shift => search.next(),
             KeyCode::LEFT | KeyCode::UP | KeyCode::TAB => search.previous(),
             _ => {}
         }
@@ -742,7 +742,7 @@ mod tests {
         let act = Act {
             action: Action::Right,
             mods: crate::action::Mods {
-                shift: true,
+                ctrl: true,
                 ..crate::action::Mods::NONE
             },
             nudge: Point::new(3, -2),

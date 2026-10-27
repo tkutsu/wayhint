@@ -86,8 +86,8 @@ pub enum Event {
     /// the modifiers held at its press. Keys come in the order they went
     /// down, not the order they came up. An arrow comes as it's pressed
     /// instead. Modifier keys come too, and mean nothing to `pick`.
-    /// Shift is in both: in the [`Key`], because `_` and `-` are different
-    /// keys to the config, and in the [`Mods`], for a Shift-click.
+    /// Shift is in the [`Key`], because `_` and `-` are different keys to
+    /// the config; the [`Mods`] are what a click can hold, Ctrl and Alt.
     Key(Key, Mods),
     /// An arrow is still held: its tick so far, 1 for the first (see
     /// `hold.rs`). Its press came as a `Key`, or a `Typed` while typing,
@@ -355,7 +355,7 @@ impl Overlay {
             if let Event::Key(key, mods) = *event
                 && key.code != KeyCode::ENTER
             {
-                let typed = typist.press_late(key.code, mods, self.state.locks);
+                let typed = typist.press_late(key.code, key.shift, self.state.locks);
                 *event = Event::Typed(key, mods, typed);
             }
         }

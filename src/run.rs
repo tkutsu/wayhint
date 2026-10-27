@@ -27,7 +27,8 @@
 //! before the tag's last letter), or a verb and the spot under the
 //! pointer (`[verb] Space`), which skips the re-check, or a verb typed
 //! twice, done again where the last command was.
-//! Shift, Ctrl or Alt held on the last key are held through the click.
+//! Ctrl or Alt held on the last key are held through the click; Shift
+//! never is, since it types the capitals that are verbs.
 //! A hold presses a button and keeps it down through the next round: the
 //! next command, whatever its verb, lets go where it points.
 //! Arrows typed before the last key move where that one command lands,
@@ -438,8 +439,8 @@ impl Session {
             desktop::warn(&format!("wayhint: clicking without the modifiers: {e:#}"));
         }
         let clicked = self.pointer.act(action, at);
-        // Modifiers go before the cursor moves back: a Shift still held
-        // there would be a Shift-hover.
+        // Modifiers go before the cursor moves back: a Ctrl still held
+        // there would be a Ctrl-hover.
         if let Some(keyboard) = &mut self.keyboard {
             keyboard.release_all();
         }

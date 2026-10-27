@@ -40,7 +40,6 @@ impl KeyCode {
     // The keys a modifier click presses on the virtual keyboard. Which
     // modifiers the user holds comes from the compositor instead (see
     // `keyboard::held`): the keymap can put Ctrl on any key.
-    pub const LEFT_SHIFT: Self = Self(42);
     pub const LEFT_CTRL: Self = Self(29);
     pub const LEFT_ALT: Self = Self(56);
 

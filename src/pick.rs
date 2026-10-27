@@ -172,7 +172,7 @@ pub trait Mouse {
 /// of picking: `shown` becomes the block opened, its lines filtered by
 /// `source` (none under another window or off the monitor), and the
 /// command goes on there, with what was typed before the block's tag (a
-/// verb, its Shift, arrows). The lines stay as they were opened: a rescan
+/// verb, arrows). The lines stay as they were opened: a rescan
 /// has no blocks to open. `shown` ends as the snapshot the pick was made
 /// in.
 ///
@@ -456,9 +456,10 @@ fn text(
 
 /// What a key means: a built-in key, else a verb or repeat, else a tag
 /// letter, else nothing. The config keeps command keys out of the alphabet
-/// and apart from each other, so the order never decides anything. A tag letter matches with or
-/// without Shift: Shift on it is a Shift-click, carried in `mods`. An
-/// arrow goes its way whatever is held (see [`arrow`]).
+/// and apart from each other, so the order never decides anything. A tag
+/// letter matches with or without Shift, unless Shift on it is a verb's
+/// key (`A`); Shift is never a click's. An arrow goes its way whatever is
+/// held (see [`arrow`]).
 fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> {
     if config.verbs.is_close(key) {
         return Some(Input::Escape);
@@ -865,34 +866,29 @@ mod tests {
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
-        // A key and the modifiers held on it, Shift alone or none.
+        // A key, with Shift or without; no click modifier held.
         let input = |code, shift| {
             let key = Key {
                 code: KeyCode::from_evdev(code),
                 shift,
             };
-            let mods = Mods {
-                shift,
-                ..Mods::NONE
-            };
-            input_of(key, mods, 0, &config)
-        };
-        let shift = Mods {
-            shift: true,
-            ..Mods::NONE
+            input_of(key, Mods::NONE, 0, &config)
         };
         assert_eq!(input(57, false), Some(Input::Here(Mods::NONE)));
-        assert_eq!(input(28, true), Some(Input::Confirm(shift)));
+        assert_eq!(input(28, true), Some(Input::Confirm(Mods::NONE)));
         assert_eq!(
             input(51, false),
             Some(Input::Verb(Action::Right, Mods::NONE))
         );
-        assert_eq!(input(12, true), Some(Input::Verb(Action::Hover, shift)));
+        assert_eq!(
+            input(12, true),
+            Some(Input::Verb(Action::Hover, Mods::NONE))
+        );
         assert_eq!(input(12, false), None, "- alone is nothing");
         assert_eq!(
             input(30, true),
-            Some(Input::Letter(0, shift)),
-            "a Shift-click on a"
+            Some(Input::Letter(0, Mods::NONE)),
+            "Shift on a is still a, and no Shift-click"
         );
         assert_eq!(input(105, false), Some(Input::Nudge(Point::new(-10, 0))));
         assert_eq!(
