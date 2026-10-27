@@ -4,8 +4,9 @@
 //! `Pixmap`; `fontdue` rasterizes each letter into a coverage map (how much
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
-//! CPU draws that in well under a millisecond. Dots, for where a nudged
-//! command lands, are two filled circles, each on a line back to its tag.
+//! CPU draws that in well under a millisecond. Dots, for where a tag moved
+//! off its target clicks, are two filled circles, each on a line back to
+//! its tag.
 //!
 //! Everything is laid out in logical px, as the rest of wayhint counts,
 //! and drawn at the monitor's scale: shapes through a scaling transform,
@@ -45,8 +46,8 @@ const MESSAGE_WIDTH: f32 = 16.0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frame {
     pub tags: Vec<Tag>,
-    /// Where nudged commands land: the tag says which, the dot says where,
-    /// and the line between says which dot is whose.
+    /// Where tags moved off their targets click: the tag says which, the
+    /// dot says where, and the line between says which dot is whose.
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
@@ -65,8 +66,8 @@ pub struct Highlight {
     pub current: bool,
 }
 
-/// Where a nudged command lands, `at`, and its source: a tag's outline,
-/// or `from` at the pointer for `Space`.
+/// Where a tag moved off its target clicks, `at`, and its source: the
+/// tag's outline, or `from`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dot {
     pub from: Point,

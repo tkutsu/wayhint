@@ -203,6 +203,14 @@ impl State {
         self.size.map(|size| buffer_size(size, self.scale))
     }
 
+    /// An output came, changed or went: once the overlay is up, the run
+    /// can't go on (`Event::Monitors`).
+    fn monitors_changed(&mut self) {
+        if self.size.is_some() {
+            self.events.push_back(Event::Monitors);
+        }
+    }
+
     /// Draws a finished pixmap on the overlay's popup.
     pub fn present(&mut self, pixmap: &Pixmap) -> anyhow::Result<()> {
         let (Some(popup), Some((w, h)), Some(pool)) =
@@ -435,7 +443,7 @@ impl LayerShellHandler for State {
     ) {
         let size = configure.new_size;
         if self.size.is_some_and(|old| old != size) {
-            self.events.push_back(Event::Resized);
+            self.events.push_back(Event::Monitors);
         }
         if self.size != Some(size) {
             self.size = Some(size);
@@ -621,9 +629,17 @@ impl OutputHandler for State {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.outputs
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    // The outputs there at the start come before the overlay has its size;
+    // any change after that ends the run (`Event::Monitors`).
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.monitors_changed();
+    }
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.monitors_changed();
+    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.monitors_changed();
+    }
 }
 
 impl SeatHandler for State {
