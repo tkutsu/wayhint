@@ -9,7 +9,7 @@
 # alphabet = "asdfghjkl"
 # default_action = "left"   # action for a bare tag or Space
 # Shortcut values are a key or false (disabled). Omit to use the default.
-# Verbs accept capitals, symbols or named keys. Shift belongs to the key.
+# Verbs, repeat and help accept capitals, symbols or named keys. Shift belongs to the key.
 # left = false
 # right = ","
 # middle = "/"

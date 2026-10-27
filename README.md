@@ -169,9 +169,8 @@ In hints-only mode, a verb can come anywhere before the hint's last letter.
 Verb bindings accept capitals such as `R`, symbols such as `,`, `.`, `"`
 and `_`, or named keys such as `Home` and `PageDown`. Lowercase letters
 and digits are rejected. A capital leaves its lowercase letter to the
-hints. `""` makes one verb the default action; exactly one verb must have
-it. Repeat, help and close are separate commands and can still use
-letters.
+hints. Repeat and help follow the same binding rules. Close can also use
+a lowercase letter. `default_action` chooses the action for a bare tag.
 
 | Default key | Action |
 |---|---|
@@ -216,7 +215,7 @@ A small example:
 [keys]
 hover = '"'
 hold = "_"
-repeat = "r"
+repeat = "R"
 
 [hints]
 size = 10
