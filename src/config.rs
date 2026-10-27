@@ -1175,7 +1175,7 @@ impl Config {
         out.push_str(&self.render_keys());
         let _ = writeln!(
             out,
-            "\n[hints]\nauto_accept = {}   # act on a completed tag; false requires Enter, in either mode",
+            "\n[hints]\nauto_accept = {}   # act on a completed tag or match label; false requires Enter, in either mode",
             self.hint_auto_accept
         );
         out.push('\n');
@@ -1269,7 +1269,7 @@ impl Config {
         out.push_str(
             "# The verbs: type one before a tag's last letter, or before Space for\n\
              # the pointer, or twice for where the last command was; in text\n\
-             # mode, symbols come before the text, named keys work any time.\n\
+             # mode, verbs come before the text, named keys work any time.\n\
              # Capitals, symbols and named keys can be verbs; lower-case letters\n\
              # and digits cannot. \"\" makes a verb what a bare tag does.\n",
         );
