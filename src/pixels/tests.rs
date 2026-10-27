@@ -123,6 +123,52 @@ fn a_button_is_one_tag() {
     }
 }
 
+#[test]
+fn a_button_is_one_tag_at_any_scale() {
+    // An outlined 100x60 logical px control, as a monitor at each scale
+    // draws it: every rule is in logical px, so each scale finds the same.
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+        let px = |v: f64| (v * scale).round() as usize;
+        let (left, top, right, bottom) = (px(50.0), px(40.0), px(150.0), px(100.0));
+        let line = px(1.0);
+        let f = frame(px(200.0), px(140.0), |x, y| {
+            let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
+            let border = inside
+                && (x < left + line || x >= right - line || y < top + line || y >= bottom - line);
+            match (inside, border) {
+                (_, true) => [20, 20, 20],
+                (true, false) => [230, 230, 230],
+                _ => [128, 128, 128],
+            }
+        });
+        let (f, left) = shrink(f, 200);
+        assert_eq!((f.width, f.height), (200, 140), "{scale}");
+        assert!((left - 1.0).abs() < 1e-9, "{scale}: {left}");
+        for detector in [Detector::Full, Detector::Fast] {
+            let found = find(&f, detector, false);
+            assert_eq!(found.direct.len(), 1, "{scale} {detector:?}: {found:?}");
+            // Within the 3 px the edge pass's dilation adds at scale 1.
+            let near = found.direct[0]
+                .iter()
+                .zip([50, 40, 150, 100])
+                .all(|(got, want)| (got - want).abs() <= 3);
+            assert!(near, "{scale} {detector:?}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn resampling_averages_the_area_covered() {
+    // Three columns, black, white, black, down to two: each half of the
+    // middle one goes into a side.
+    let f = frame(3, 1, |x, _| if x == 1 { [255; 3] } else { [0; 3] });
+    let half = resample(&f, 2, 1);
+    assert_eq!(half.rgb, [85, 85, 85, 85, 85, 85]);
+    // A flat colour stays flat.
+    let flat = resample(&frame(15, 9, |_, _| [40, 120, 200]), 12, 7);
+    assert!(flat.rgb.chunks(3).all(|p| p == [40, 120, 200]));
+}
+
 /// One capture of the prototype's corpus, with the word boxes the
 /// prototype grouped, in its order.
 #[derive(Deserialize)]
@@ -208,7 +254,7 @@ fn a_scaled_frame_is_read_at_logical_size() {
             [255, 255, 255]
         }
     });
-    let (small, left) = shrink(checks, 2);
+    let small = average(&checks, 2);
     assert_eq!((small.width, small.height), (3, 2));
     assert_eq!(
         &small.rgb[..3],
@@ -220,7 +266,11 @@ fn a_scaled_frame_is_read_at_logical_size() {
         &[0, 0, 0],
         "the last column holds black only"
     );
-    assert!((left - 1.5).abs() < 1e-9, "3 px for 2 logical px");
+    // 2.5 px per logical px: halved, then the 1.5 left resampled.
+    let (logical, left) = shrink(checks, 2);
+    assert_eq!((logical.width, logical.height), (2, 1));
+    assert_eq!(&logical.rgb, &[128, 128, 128, 43, 43, 43]);
+    assert!((left - 1.0).abs() < 1e-9, "2 px for 2 logical px");
     let (same, one) = shrink(frame(10, 4, |_, _| [9; 3]), 10);
     assert_eq!((same.width, one), (10, 1.0));
 }
