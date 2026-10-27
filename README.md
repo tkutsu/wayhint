@@ -244,7 +244,8 @@ Failures launched from a keybind also appear as desktop notifications.
 
 [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 Contributions are licensed under the same terms unless explicitly stated
-otherwise. Pixel detection includes code ported from
-[Neru](https://github.com/y3owk1n/neru), with its MIT notice in
+otherwise. The pixel contour detector and filtering rules are based on
+[wl-kbptr](https://github.com/moverest/wl-kbptr). The colour pass is ported
+from [Neru](https://github.com/y3owk1n/neru), whose MIT notice is in
 [src/pixels/LICENSE-NERU](src/pixels/LICENSE-NERU). The Hyprland protocol
 in [protocols/](protocols/) carries its BSD 3-clause notice.
