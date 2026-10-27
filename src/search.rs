@@ -175,9 +175,8 @@ impl Hints {
 
 /// Text mode, until a match or a tag is chosen or the close key leaves.
 /// `selector` holds the verb from `--verb`, if any. A verb typed here
-/// comes first, before the text, as it comes before a tag's letters: a key
-/// that types a letter or digit is always text, so a verb on one is for
-/// tag runs only.
+/// comes first, before the text; a named verb key works at any point.
+/// Letters and digits in the active layout always go into the query.
 pub fn search(
     overlay: &mut Overlay,
     shown: &Snapshot,
