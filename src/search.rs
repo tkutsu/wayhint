@@ -947,7 +947,8 @@ mod tests {
         let mut found = search(&["άλλο", "Άλλο"]);
         typed(&mut found, "αλλ");
         let input = Input {
-            prefix: "find: ".into(),
+            prefix: "find [".into(),
+            suffix: "]".into(),
             ..Input::new(&Style::default())
         };
         let display = |stale| {
@@ -956,8 +957,8 @@ mod tests {
                 .line()
                 .unwrap()
         };
-        assert_eq!(display(false).0, "double find: αλλ  1/2");
-        assert_eq!(display(true).0, "double find: αλλ  ...");
+        assert_eq!(display(false).0, "double find [αλλ]  1/2");
+        assert_eq!(display(true).0, "double find [αλλ]  ...");
         assert_eq!(display(false).1, 7, "only the armed verb is dimmed");
         assert_eq!(found.query(), "αλλ", "decorations are display only");
         let empty = Input {

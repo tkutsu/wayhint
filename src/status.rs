@@ -59,8 +59,9 @@ pub enum Role {
     Query,
     /// `[input] placeholder`, while nothing is typed in text mode.
     Placeholder,
-    /// `[input] prefix`, before the query.
+    /// `[input] prefix` and `suffix`, around the query.
     Prefix,
+    Suffix,
     /// `  1/3` after the query, or `...` while it's being found.
     MatchCount,
 }
@@ -131,7 +132,7 @@ impl Status {
     }
 
     /// Text mode: `drop` while `holding`, else the armed `verb`, dimmed,
-    /// then the `query` after `[input] prefix`, and its
+    /// then the `query` between `[input] prefix` and `suffix`, and its
     /// `position`, the current match and how many there are; `None` while
     /// they're being found. With nothing typed, `[input] placeholder`,
     /// dimmed. `query` is `None` while the windows' text is being read.
@@ -164,10 +165,17 @@ impl Status {
                 None
             }
             Some(query) => {
-                if !input.prefix.is_empty() {
-                    segments.push(Segment::new(Role::Prefix, &input.prefix, false));
-                }
-                segments.push(Segment::new(Role::Query, query, false));
+                let decorated = [
+                    (Role::Prefix, input.prefix.as_str()),
+                    (Role::Query, query),
+                    (Role::Suffix, input.suffix.as_str()),
+                ];
+                segments.extend(
+                    decorated
+                        .into_iter()
+                        .filter(|(_, text)| !text.is_empty())
+                        .map(|(role, text)| Segment::new(role, text, false)),
+                );
                 let count = position.map_or_else(|| "...".into(), |(at, of)| format!("{at}/{of}"));
                 segments.push(Segment::new(Role::MatchCount, format!("  {count}"), false));
                 Some(position.map_or(pending, |(at, of)| Matches {
@@ -319,7 +327,8 @@ mod tests {
     #[test]
     fn text_mode_reads_then_counts() {
         let input = Input {
-            prefix: "find: ".into(),
+            prefix: "find [".into(),
+            suffix: "]".into(),
             ..Input::new(&Style::default())
         };
         let reading = Status::text(Some("double"), false, None, None, &input);
@@ -340,8 +349,9 @@ mod tests {
             roles(&found),
             [
                 (Role::Verb, "double ", true),
-                (Role::Prefix, "find: ", false),
+                (Role::Prefix, "find [", false),
                 (Role::Query, "αλλ", false),
+                (Role::Suffix, "]", false),
                 (Role::MatchCount, "  1/2", false),
             ]
         );
@@ -355,7 +365,7 @@ mod tests {
             })
         );
         let finding = Status::text(None, false, Some("αλλ"), None, &input);
-        assert_eq!(finding.line().unwrap().0, "find: αλλ  ...");
+        assert_eq!(finding.line().unwrap().0, "find [αλλ]  ...");
         assert_eq!(
             finding.matches,
             Some(Matches {
