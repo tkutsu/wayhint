@@ -136,14 +136,15 @@ impl pick::Source for Saved {
     }
 }
 
-/// No pointer to read or move: the overlay alone clicks nothing.
+/// No pointer to move: the overlay alone clicks nothing, so the arrows do
+/// nothing either.
 impl pick::Mouse for Saved {
-    fn at(&self) -> Result<Point> {
-        anyhow::bail!("no pointer when drawing from a file")
+    fn move_by(&mut self, _: Point) -> Result<()> {
+        Ok(())
     }
 
-    fn move_by(&mut self, _: Point) -> Result<Point> {
-        anyhow::bail!("no pointer to move when drawing from a file")
+    fn move_to(&mut self, _: Point) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -184,8 +185,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         &mut Saved,
     )? {
         Pick::Target { index, act } => {
-            let (x, y) = (act.nudge.x, act.nudge.y);
-            eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());
+            eprintln!("wayhint: {} on", act.action.name());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&snapshot.targets[index])?

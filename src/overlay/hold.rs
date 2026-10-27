@@ -5,7 +5,7 @@
 //! `EVERY` once it has been down for `DELAY`, until it's let go. The input
 //! method grab sends no repeats of its own, so wayhint keeps the clock.
 //! How far a tick moves is `pick`'s to say: each one comes with its count,
-//! so the nudge can speed up the longer the arrow is held.
+//! so the pointer can speed up the longer the arrow is held.
 
 use std::time::{Duration, Instant};
 
@@ -69,7 +69,7 @@ impl Holds {
     }
 
     /// The arrows due a tick at `now`, with their count (1 for the first).
-    /// One tick each however late `now` is: a slow redraw slows the nudge
+    /// One tick each however late `now` is: a slow redraw slows the pointer
     /// down instead of making it jump.
     pub fn due(&mut self, now: Instant) -> Vec<(Key, Mods, u16)> {
         self.0

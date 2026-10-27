@@ -3,8 +3,6 @@
 //! arm them and the pointer can carry them out without any of the three
 //! knowing about the others.
 
-use crate::geometry::Point;
-
 /// One pointer action.
 ///
 /// `clap::ValueEnum` lets `--verb` take these by name (`--verb right`); it
@@ -141,15 +139,12 @@ impl Mods {
     }
 }
 
-/// One command, all but where: the action, the modifiers held through it,
-/// and the arrows' nudge, how far from its point it lands. A tag or
-/// `Space` gives the point.
+/// One command, all but where: the action and the modifiers held through
+/// it. A tag, a match or the pointer gives the point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Act {
     pub action: Action,
     pub mods: Mods,
-    /// In px, `(0, 0)` with no arrow pressed.
-    pub nudge: Point,
 }
 
 #[cfg(test)]
