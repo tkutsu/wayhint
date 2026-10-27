@@ -5,6 +5,7 @@
 //! ```text
 //! --text -> text read once -> keys: query edits, arrows
 //!                                |
+//!                 an arrow with nothing typed or armed: moves the pointer
 //!                 Backspace with nothing typed: takes back a verb
 //!                 close key: leave wayhint
 //!                 a verb key before any text, or a named one any time: armed
@@ -36,7 +37,7 @@ use crate::{
     geometry::Point,
     keys::KeyCode,
     overlay::{Event, Frame, Highlight, Overlay, Tag},
-    pick::{self, Pick, Source},
+    pick::{self, Mouse, Pick, Source},
     selection::{self, Selector, Step, free_labels},
     snapshot::{Snapshot, Target},
     status::{Message, Status},
@@ -177,10 +178,13 @@ impl Hints {
 /// `selector` holds the verb from `--verb`, if any. A verb typed here
 /// comes first, before the text; a named verb key works at any point.
 /// Letters and digits in the active layout always go into the query.
+/// Before any text or verb, an arrow moves the pointer, as it does with
+/// the tags, and a verb typed twice acts where it went.
 pub fn search(
     overlay: &mut Overlay,
     shown: &Snapshot,
     selector: &Selector,
+    mouse: &mut dyn Mouse,
     source: &mut dyn Source,
     config: &Config,
 ) -> Result<Pick> {
@@ -188,7 +192,7 @@ pub fn search(
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
         return Ok(Pick::Leave);
     }
-    let result = keys(overlay, shown, selector, source, config);
+    let result = keys(overlay, shown, selector, mouse, source, config);
     overlay.stop_typing();
     result
 }
@@ -199,6 +203,7 @@ fn keys(
     overlay: &mut Overlay,
     shown: &Snapshot,
     selector: &Selector,
+    mouse: &mut dyn Mouse,
     source: &mut dyn Source,
     config: &Config,
 ) -> Result<Pick> {
@@ -229,7 +234,7 @@ fn keys(
             overlay.update(&draw(&search, &pressed, &command, stale, None))?;
             continue;
         };
-        let (key, mods, typed) = match event {
+        let (key, mods, typed, ticks) = match event {
             Event::Escape => (
                 crate::keys::Key {
                     code: KeyCode::ESC,
@@ -237,11 +242,12 @@ fn keys(
                 },
                 Mods::NONE,
                 None,
+                0,
             ),
-            Event::Typed(key, mods, typed) => (key, mods, typed),
+            Event::Typed(key, mods, typed) => (key, mods, typed, 0),
             // Enter, on its release.
-            Event::Key(key, mods) => (key, mods, None),
-            Event::Held(..) => continue,
+            Event::Key(key, mods) => (key, mods, None, 0),
+            Event::Held(key, mods, ticks) => (key, mods, None, ticks),
             Event::Interrupted | Event::Closed | Event::KeyboardLost => {
                 return Ok(Pick::Leave);
             }
@@ -250,6 +256,18 @@ fn keys(
         };
         if config.verbs.is_close(key) {
             return Ok(Pick::Leave);
+        }
+        // Before any text or verb, an arrow moves the pointer, held for
+        // faster; after, it goes through the matches, once a press.
+        if let Some(by) = pick::arrow(key.code, ticks, config)
+            && search.query().is_empty()
+            && command.is_blank()
+        {
+            mouse.move_by(by)?;
+            continue;
+        }
+        if ticks > 0 {
+            continue;
         }
         // A verb: a named key (PageDown) any time; a character only before
         // any text, and only one that's no letter or digit (`,`), which
