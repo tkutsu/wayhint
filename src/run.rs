@@ -31,7 +31,9 @@
 //! A hold presses a button and keeps it down through the next round: the
 //! next command, whatever its verb, lets go where it points.
 //! Arrows typed before the last key move where that one command lands,
-//! so a tag near the spot can click anywhere.
+//! so a tag near the spot can click anywhere. Arrows before any other key
+//! move the pointer itself: after a hold they drag, and `Space` or a verb
+//! typed twice acts where they took it.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
@@ -89,7 +91,8 @@ struct Session {
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
-    /// Where the last command was done, for a verb typed twice.
+    /// Where the last command was done, or the arrows took the pointer
+    /// since, for a verb typed twice.
     spot: Option<Point>,
     /// The button a hold keeps down, until the next command lets go.
     held: Option<Held>,
@@ -223,7 +226,7 @@ impl Session {
                 config,
                 &mut snapshot,
                 first,
-                &desktop::cursor,
+                &mut Hand::new(&mut self.pointer, &self.screens, &mut self.spot),
                 &mut scans,
             )?;
             // Moved out, so `scans` lets go of the desktop for the click.
@@ -398,14 +401,16 @@ impl Session {
     /// 2 and 3 proved; `rounds` takes the keyboard back.
     ///
     /// While a hold keeps a button down, any command lets go of it at `at`
-    /// instead, whatever its verb: a drag there, from where the hold
-    /// pressed. A hold itself keeps its button down and the cursor on it,
-    /// and puts the cursor back only once it's let go.
+    /// instead, whatever its verb: a drag there, from where the cursor is,
+    /// on the hold or where the arrows took it. A hold itself keeps its
+    /// button down and the cursor on it, and puts the cursor back only once
+    /// it's let go.
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
         self.spot = Some(at);
         if let Some(held) = self.held.take() {
             self.overlay.clear()?;
-            self.pointer.drag(held.at, at)?;
+            let from = desktop::cursor().unwrap_or(held.at);
+            self.pointer.drag(from, at)?;
             return match held.back {
                 Some(back) => self.pointer.put_back(back),
                 None => Ok(()),
@@ -449,12 +454,15 @@ impl Session {
         }
     }
 
-    /// Lets go of a hold's button where it went down, `Esc` while it's
-    /// down: a long press.
+    /// Lets go of a hold's button where the cursor is, `Esc` while it's
+    /// down: a long press, or the end of a drag the arrows made.
     fn release(&mut self) -> Result<()> {
         match self.held {
-            // With a button held, `act` lets go: here, where it went down.
-            Some(held) => self.act(Action::Left, Mods::NONE, held.at, false),
+            // With a button held, `act` lets go: here, in place.
+            Some(held) => {
+                let at = desktop::cursor().unwrap_or(held.at);
+                self.act(Action::Left, Mods::NONE, at, false)
+            }
             None => Ok(()),
         }
     }
@@ -560,6 +568,42 @@ impl pick::Source for Scans<'_> {
     fn shows(&self, shown: &Snapshot, window: usize, at: Point) -> bool {
         let address = &shown.windows[window].window.address;
         desktop::shows(&self.stack, self.monitor, address, at)
+    }
+}
+
+/// The pointer for a pick: read from Hyprland, moved by the virtual
+/// pointer, inside the monitor it's on. Where the arrows take it is the
+/// spot a verb typed twice acts on.
+struct Hand<'a> {
+    pointer: &'a mut Pointer,
+    screens: &'a [Rect],
+    spot: &'a mut Option<Point>,
+}
+
+impl<'a> Hand<'a> {
+    const fn new(
+        pointer: &'a mut Pointer,
+        screens: &'a [Rect],
+        spot: &'a mut Option<Point>,
+    ) -> Self {
+        Self {
+            pointer,
+            screens,
+            spot,
+        }
+    }
+}
+
+impl pick::Mouse for Hand<'_> {
+    fn at(&self) -> Result<Point> {
+        desktop::cursor()
+    }
+
+    fn move_by(&mut self, by: Point) -> Result<Point> {
+        let at = lands(desktop::cursor()?, by, self.screens);
+        self.pointer.go(at)?;
+        *self.spot = Some(at);
+        Ok(at)
     }
 }
 
