@@ -193,7 +193,7 @@
 
 
 [pointer]
-# after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
+# after = "leave"           # the cursor stays where wayhint put it; "restore" puts it back after a click, undoing the arrows
 # nudge = 10                # px one arrow press moves the pointer; held, it goes on, faster
 # scroll = 5                # wheel notches one scroll_up or scroll_down turns
 # settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
