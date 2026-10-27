@@ -79,7 +79,8 @@
 # font = "sans-serif:bold"  # a fontconfig pattern, as fc-match takes it
 # size = 13
 # text = "#ffffffff"
-# dimmed = "#ffffff66"      # typed letters, a verb's name, a placeholder
+# dimmed = "#ffffff66"      # typed letters, a placeholder
+# verb = "#fab387ff"        # an armed verb's key in front of the letters (peach)
 # background = "#1e1e2ef0"
 # border = "#d0d0d0ff"
 # border_width = 1
@@ -110,6 +111,22 @@
 # size = 13
 # text = "#94e2d5ff"        # teal
 # dimmed = "#ffffff66"
+# verb = "#fab387ff"
+# background = "#1e1e2ef0"
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]          # vertical, horizontal
+
+[style.labels]
+# Text mode's match labels, typed with Shift to pick a match: their own
+# letters keep them apart from the tags. Unset fields follow [style]; by
+# default only the letters differ.
+# font = "sans-serif:bold"
+# size = 13
+# text = "#cba6f7ff"        # mauve
+# dimmed = "#ffffff66"
+# verb = "#fab387ff"
 # background = "#1e1e2ef0"
 # border = "#d0d0d0ff"
 # border_width = 1
@@ -131,7 +148,8 @@
 # font = "sans-serif:bold"
 # size = 13
 # text = "#ffffffff"
-# dimmed = "#ffffff66"      # the armed verb's name and the placeholder
+# dimmed = "#ffffff66"      # the placeholder
+# verb = "#fab387ff"        # the armed verb's name, and drop
 # background = "#1e1e2ef0"
 # border = "#d0d0d0ff"
 # border_width = 1

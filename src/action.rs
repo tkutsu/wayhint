@@ -103,7 +103,7 @@ impl Action {
         !matches!(self, Self::Hover | Self::ScrollUp | Self::ScrollDown)
     }
 
-    /// Whether Shift, Ctrl and Alt are held through it: a Ctrl-scroll
+    /// Whether Ctrl and Alt are held through it: a Ctrl-scroll
     /// zooms. A hover holds nothing, and a hold keeps its button down past
     /// the command, which a held modifier mustn't.
     pub const fn takes_mods(self) -> bool {
