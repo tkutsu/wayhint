@@ -69,7 +69,8 @@
 
 
 [hints]
-# Completed tags, in tag mode and on text mode's targets with no text.
+# Completed tags, in tag mode and on text mode's targets with no text, and
+# text mode's match labels.
 # auto_accept = true        # false waits for Enter after the whole tag; modifiers on Enter apply to the action
 
 
