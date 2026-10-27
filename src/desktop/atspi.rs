@@ -90,6 +90,9 @@ pub struct Scanner {
     a11y: AccessibilityConnection,
     /// What each object read so far is, until [`Scanner::forget`].
     known: RefCell<HashMap<ObjectId, Known>>,
+    /// The process behind each bus name asked so far. Kept for the run: a
+    /// bus never gives a unique name to another connection.
+    pids: RefCell<HashMap<String, u32>>,
 }
 
 /// What an object is, which apps rarely change while it exists: its role,
@@ -114,6 +117,7 @@ impl Scanner {
         Ok(Self {
             a11y,
             known: RefCell::default(),
+            pids: RefCell::default(),
         })
     }
 
@@ -127,7 +131,7 @@ impl Scanner {
 
     /// A walk that ends at `deadline`.
     fn walk(&self, deadline: Instant) -> Walk<'_> {
-        Walk::new(self.a11y.connection(), &self.known, deadline)
+        Walk::new(self.a11y.connection(), &self.known, &self.pids, deadline)
     }
 
     /// Reads one client's tree within `bounds`, from the frame with its
@@ -319,6 +323,7 @@ fn offset(at: u32) -> i32 {
 struct Walk<'c> {
     conn: &'c zbus::Connection,
     known: &'c RefCell<HashMap<ObjectId, Known>>,
+    pids: &'c RefCell<HashMap<String, u32>>,
     deadline: Instant,
     requests: Cell<usize>,
     incomplete: RefCell<Option<String>>,
@@ -341,11 +346,13 @@ impl<'c> Walk<'c> {
     fn new(
         conn: &'c zbus::Connection,
         known: &'c RefCell<HashMap<ObjectId, Known>>,
+        pids: &'c RefCell<HashMap<String, u32>>,
         deadline: Instant,
     ) -> Self {
         Self {
             conn,
             known,
+            pids,
             deadline,
             requests: Cell::new(0),
             incomplete: RefCell::new(None),
@@ -419,13 +426,20 @@ impl<'c> Walk<'c> {
             let Some(bus) = candidate.name() else {
                 continue;
             };
-            // Apps registered with a dead socket (Steam) fail here; skip them.
-            if self
-                .call(dbus.get_connection_unix_process_id(bus.clone().into()))
-                .await
-                .ok()
-                == Some(pid)
-            {
+            let known = self.pids.borrow().get(bus.as_str()).copied();
+            let owner = match known {
+                Some(owner) => Some(owner),
+                // Apps registered with a dead socket (Steam) fail here; skip
+                // them, and ask again next time.
+                None => self
+                    .call(dbus.get_connection_unix_process_id(bus.clone().into()))
+                    .await
+                    .ok()
+                    .inspect(|&owner| {
+                        self.pids.borrow_mut().insert(bus.to_string(), owner);
+                    }),
+            };
+            if owner == Some(pid) {
                 found.push(object_id(candidate));
             }
         }
