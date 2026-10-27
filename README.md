@@ -133,15 +133,17 @@ case; a capital makes the search case-sensitive. Accents are ignored, so
 `cafe` finds "café". Spaces match whitespace and line breaks. Punctuation
 can start a query too, unless its first key is bound to a verb.
 
-Matches get yellow boxes, with the current match in orange. Text is read
+Matches get yellow boxes, with the current match in orange, and the pointer
+moves onto the current match. Text is read
 at the start of each round; text that changes while you type is available
 in the next round. Before acting, wayhint reads the selected text again
 and skips the action if it changed.
 
 | Key | Action |
 |---|---|
-| `Enter` | Click the current match. |
-| `Tab`, `Shift+Tab`, arrows | Move between matches. |
+| `Enter` | Click where the pointer is: the current match, or where the arrows moved it. |
+| `Tab`, `Shift+Tab` | Move between matches, taking the pointer along. |
+| Arrows | Move the pointer from the match; held, faster. Another match starts over. |
 | A complete hint | Act on a control without searchable text. |
 | `Backspace` | Edit the query; with it empty, cancel the armed verb. |
 | `Shift`, `Ctrl`, `Alt` held on `Enter` | Apply that modifier to the click. |
@@ -174,14 +176,15 @@ and close are separate commands and can still use letters.
 | `PageUp`, `PageDown` | Scroll up, down by five notches. |
 | `;` | Hold the left button; the next target releases it there to drag. |
 
-Type a verb twice to act again at the last command's position, or at the
-pointer before the first action. The close key releases a hold in place.
+Type a verb twice to act again at the last command's position, or where
+the pointer was moved since. The close key releases a hold in place.
 These defaults describe a US layout. Keys are matched by position using
 your first keyboard layout; a default that produces a letter or digit on
 that layout stays unbound. `wayhint config` shows the actual bindings.
 
-In hints-only mode, `Space` acts at the pointer and arrows move the click
-point by 10 pixels per press. `?` shows its key legend. Hold a modifier on
+The arrows move the pointer itself, 10 pixels per press, faster when held,
+stopping 5 pixels inside the monitor's edge; during a hold they drag. In
+hints-only mode, `Space` acts at the pointer. `?` shows its key legend. Hold a modifier on
 the hint's last letter to apply it, or on `Enter` when confirmation is on.
 
 ## Configuration

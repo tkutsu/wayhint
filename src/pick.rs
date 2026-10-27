@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Dot, Event, Frame, Overlay, Tag},
+    overlay::{Event, Frame, Overlay, Tag},
     search::{self, Chosen},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
@@ -20,8 +20,7 @@ use crate::{
     text::{Span, Text},
 };
 
-/// How far inside its monitor's edge a nudge stops, in px: far enough for
-/// the whole dot to show.
+/// How far inside its monitor's edge the arrows stop the pointer, in px.
 const EDGE: i32 = 5;
 /// A held arrow speeds up by one `[pointer] nudge` a tick every this many
 /// ticks (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` a tick.
@@ -36,10 +35,8 @@ const IDLE_REFRESH: Duration = Duration::from_secs(2);
 pub enum Pick {
     /// Do `act` at the target at `index`.
     Target { index: usize, act: Act },
-    /// Do `act` at the pointer (`Space`): `from`, moved by the nudge. A
-    /// bare `Space` reads the pointer as it's pressed; a nudged one keeps
-    /// the pointer its dot was drawn from, so it lands on the dot.
-    Here { act: Act, from: Point },
+    /// Do `act` where the pointer is (`Space`).
+    Here { act: Act },
     /// Do `act` where the last command was done (a verb typed twice).
     Again { act: Act },
     /// Do the last command again, on its target.
@@ -100,30 +97,11 @@ pub struct Start {
     pub holding: bool,
 }
 
-/// What the screen holds while a pick runs: the targets, the monitor they
-/// are on, the pointer, if known, for where a nudged `Space` lands, and
-/// whether a button is held.
+/// What the screen holds while a pick runs: the targets, and whether a
+/// button is held.
 struct Scene<'a> {
     targets: &'a [Target],
-    screen: Rect,
-    pointer: Option<Point>,
     holding: bool,
-}
-
-impl<'a> Scene<'a> {
-    const fn new(
-        targets: &'a [Target],
-        screen: Rect,
-        pointer: Option<Point>,
-        holding: bool,
-    ) -> Self {
-        Self {
-            targets,
-            screen,
-            pointer,
-            holding,
-        }
-    }
 }
 
 /// Where a pick's targets come from, asked again while the tags are up.
@@ -146,12 +124,20 @@ pub trait Source {
     fn shows(&self, shown: &Snapshot, window: usize, at: Point) -> bool;
 }
 
+/// The pointer, as the arrows move it and text mode's matches take it. A
+/// button a hold keeps down stays down through both: a drag.
+pub trait Mouse {
+    /// Moves it `by` px, stopping inside its monitor's edge (see `moved`).
+    fn move_by(&mut self, by: Point) -> Result<()>;
+    /// Moves it to `at`.
+    fn move_to(&mut self, at: Point) -> Result<()>;
+}
+
 /// Shows tags for `shown`'s targets and reads keys until one is picked.
 /// `start.verb` (from `--verb`) is armed as if its key were the first one
 /// typed, and `start.text` (from `--text`) makes it a text-mode pick
-/// ([`text`]). `cursor` reads where the pointer is. The overlay never sees the mouse
-/// move, so it's read again at every key: a dot shows where a nudged
-/// `Space` lands from the pointer as of the last key.
+/// ([`text`]). The arrows move the pointer through `mouse`, held for
+/// faster, and `Space` or a verb typed twice acts where it is.
 ///
 /// Every `[scan] refresh` with no pick, `source` scans again and the tags
 /// follow: a target found again keeps its tag, and what was typed for it
@@ -178,7 +164,7 @@ pub fn pick(
     config: &Config,
     shown: &mut Snapshot,
     start: Start,
-    cursor: &dyn Fn() -> Result<Point>,
+    mouse: &mut dyn Mouse,
     source: &mut dyn Source,
 ) -> Result<Pick> {
     shown.merge_nearby(config.merge_distance);
@@ -192,24 +178,22 @@ pub fn pick(
     if let Some(action) = start.verb {
         selector.press(Input::Verb(action, Mods::NONE));
     }
-    let (screen, mut pointer) = (overlay.monitor().rect, cursor().ok());
     let mut said = Said::Nothing;
     // A scene per drawing: `shown` changes when a block opens, so nothing
     // may keep borrowing it in between.
-    let tags = |selector: &Selector, shown: &Snapshot, pointer, said: &Said| {
-        frame(
-            selector,
-            config,
-            &Scene::new(&shown.targets, screen, pointer, start.holding),
-            said,
-        )
+    let tags = |selector: &Selector, shown: &Snapshot, said: &Said| {
+        let scene = Scene {
+            targets: &shown.targets,
+            holding: start.holding,
+        };
+        frame(selector, config, &scene, said)
     };
     if start.text {
         // An empty frame opens the keys, with no tag to flash first.
         overlay.show(&Frame::default())?;
-        return text(overlay, config, shown, selector, source);
+        return text(overlay, config, shown, selector, mouse, source);
     }
-    overlay.show(&tags(&selector, shown, pointer, &said))?;
+    overlay.show(&tags(&selector, shown, &said))?;
     // When the tags are next brought up to date. The wait starts once a
     // scan is done, so a slow scan never runs back to back with the next.
     let mut every = config.refresh;
@@ -221,13 +205,13 @@ pub fn pick(
             let now = Instant::now();
             if said.until().is_some_and(|until| until <= now) {
                 said = Said::Nothing;
-                overlay.update(&tags(&selector, shown, pointer, &said))?;
+                overlay.update(&tags(&selector, shown, &said))?;
             }
             if due.is_none_or(|due| due > now) {
                 continue;
             }
             // A scan holds up the keys for as long as it takes, so none
-            // while an arrow is held: the nudge would freeze mid-move.
+            // while an arrow is held: the pointer would freeze mid-move.
             if overlay.holding() {
                 due = next(every);
                 continue;
@@ -237,7 +221,7 @@ pub fn pick(
             // What shows while a slow scan goes on: the tags as they are,
             // and `scanning` under what's typed.
             let busy = config.info.scanning.then(|| {
-                let mut busy = tags(&selector, shown, pointer, &said);
+                let mut busy = tags(&selector, shown, &said);
                 busy.status.info = Some(scanning());
                 busy
             });
@@ -253,8 +237,7 @@ pub fn pick(
             };
             if refresh != Refresh::Unchanged || slowed {
                 overlay.set_layout(shown);
-                pointer = cursor().ok();
-                let frame = tags(&selector, shown, pointer, &said);
+                let frame = tags(&selector, shown, &said);
                 if refresh == Refresh::Retag {
                     overlay.show(&frame)?;
                 } else {
@@ -291,12 +274,18 @@ pub fn pick(
             } else {
                 Said::Help
             };
-            overlay.update(&tags(&selector, shown, pointer, &said))?;
+            overlay.update(&tags(&selector, shown, &said))?;
+            continue;
+        }
+        if !config.verbs.is_close(key)
+            && let Some(by) = arrow(key.code, ticks, config)
+        {
+            mouse.move_by(by)?;
             continue;
         }
         // A key that means nothing (a modifier on its own) leaves the
         // message up; any other key takes it down.
-        let Some(input) = input_of(key, mods, ticks, config) else {
+        let Some(input) = input_of(key, mods, config) else {
             continue;
         };
         said = Said::Nothing;
@@ -304,8 +293,7 @@ pub fn pick(
         let before = selector.clone();
         match selector.press(input) {
             Step::Typing => {
-                pointer = cursor().ok();
-                overlay.update(&tags(&selector, shown, pointer, &said))?;
+                overlay.update(&tags(&selector, shown, &said))?;
             }
             Step::Picked { index, .. } if !shown.targets[index].opens.is_empty() => {
                 selector = before;
@@ -318,16 +306,10 @@ pub fn pick(
                 due = None;
                 // The lines have new labels: discard taps queued for the
                 // block before accepting keys for those lines.
-                overlay.show(&tags(&selector, shown, pointer, &said))?;
+                overlay.show(&tags(&selector, shown, &said))?;
             }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
-            Step::Here(act) => {
-                let from = match pointer {
-                    Some(drawn) if act.nudge != Point::default() => drawn,
-                    _ => cursor()?,
-                };
-                return Ok(Pick::Here { act, from });
-            }
+            Step::Here(act) => return Ok(Pick::Here { act }),
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
             // The letter is dropped, and named for `[info] duration`.
@@ -346,7 +328,7 @@ pub fn pick(
                     let until = Instant::now() + config.info.duration;
                     said = Said::Missed(format!("no tag starts with {typed}"), until);
                 }
-                overlay.update(&tags(&selector, shown, pointer, &said))?;
+                overlay.update(&tags(&selector, shown, &said))?;
             }
             Step::Exit if start.holding => return Ok(Pick::Release),
             Step::Exit => return Ok(Pick::Leave),
@@ -425,10 +407,11 @@ fn text(
     config: &Config,
     shown: &mut Snapshot,
     mut selector: Selector,
+    mouse: &mut dyn Mouse,
     source: &mut dyn Source,
 ) -> Result<Pick> {
     loop {
-        match search::search(overlay, shown, &selector, source, config)? {
+        match search::search(overlay, shown, &selector, mouse, source, config)? {
             Pick::Target { index, .. } if !shown.targets[index].opens.is_empty() => {
                 if open(shown, index, &*source, config) {
                     selector.reopen(shown.targets.len(), config.alphabet.len());
@@ -439,26 +422,18 @@ fn text(
     }
 }
 
-/// What a key means: a built-in key, else a verb or repeat, else a tag
-/// letter, else nothing. The config keeps command keys out of the alphabet
+/// What a key means, an arrow aside: a built-in key, else a verb or
+/// repeat, else a tag letter, else nothing. The config keeps command keys out of the alphabet
 /// and apart from each other, so the order never decides anything. A tag letter matches with or
-/// without Shift: Shift on it is a Shift-click, carried in `mods`. An
-/// arrow moves the command `[pointer] nudge` px its way, whatever is held,
-/// and held down it goes on, faster at each of its `ticks` (see `speed`).
-fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> {
+/// without Shift: Shift on it is a Shift-click, carried in `mods`.
+fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     if config.verbs.is_close(key) {
         return Some(Input::Escape);
     }
-    let step = config.nudge * speed(ticks);
-    let nudge = |x, y| Some(Input::Nudge(Point::new(x * step, y * step)));
     match key.code {
         KeyCode::BACKSPACE => Some(Input::Backspace),
         KeyCode::ENTER => Some(Input::Confirm(mods)),
         KeyCode::SPACE => Some(Input::Here(mods)),
-        KeyCode::UP => nudge(0, -1),
-        KeyCode::DOWN => nudge(0, 1),
-        KeyCode::LEFT => nudge(-1, 0),
-        KeyCode::RIGHT => nudge(1, 0),
         _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
         code => config
             .verbs
@@ -472,7 +447,7 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
 }
 
 /// The tags still possible after what's been typed, in `[style] case`,
-/// where each would land if nudged, and the input box.
+/// and the input box.
 ///
 /// The input box names the armed verb, dimmed, or `drop` while a hold
 /// keeps a button down: a verb with no key (`--verb`) and `Space`, which
@@ -490,11 +465,6 @@ fn input_of(key: Key, mods: Mods, ticks: u16, config: &Config) -> Option<Input> 
 /// A tag sits at `[style] position` on its target's visible box, moved by
 /// `[style] offset`.
 ///
-/// A nudge leaves the tags where they are and puts a dot where each one
-/// lands, one for `Space` too, at the pointer: a tag moved by the arrows
-/// would cover the very spot being aimed at. A line joins each dot to its
-/// tag. Only the tags still open get them, so they thin out with every
-/// letter typed, nudged before it or after.
 fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Frame {
     let letters = config.alphabet.letters();
     let style = &config.style;
@@ -530,27 +500,6 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
             tag(target, text.collect(), dimmed, config)
         })
         .collect();
-    let nudge = selector.nudge();
-    let dots = if nudge == Point::default() {
-        Vec::new()
-    } else {
-        // Each line runs from the tag to where its click lands: from its
-        // hit point, nudged.
-        let starts = open
-            .iter()
-            .enumerate()
-            .map(|(i, (_, target))| (spot(target, config), target.hit, Some(i)));
-        // A pointer on another monitor draws nothing here, as it should:
-        // `lands` keeps its dot on that monitor, off this overlay.
-        starts
-            .chain(scene.pointer.map(|p| (p, p, None)))
-            .map(|(from, hit, tag)| Dot {
-                from,
-                at: lands(hit, nudge, &[scene.screen]),
-                tag,
-            })
-            .collect()
-    };
     let info = match said {
         Said::Help => Some(Message::new(Notice::Help, config.verbs.legend())),
         Said::Missed(message, _) => Some(Message::new(Notice::NoMatch, message.clone())),
@@ -561,7 +510,6 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
     };
     Frame {
         tags,
-        dots,
         status: Status {
             info,
             ..status(selector, config, scene.holding)
@@ -618,6 +566,21 @@ fn status(selector: &Selector, config: &Config, holding: bool) -> Status {
     )
 }
 
+/// How far the arrow `code` goes: `[pointer] nudge` px its way, and held
+/// down, on at each of its `ticks`, faster (see `speed`). `None` for a key
+/// that is no arrow.
+pub fn arrow(code: KeyCode, ticks: u16, config: &Config) -> Option<Point> {
+    let (x, y) = match code {
+        KeyCode::UP => (0, -1),
+        KeyCode::DOWN => (0, 1),
+        KeyCode::LEFT => (-1, 0),
+        KeyCode::RIGHT => (1, 0),
+        _ => return None,
+    };
+    let step = config.nudge * speed(ticks);
+    Some(Point::new(x * step, y * step))
+}
+
 /// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick
 /// held down, 0 being its press: one, and one more every `SPEED_UP` ticks,
 /// up to `TOP_SPEED`.
@@ -625,16 +588,15 @@ fn speed(ticks: u16) -> i32 {
     i32::from((1 + ticks / SPEED_UP).min(TOP_SPEED))
 }
 
-/// Where a command nudged by `nudge` lands for the point `at`: kept `EDGE`
-/// px inside the one of `screens` (the monitors) that `at` is on, so an
-/// arrow too many stops by its edge instead of jumping to another monitor
-/// or a point no monitor has, with its dot in sight. Without a nudge that's
-/// `at` itself, wherever it is.
-pub fn lands(at: Point, nudge: Point, screens: &[Rect]) -> Point {
-    if nudge == Point::default() {
+/// Where the pointer at `at` goes, moved `by`: kept `EDGE` px inside the
+/// one of `screens` (the monitors) that `at` is on, so an arrow too many
+/// stops by its edge instead of jumping to another monitor or a point no
+/// monitor has. Not moved, that's `at` itself, wherever it is.
+pub fn moved(at: Point, by: Point, screens: &[Rect]) -> Point {
+    if by == Point::default() {
         return at;
     }
-    let moved = at.offset(nudge);
+    let moved = at.offset(by);
     match screens.iter().find(|s| s.contains(at)) {
         Some(screen) => screen.inset(EDGE).clamp(moved),
         None => moved,
@@ -849,7 +811,7 @@ mod tests {
                 shift,
                 ..Mods::NONE
             };
-            input_of(key, mods, 0, &config)
+            input_of(key, mods, &config)
         };
         let shift = Mods {
             shift: true,
@@ -868,23 +830,16 @@ mod tests {
             Some(Input::Letter(0, shift)),
             "a Shift-click on a"
         );
-        assert_eq!(input(105, false), Some(Input::Nudge(Point::new(-10, 0))));
+        assert_eq!(input(105, false), None, "an arrow is no input");
+        assert_eq!(arrow(KeyCode::LEFT, 0, &config), Some(Point::new(-10, 0)));
+        assert_eq!(arrow(KeyCode::UP, 0, &config), Some(Point::new(0, -10)));
+        assert_eq!(arrow(KeyCode::RIGHT, 7, &config), Some(Point::new(10, 0)));
         assert_eq!(
-            input(103, true),
-            Some(Input::Nudge(Point::new(0, -10))),
-            "Shift changes nothing on an arrow"
-        );
-        let right = Key {
-            code: KeyCode::RIGHT,
-            shift: false,
-        };
-        let held = |ticks| input_of(right, Mods::NONE, ticks, &config);
-        assert_eq!(held(7), Some(Input::Nudge(Point::new(10, 0))));
-        assert_eq!(
-            held(8),
-            Some(Input::Nudge(Point::new(20, 0))),
+            arrow(KeyCode::RIGHT, 8, &config),
+            Some(Point::new(20, 0)),
             "held, faster"
         );
+        assert_eq!(arrow(KeyCode::from_evdev(30), 0, &config), None);
     }
 
     #[test]
@@ -894,7 +849,7 @@ mod tests {
             let config = Config::parse(&format!("[keys]\nclose = {name:?}"), &layout).unwrap();
             let code = crate::keys::named(name).unwrap_or(KeyCode::from_evdev(16));
             assert_eq!(
-                input_of(Key { code, shift: false }, Mods::NONE, 0, &config),
+                input_of(Key { code, shift: false }, Mods::NONE, &config),
                 Some(Input::Escape)
             );
             assert_eq!(
@@ -904,7 +859,6 @@ mod tests {
                         shift: false
                     },
                     Mods::NONE,
-                    0,
                     &config
                 ),
                 None
@@ -919,121 +873,38 @@ mod tests {
     }
 
     #[test]
-    fn a_nudge_stops_inside_the_edge_of_its_own_monitor() {
+    fn the_arrows_stop_inside_the_edge_of_the_pointers_monitor() {
         let screens = [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)];
         let at = Point::new(10, 500);
         assert_eq!(
-            lands(at, Point::new(28, -14), &screens),
+            moved(at, Point::new(28, -14), &screens),
             Point::new(38, 486)
         );
         assert_eq!(
-            lands(at, Point::new(-42, 0), &screens),
+            moved(at, Point::new(-42, 0), &screens),
             Point::new(EDGE, 500)
         );
         let corner = Point::new(1, 1079);
         assert_eq!(
-            lands(corner, Point::new(10, 0), &screens),
+            moved(corner, Point::new(10, 0), &screens),
             Point::new(11, 1079 - EDGE),
-            "a hit point on the edge: its dot comes inside it too"
+            "from the edge: it comes inside it too"
         );
         assert_eq!(
-            lands(corner, Point::default(), &screens),
+            moved(corner, Point::default(), &screens),
             corner,
-            "no nudge: the click stays where it is"
+            "not moved: it stays where it is"
         );
         let right = Point::new(2100, 500);
         assert_eq!(
-            lands(right, Point::default(), &screens[..1]),
+            moved(right, Point::default(), &screens[..1]),
             right,
-            "no nudge: the pointer stays where it is, on any monitor"
+            "not moved: it stays where it is, on any monitor"
         );
         assert_eq!(
-            lands(right, Point::new(-196, 0), &screens),
+            moved(right, Point::new(-196, 0), &screens),
             Point::new(1920 + EDGE, 500),
-            "a nudge from the right monitor stops inside its left edge"
-        );
-    }
-
-    #[test]
-    fn a_nudged_space_dot_follows_the_pointer() {
-        let config = Config::parse("", &crate::keys::Layout::named("us", "")).unwrap();
-        let mut selector = Selector::new(0, config.alphabet.len(), Action::Left);
-        selector.press(Input::Nudge(Point::new(14, 0)));
-        let scene = |x| Scene {
-            targets: &[],
-            screen: Rect::new(0, 0, 1920, 1080),
-            pointer: Some(Point::new(x, 100)),
-            holding: false,
-        };
-        let dot = |x| Dot {
-            from: Point::new(x, 100),
-            at: Point::new(x + 14, 100),
-            tag: None,
-        };
-        assert_eq!(
-            frame(&selector, &config, &scene(100), &Said::Nothing).dots,
-            [dot(100)]
-        );
-        assert_eq!(
-            frame(&selector, &config, &scene(500), &Said::Nothing).dots,
-            [dot(500)]
-        );
-    }
-
-    #[test]
-    fn dots_thin_out_as_letters_are_typed() {
-        // Two letters, three targets: labels b, aa, ab.
-        let config = Config::parse(
-            "[keys]\nalphabet = \"ab\"\nleft = \"\"",
-            &crate::keys::Layout::named("us", ""),
-        )
-        .unwrap();
-        let target = |x| Target {
-            object: Some(crate::desktop::tree::ObjectId {
-                bus: ":1.7".into(),
-                path: format!("/{x}"),
-            }),
-            window: 0,
-            rect: Rect::new(x - 20, 90, 40, 20),
-            visible: Rect::new(x - 20, 90, 40, 20),
-            hit: Point::new(x, 100),
-            role: "button".into(),
-            name: String::new(),
-            editable: false,
-            clips: Vec::new(),
-            opens: Vec::new(),
-        };
-        let targets = [target(100), target(200), target(300)];
-        let scene = Scene {
-            targets: &targets,
-            screen: Rect::new(0, 0, 1920, 1080),
-            pointer: None,
-            holding: false,
-        };
-        let mut selector = Selector::new(3, 2, Action::Left);
-        let froms = |selector: &Selector| -> Vec<i32> {
-            frame(selector, &config, &scene, &Said::Nothing)
-                .dots
-                .iter()
-                .map(|d| d.from.x)
-                .collect()
-        };
-        selector.press(Input::Nudge(Point::new(0, 14)));
-        // Lines start at the tags, in the boxes' bottom-right corners.
-        assert_eq!(froms(&selector), [120, 220, 320], "nudged before typing");
-        selector.press(Input::Letter(0, Mods::NONE));
-        assert_eq!(froms(&selector), [220, 320], "a leaves aa and ab");
-        selector.press(Input::Nudge(Point::new(14, 0)));
-        let dots = frame(&selector, &config, &scene, &Said::Nothing).dots;
-        assert_eq!(
-            dots.iter().map(|d| d.tag).collect::<Vec<_>>(),
-            [Some(0), Some(1)],
-            "the remaining dots stay attached to their filtered tags"
-        );
-        assert_eq!(
-            dots.iter().map(|d| d.at).collect::<Vec<_>>(),
-            [Point::new(214, 114), Point::new(314, 114)],
-            "nudged after a letter: both arrows count, on the open tags only"
+            "from the right monitor it stops inside its left edge"
         );
     }
 
@@ -1062,8 +933,6 @@ mod tests {
         let targets = [tree, guessed];
         let scene = Scene {
             targets: &targets,
-            screen: Rect::new(0, 0, 1920, 1080),
-            pointer: None,
             holding: false,
         };
         let selector = Selector::new(2, 2, Action::Left);
@@ -1097,7 +966,10 @@ mod tests {
         targets[0].visible = cell;
         targets[0].hit = cell.center();
         targets[0].role = "terminal".into();
-        let scene = Scene::new(&targets, Rect::new(0, 0, 1920, 1080), None, false);
+        let scene = Scene {
+            targets: &targets,
+            holding: false,
+        };
         let selector = Selector::new(targets.len(), config.alphabet.len(), Action::Left);
         let frame = frame(&selector, &config, &scene, &Said::Nothing);
         assert_eq!(frame.tags[0].position, Position::Center);
@@ -1134,8 +1006,6 @@ mod tests {
         let targets = three_buttons();
         let scene = |holding| Scene {
             targets: &targets,
-            screen: Rect::new(0, 0, 1920, 1080),
-            pointer: None,
             holding,
         };
         let shown = |extra: &str, holding| {
@@ -1185,7 +1055,10 @@ mod tests {
         let mut selector = Selector::new(3, config.alphabet.len(), Action::Left)
             .with_auto_accept(config.hint_auto_accept);
         assert_eq!(selector.press(Input::Letter(0, Mods::NONE)), Step::Typing);
-        let scene = Scene::new(&targets, Rect::new(0, 0, 1920, 1080), None, false);
+        let scene = Scene {
+            targets: &targets,
+            holding: false,
+        };
         let frame = frame(&selector, &config, &scene, &Said::Nothing);
         assert_eq!(frame.tags.len(), 1);
         assert_eq!((frame.tags[0].text.as_str(), frame.tags[0].typed), ("A", 1));
@@ -1199,8 +1072,6 @@ mod tests {
         let targets = three_buttons();
         let scene = |targets| Scene {
             targets,
-            screen: Rect::new(0, 0, 1920, 1080),
-            pointer: None,
             holding: false,
         };
         let info =

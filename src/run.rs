@@ -30,8 +30,10 @@
 //! Shift, Ctrl or Alt held on the last key are held through the click.
 //! A hold presses a button and keeps it down through the next round: the
 //! next command, whatever its verb, lets go where it points.
-//! Arrows typed before the last key move where that one command lands,
-//! so a tag near the spot can click anywhere.
+//! The arrows move the pointer itself: after a hold they drag, and
+//! `Space` or a verb typed twice acts where they took it. In text mode the
+//! pointer goes to the current match first, and Enter clicks where the
+//! arrows took it from there.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
@@ -64,7 +66,7 @@ use crate::{
     geometry::{Point, Rect},
     keyboard::Keyboard,
     overlay::{Frame, Overlay},
-    pick::{self, Pick, Start, lands},
+    pick::{self, Pick, Start, moved},
     pointer::Pointer,
     search::Chosen,
     snapshot::{Snapshot, Target},
@@ -85,12 +87,16 @@ struct Session {
     pointer: Pointer,
     /// Made at the first modifier click: most runs never need one.
     keyboard: Option<Keyboard>,
-    /// Every monitor's box, for where a nudge stops (`pick::lands`).
+    /// Every monitor's box, for where the arrows stop (`pick::moved`).
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
-    /// Where the last command was done, for a verb typed twice.
+    /// Where the last command was done, or wayhint moved the pointer
+    /// since, for a verb typed twice.
     spot: Option<Point>,
+    /// Where the pointer was before wayhint moved it, until the next
+    /// command: where `[pointer] after = "restore"` puts it back.
+    home: Option<Point>,
     /// The button a hold keeps down, until the next command lets go.
     held: Option<Held>,
     /// What the scans have warned about so far: each rescan finds the same
@@ -98,7 +104,7 @@ struct Session {
     warned: HashSet<String>,
 }
 
-/// A command on a target, as the repeat key does it again, nudge and all.
+/// A command on a target, as the repeat key does it again.
 /// The target is kept as its accessibility object, which stays the same
 /// across scans for as long as the control exists; its tag and position
 /// may not. `None` for a target found in pixels.
@@ -174,6 +180,7 @@ pub fn run(
         screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
         spot: None,
+        home: None,
         held: None,
         warned: HashSet::new(),
         conn,
@@ -223,26 +230,30 @@ impl Session {
                 config,
                 &mut snapshot,
                 first,
-                &desktop::cursor,
+                &mut Hand::new(
+                    &mut self.pointer,
+                    &self.screens,
+                    &mut self.spot,
+                    &mut self.home,
+                ),
                 &mut scans,
             )?;
             // Moved out, so `scans` lets go of the desktop for the click.
             let scanned = scans.latest;
             let done = match picked {
-                Pick::Leave => return Ok(()),
+                Pick::Leave => return self.go_home(config),
                 // Frozen hints belong only to the workspace first scanned.
                 Pick::Rescan if static_mode => return Ok(()),
                 // Nothing was done, so `--once` goes on too, and the letters
                 // typed so far go with the old tags.
                 Pick::Rescan => continue,
-                // `Space`: the cursor is already there, give or take the
-                // nudge, and there's no target to re-check, or to repeat on.
-                // Nor any telling what's under it, so a click there ends
-                // the run in case it was a text field (see `command`).
-                Pick::Here { act, from } => {
+                // `Space`: the cursor is already there, and there's no
+                // target to re-check, or to repeat on. Nor any telling
+                // what's under it, so a click there ends the run in case it
+                // was a text field (see `command`).
+                Pick::Here { act } => {
                     self.last = None;
-                    let at = lands(from, act.nudge, &self.screens);
-                    self.act(act.action, act.mods, at, false)?;
+                    self.act(act.action, act.mods, desktop::cursor()?, false)?;
                     Done::Acted {
                         ends: act.action.clicks(),
                     }
@@ -252,11 +263,7 @@ impl Session {
                 // so a click there ends the run too.
                 Pick::Again { act } => {
                     self.last = None;
-                    let from = match self.spot {
-                        Some(spot) => spot,
-                        None => desktop::cursor()?,
-                    };
-                    let at = lands(from, act.nudge, &self.screens);
+                    let at = self.spot.map_or_else(desktop::cursor, Ok)?;
                     let restore = config.after == After::Restore;
                     self.act(act.action, act.mods, at, restore)?;
                     Done::Acted {
@@ -270,7 +277,7 @@ impl Session {
                 Pick::Target { index, act } => {
                     let target = &snapshot.targets[index];
                     let object = target.object.clone();
-                    self.command(config, &snapshot, target, Command { object, act })?
+                    self.command(config, &snapshot, target, Command { object, act }, None)?
                 }
                 Pick::Text(chosen) => self.text(config, &snapshot, *chosen)?,
                 Pick::Repeat => {
@@ -286,7 +293,7 @@ impl Session {
                     });
                     match (last, found) {
                         (Some(last), Some(index)) => {
-                            self.command(config, &scanned, &scanned.targets[index], last)?
+                            self.command(config, &scanned, &scanned.targets[index], last, None)?
                         }
                         (Some(last), None) if last.object.is_none() => {
                             desktop::log(
@@ -326,46 +333,51 @@ impl Session {
 
     /// Does a match chosen in text mode, if its text still reads the same
     /// (in kitty, in the same cells) and its object passes a target's
-    /// re-check (in kitty, its window). Not kept for the repeat
-    /// key: that finds targets by their object, and a text's object is
-    /// rarely one.
+    /// re-check (in kitty, its window): on it, or where the pointer is if
+    /// the arrows moved it off. Not kept for the repeat key: that finds
+    /// targets by their object, and a text's object is rarely one.
     fn text(&mut self, config: &Config, snapshot: &Snapshot, chosen: Chosen) -> Result<Done> {
-        let Chosen { target, act, check } = chosen;
+        let Chosen {
+            target,
+            act,
+            aimed,
+            check,
+        } = chosen;
         if let Some(check) = &check
             && let Err(e) = self.desktop.still_reads(snapshot, &target, check)
         {
             desktop::log(&format!("wayhint: refreshing {:?}: {e:#}", check.text));
             return Ok(Done::Refused);
         }
-        let done = self.command(config, snapshot, &target, Command { object: None, act });
+        let at = aimed.then(desktop::cursor).transpose()?;
+        let command = Command { object: None, act };
+        let done = self.command(config, snapshot, &target, command, at);
         self.last = None;
         done
     }
 
-    /// Re-checks `target` and, if it's still the same, does `command` on it
-    /// and keeps it for the repeat key.
+    /// Re-checks `target` and, if it's still the same, does `command` at
+    /// `at`, where the arrows aimed, or else at its hit point, and keeps it
+    /// for the repeat key.
     ///
-    /// The re-check is of the target, not of where a nudge takes the click:
-    /// that spot is anywhere you chose, and has nothing to check it against.
+    /// The re-check is of the target, not of where the arrows aimed: that
+    /// spot is anywhere you chose, and has nothing to check it against.
     fn command(
         &mut self,
         config: &Config,
         snapshot: &Snapshot,
         target: &Target,
         command: Command,
+        at: Option<Point>,
     ) -> Result<Done> {
         match self.desktop.recheck(snapshot, target)? {
             Verdict::Click { editable } => {
                 let restore = config.after == After::Restore;
-                let Act {
-                    action,
-                    mods,
-                    nudge,
-                } = command.act;
-                let at = lands(target.hit, nudge, &self.screens);
+                let Act { action, mods } = command.act;
+                let at = at.unwrap_or(target.hit);
                 self.act(action, mods, at, restore)?;
                 // A click on a text field ends the mode, so typing goes to
-                // it. So does one nudged out of the target's box: wayhint
+                // it. So does one aimed out of the target's box: wayhint
                 // doesn't know what's there, and a field next door would
                 // take the focus while the tags took the typing. And one on
                 // a target found in pixels, which could be a field for all
@@ -398,14 +410,17 @@ impl Session {
     /// 2 and 3 proved; `rounds` takes the keyboard back.
     ///
     /// While a hold keeps a button down, any command lets go of it at `at`
-    /// instead, whatever its verb: a drag there, from where the hold
-    /// pressed. A hold itself keeps its button down and the cursor on it,
-    /// and puts the cursor back only once it's let go.
+    /// instead, whatever its verb: a drag there, from where the cursor is,
+    /// on the hold or where the arrows took it. A hold itself keeps its
+    /// button down and the cursor on it, and puts the cursor back only once
+    /// it's let go.
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
         self.spot = Some(at);
+        let home = self.home.take();
         if let Some(held) = self.held.take() {
             self.overlay.clear()?;
-            self.pointer.drag(held.at, at)?;
+            let from = desktop::cursor().unwrap_or(held.at);
+            self.pointer.drag(from, at)?;
             return match held.back {
                 Some(back) => self.pointer.put_back(back),
                 None => Ok(()),
@@ -420,8 +435,9 @@ impl Session {
         if !mods.is_empty() || !self.overlay.grabs_without_focus() {
             self.overlay.release_keyboard()?;
         }
+        // Back where it was before wayhint moved it, if it did.
         let back = if restore && action.restores() {
-            desktop::cursor().ok()
+            home.or_else(|| desktop::cursor().ok())
         } else {
             None
         };
@@ -449,12 +465,28 @@ impl Session {
         }
     }
 
-    /// Lets go of a hold's button where it went down, `Esc` while it's
-    /// down: a long press.
+    /// Puts the pointer back where it was before wayhint moved it, as
+    /// `[pointer] after = "restore"` does after a click: leaving undoes the
+    /// arrows and the jumps to matches. Not while a hold keeps a button
+    /// down: that would drag.
+    fn go_home(&mut self, config: &Config) -> Result<()> {
+        match self.home.take() {
+            Some(home) if config.after == After::Restore && self.held.is_none() => {
+                self.pointer.go(home)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Lets go of a hold's button where the cursor is, `Esc` while it's
+    /// down: a long press, or the end of a drag the arrows made.
     fn release(&mut self) -> Result<()> {
         match self.held {
-            // With a button held, `act` lets go: here, where it went down.
-            Some(held) => self.act(Action::Left, Mods::NONE, held.at, false),
+            // With a button held, `act` lets go: here, in place.
+            Some(held) => {
+                let at = desktop::cursor().unwrap_or(held.at);
+                self.act(Action::Left, Mods::NONE, at, false)
+            }
             None => Ok(()),
         }
     }
@@ -560,6 +592,48 @@ impl pick::Source for Scans<'_> {
     fn shows(&self, shown: &Snapshot, window: usize, at: Point) -> bool {
         let address = &shown.windows[window].window.address;
         desktop::shows(&self.stack, self.monitor, address, at)
+    }
+}
+
+/// The pointer for a pick, moved by the virtual pointer. Where it goes is
+/// the spot a verb typed twice acts on, and where it was before the first
+/// move is `home`.
+struct Hand<'a> {
+    pointer: &'a mut Pointer,
+    screens: &'a [Rect],
+    spot: &'a mut Option<Point>,
+    home: &'a mut Option<Point>,
+}
+
+impl<'a> Hand<'a> {
+    const fn new(
+        pointer: &'a mut Pointer,
+        screens: &'a [Rect],
+        spot: &'a mut Option<Point>,
+        home: &'a mut Option<Point>,
+    ) -> Self {
+        Self {
+            pointer,
+            screens,
+            spot,
+            home,
+        }
+    }
+}
+
+impl pick::Mouse for Hand<'_> {
+    fn move_by(&mut self, by: Point) -> Result<()> {
+        let at = moved(desktop::cursor()?, by, self.screens);
+        self.move_to(at)
+    }
+
+    fn move_to(&mut self, at: Point) -> Result<()> {
+        if self.home.is_none() {
+            *self.home = desktop::cursor().ok();
+        }
+        self.pointer.go(at)?;
+        *self.spot = Some(at);
+        Ok(())
     }
 }
 
