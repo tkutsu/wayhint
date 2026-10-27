@@ -245,7 +245,7 @@ fn keys(
             Event::Interrupted | Event::Closed | Event::KeyboardLost => {
                 return Ok(Pick::Leave);
             }
-            Event::Resized => bail!("the monitor changed size; run wayhint again"),
+            Event::Monitors => bail!("the monitors changed; run wayhint again"),
             Event::Workspace => return Ok(Pick::Rescan),
         };
         if config.verbs.is_close(key) {

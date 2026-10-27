@@ -282,7 +282,7 @@ pub fn pick(
             // Only text mode types, and it reads its own keys.
             Event::Typed(..) => continue,
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
-            Event::Resized => bail!("the monitor changed size; run wayhint again"),
+            Event::Monitors => bail!("the monitors changed; run wayhint again"),
             Event::Workspace => return Ok(Pick::Rescan),
         };
         if config.verbs.is_help(key) {
