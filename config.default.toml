@@ -147,7 +147,6 @@
 # hints = true              # typed tag letters show here, and leave the tags; false dims them on the tags
 # placeholder = "text"      # shown, dimmed, while nothing is typed in text mode
 # prefix = ""               # before the query, as "find: "
-# suffix = ""               # after the query, before the match count
 # font = "sans-serif:bold"
 # size = 13
 # text = "#ffffffff"
