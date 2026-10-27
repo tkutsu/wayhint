@@ -212,6 +212,16 @@ impl Status {
         Some((text, dimmed))
     }
 
+    /// How many of the first line's leading characters name the armed
+    /// verb, or `drop` while a hold is down: drawn in the verb colour.
+    pub fn verb_len(&self) -> usize {
+        self.segments
+            .iter()
+            .take_while(|s| matches!(s.role, Role::Verb | Role::Drop))
+            .map(|s| s.text.chars().count())
+            .sum()
+    }
+
     /// What the overlay draws of it: the first line only if `input`
     /// (`[input] visible`), the message only if `info` (`[info]
     /// visible`). The feed always gets the whole.

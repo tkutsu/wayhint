@@ -150,10 +150,13 @@ pub struct Style {
     /// Text size in px.
     pub size: f32,
     pub text: Color,
-    /// Letters already typed, an armed verb's name, a placeholder. Once
-    /// called `matched`, which a file may still say.
+    /// Letters already typed, a placeholder. Once called `matched`, which
+    /// a file may still say.
     #[serde(alias = "matched")]
     pub dimmed: Color,
+    /// An armed verb: its key in front of a tag's letters, its name or
+    /// `drop` in the input box.
+    pub verb: Color,
     pub background: Color,
     pub border: Color,
     pub border_width: f32,
@@ -168,7 +171,9 @@ pub struct Style {
     /// The line from a tag to its dot, and the dot: `[style.leader]`.
     pub leader: Leader,
     /// How tags found in a window's pixels differ: `[style.pixels]`.
-    pub pixels: PixelLook,
+    pub pixels: Look,
+    /// How text mode's match labels differ: `[style.labels]`.
+    pub labels: Look,
 }
 
 /// Which case tags are drawn in: `[style] case`. The keys are the same
@@ -205,17 +210,27 @@ impl Case {
     }
 }
 
-/// `[style.pixels]`: the look of tags found in a window's pixels, which
-/// are guesses and miss more often than tags from the accessibility tree.
-/// Unset fields are `[style]`'s; by default only the letters differ, in
-/// teal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The letters of tags found in pixels, unless `[style.pixels] text` sets
+/// them: teal.
+const PIXELS_TEXT: Color = Color::rgba(0x94, 0xe2, 0xd5, 0xff);
+
+/// The letters of text mode's match labels, unless `[style.labels] text`
+/// sets them: mauve.
+const LABELS_TEXT: Color = Color::rgba(0xcb, 0xa6, 0xf7, 0xff);
+
+/// A table that changes part of `[style]` for one kind of tag:
+/// `[style.pixels]` for tags found in a window's pixels, which are guesses
+/// and miss more often than tags from the accessibility tree, and
+/// `[style.labels]` for text mode's match labels. Unset fields are
+/// `[style]`'s, but for the letters, which have a colour of their own.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PixelLook {
+pub struct Look {
     pub font: Option<String>,
     pub size: Option<f32>,
     pub text: Option<Color>,
     pub dimmed: Option<Color>,
+    pub verb: Option<Color>,
     pub background: Option<Color>,
     pub border: Option<Color>,
     pub border_width: Option<f32>,
@@ -223,67 +238,45 @@ pub struct PixelLook {
     pub padding: Option<[f32; 2]>,
 }
 
-impl Default for PixelLook {
-    fn default() -> Self {
-        Self {
-            font: None,
-            size: None,
-            text: Some(Color::rgba(0x94, 0xe2, 0xd5, 0xff)),
-            dimmed: None,
-            background: None,
-            border: None,
-            border_width: None,
-            radius: None,
-            padding: None,
-        }
-    }
-}
-
-impl PixelLook {
-    /// The table as TOML, for `wayhint config`. An unset field is written
-    /// commented out, as `[style]`'s value it is now.
-    fn render(&self, style: &Style) -> String {
-        let pixels = style.for_pixels();
-        let mut out = String::from(
-            "\n[style.pixels]   # tags found in a window's pixels: guesses; unset fields are [style]'s\n",
-        );
+impl Look {
+    /// The table as TOML, for `wayhint config`, under `header`. An unset
+    /// field is written commented out, as the value it has now (`now`):
+    /// `[style]`'s, or the letters' own colour.
+    fn render(&self, header: &str, now: &Style) -> String {
+        let mut out = format!("\n{header}\n");
         let quote = crate::config::quote;
-        let [pad_y, pad_x] = pixels.padding;
-        for (name, set, now) in [
-            ("font", self.font.is_some(), quote(&pixels.font)),
-            ("size", self.size.is_some(), pixels.size.to_string()),
-            ("text", self.text.is_some(), format!("\"{}\"", pixels.text)),
-            (
-                "dimmed",
-                self.dimmed.is_some(),
-                format!("\"{}\"", pixels.dimmed),
-            ),
+        let [pad_y, pad_x] = now.padding;
+        let color = |c: Color| format!("\"{c}\"");
+        for (name, set, value) in [
+            ("font", self.font.is_some(), quote(&now.font)),
+            ("size", self.size.is_some(), now.size.to_string()),
+            ("text", self.text.is_some(), color(now.text)),
+            ("dimmed", self.dimmed.is_some(), color(now.dimmed)),
+            ("verb", self.verb.is_some(), color(now.verb)),
             (
                 "background",
                 self.background.is_some(),
-                format!("\"{}\"", pixels.background),
+                color(now.background),
             ),
-            (
-                "border",
-                self.border.is_some(),
-                format!("\"{}\"", pixels.border),
-            ),
+            ("border", self.border.is_some(), color(now.border)),
             (
                 "border_width",
                 self.border_width.is_some(),
-                pixels.border_width.to_string(),
+                now.border_width.to_string(),
             ),
-            ("radius", self.radius.is_some(), pixels.radius.to_string()),
+            ("radius", self.radius.is_some(), now.radius.to_string()),
             (
                 "padding",
                 self.padding.is_some(),
                 format!("[{pad_y}, {pad_x}]"),
             ),
         ] {
-            let _ = if set {
-                writeln!(out, "{name} = {now}")
-            } else {
-                writeln!(out, "# {name} = {now}   # unset: [style]'s")
+            let _ = match (set, name) {
+                (true, _) => writeln!(out, "{name} = {value}"),
+                (false, "text") => {
+                    writeln!(out, "# {name} = {value}   # unset: this table's default")
+                }
+                (false, _) => writeln!(out, "# {name} = {value}   # unset: [style]'s"),
             };
         }
         out
@@ -386,6 +379,7 @@ impl Default for Style {
             size: 13.0,
             text: Color::rgba(0xff, 0xff, 0xff, 0xff),
             dimmed: Color::rgba(0xff, 0xff, 0xff, 0x66),
+            verb: Color::rgba(0xfa, 0xb3, 0x87, 0xff),
             background: Color::rgba(0x1e, 0x1e, 0x2e, 0xf0),
             border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
             border_width: 1.0,
@@ -395,7 +389,8 @@ impl Default for Style {
             offset: [0, 0],
             case: Case::default(),
             leader: Leader::default(),
-            pixels: PixelLook::default(),
+            pixels: Look::default(),
+            labels: Look::default(),
         }
     }
 }
@@ -404,18 +399,31 @@ impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
         self.validate_table("style")?;
-        self.for_pixels().validate_table("style.pixels")
+        self.for_pixels().validate_table("style.pixels")?;
+        self.for_labels().validate_table("style.labels")
     }
 
     /// The look of tags found in pixels: this one, with `[style.pixels]`
     /// over it.
     pub fn for_pixels(&self) -> Self {
-        let p = &self.pixels;
+        self.with(&self.pixels, PIXELS_TEXT)
+    }
+
+    /// The look of text mode's match labels: this one, with
+    /// `[style.labels]` over it.
+    pub fn for_labels(&self) -> Self {
+        self.with(&self.labels, LABELS_TEXT)
+    }
+
+    /// This look with `p`'s fields over it, the letters in `text` unless
+    /// `p` sets them.
+    fn with(&self, p: &Look, text: Color) -> Self {
         Self {
             font: p.font.clone().unwrap_or_else(|| self.font.clone()),
             size: p.size.unwrap_or(self.size),
-            text: p.text.unwrap_or(self.text),
+            text: p.text.unwrap_or(text),
             dimmed: p.dimmed.unwrap_or(self.dimmed),
+            verb: p.verb.unwrap_or(self.verb),
             background: p.background.unwrap_or(self.background),
             border: p.border.unwrap_or(self.border),
             border_width: p.border_width.unwrap_or(self.border_width),
@@ -452,15 +460,22 @@ impl Style {
         self.leader.validate()
     }
 
-    /// The table as TOML, `[style.leader]` and `[style.pixels]` too, for
-    /// `wayhint config`.
+    /// The table as TOML, `[style.leader]`, `[style.pixels]` and
+    /// `[style.labels]` too, for `wayhint config`.
     pub fn render(&self) -> String {
         format!(
-            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
+            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}{}",
             self.render_table("style", "on the target"),
             self.case.name(),
             self.leader.render(self),
-            self.pixels.render(self),
+            self.pixels.render(
+                "[style.pixels]   # tags found in a window's pixels: guesses; unset fields are [style]'s",
+                &self.for_pixels(),
+            ),
+            self.labels.render(
+                "[style.labels]   # text mode's match labels, typed with Shift; unset fields are [style]'s",
+                &self.for_labels(),
+            ),
         )
     }
 
@@ -475,10 +490,11 @@ impl Style {
         let _ = writeln!(out, "size = {}", self.size);
         for (name, color, what) in [
             ("text", self.text, ""),
+            ("dimmed", self.dimmed, "   # typed letters, a placeholder"),
             (
-                "dimmed",
-                self.dimmed,
-                "   # typed letters, a verb's name, a placeholder",
+                "verb",
+                self.verb,
+                "   # an armed verb's key or name, and drop",
             ),
             ("background", self.background, ""),
             ("border", self.border, ""),
@@ -815,6 +831,8 @@ mod tests {
         let pixels = bordered.for_pixels();
         assert_eq!((pixels.border.r, pixels.border_width), (0xff, 2.0));
         assert_eq!(pixels.size, 17.0);
+        assert_eq!(pixels.text, PIXELS_TEXT, "still teal with the border set");
+        assert_eq!(bordered.for_labels().text, LABELS_TEXT, "labels in mauve");
     }
 
     #[test]

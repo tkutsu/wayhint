@@ -87,10 +87,23 @@ pub struct Tag {
     pub text: String,
     /// How many leading letters are already typed (drawn dimmed).
     pub typed: usize,
+    /// How many of those name the armed verb (drawn in its colour).
+    pub verb: usize,
     /// The click point; absent for a box. Placement never changes it.
     pub target: Option<Point>,
-    /// Found in its window's pixels: drawn in `[style.pixels]`.
-    pub pixels: bool,
+    pub kind: Kind,
+}
+
+/// Which look a tag is drawn in.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `[style]`.
+    #[default]
+    Plain,
+    /// Found in its window's pixels: `[style.pixels]`.
+    Pixels,
+    /// Text mode's match label: `[style.labels]`.
+    Label,
 }
 
 /// A rasterized letter: where it sits relative to the pen, and its pixels.
@@ -100,11 +113,13 @@ struct Glyph {
     pixmap: Option<Pixmap>,
 }
 
-/// One line of a box: `text` in `color`, its first `dimmed` characters in
-/// the box's dimmed colour, starting `indent` px in. A message's lines
-/// start past its icon, which its first line has.
+/// One line of a box: `text` in `color`, its first `verb` characters in
+/// the box's verb colour and the rest of its first `dimmed` in its dimmed
+/// colour, starting `indent` px in. A message's lines start past its icon,
+/// which its first line has.
 struct Row {
     text: String,
+    verb: usize,
     dimmed: usize,
     color: Color,
     indent: f32,
@@ -117,6 +132,8 @@ pub struct Painter {
     tags: TextPainter,
     /// Tags found in pixels: `[style.pixels]`.
     pixels: TextPainter,
+    /// Text mode's match labels: `[style.labels]`.
+    labels: TextPainter,
     input: TextPainter,
     /// The messages' icons: `[info] icon_font`, at the input box's size.
     icons: TextPainter,
@@ -151,6 +168,7 @@ impl Painter {
         Ok(Self {
             tags: TextPainter::new(style, scale)?,
             pixels: TextPainter::new(&style.for_pixels(), scale)?,
+            labels: TextPainter::new(&style.for_labels(), scale)?,
             input: TextPainter::new(input, scale)?,
             icons: TextPainter::new(&icons, scale)?,
             marks: *marks,
@@ -162,10 +180,14 @@ impl Painter {
         })
     }
 
-    /// The font and look `tag` is drawn in: `[style]`, or `[style.pixels]`
-    /// for a tag found in pixels.
+    /// The font and look `tag` is drawn in: `[style]`, `[style.pixels]`
+    /// or `[style.labels]`, by its kind.
     const fn look(&self, tag: &Tag) -> &TextPainter {
-        if tag.pixels { &self.pixels } else { &self.tags }
+        match tag.kind {
+            Kind::Plain => &self.tags,
+            Kind::Pixels => &self.pixels,
+            Kind::Label => &self.labels,
+        }
     }
 
     /// A fresh scan invalidates placement; typing keeps the same positions.
@@ -278,10 +300,10 @@ impl Painter {
         }
         paint_layer(pixmap, &lines, self.scale);
         for tag in &tags.tags {
-            let look = if tag.pixels {
-                &mut self.pixels
-            } else {
-                &mut self.tags
+            let look = match tag.kind {
+                Kind::Plain => &mut self.tags,
+                Kind::Pixels => &mut self.pixels,
+                Kind::Label => &mut self.labels,
             };
             look.paint_tag(pixmap, tag, area);
         }
@@ -318,7 +340,7 @@ impl Painter {
         let mut typed = 0.0;
         if let Some((line, dimmed)) = frame.status.line() {
             typed = text.width(&line);
-            rows.push(text.row(&line, dimmed));
+            rows.push(text.row(&line, frame.status.verb_len(), dimmed));
         }
         if let Some(Message {
             kind,
@@ -338,6 +360,7 @@ impl Painter {
             };
             rows.extend(lines.into_iter().enumerate().map(|(i, line)| Row {
                 text: line,
+                verb: 0,
                 dimmed: 0,
                 color: badge.color,
                 indent,
@@ -504,7 +527,7 @@ impl TextPainter {
 
     /// A tag's box size: its text plus padding on every side.
     fn size(&self, text: &str) -> (f32, f32) {
-        self.size_of(&[self.row(text, 0)])
+        self.size_of(&[self.row(text, 0, 0)])
     }
 
     /// A box's size: its widest row and every row's height, plus padding
@@ -532,10 +555,12 @@ impl TextPainter {
     }
 
     /// A row of `text` in the text colour, its first `typed` letters
-    /// dimmed: a tag, or what's typed in the input box.
-    fn row(&self, text: &str, typed: usize) -> Row {
+    /// dimmed, the first `verb` of those in the verb colour: a tag, or
+    /// what's typed in the input box.
+    fn row(&self, text: &str, verb: usize, typed: usize) -> Row {
         Row {
             text: text.to_owned(),
+            verb,
             dimmed: typed,
             color: self.style.text,
             indent: 0.0,
@@ -544,7 +569,7 @@ impl TextPainter {
     }
 
     fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
-        let row = self.row(&tag.text, tag.typed);
+        let row = self.row(&tag.text, tag.verb, tag.typed);
         let size = self.size_of(std::slice::from_ref(&row));
         if let Some(rect) = place(tag.at, tag.position, size, area) {
             self.draw(pixmap, rect, &[row], None);
@@ -578,7 +603,8 @@ impl TextPainter {
             scaled,
         );
         let [pad_y, pad_x] = style.padding;
-        let (dimmed, columns, gap) = (style.dimmed, self.columns(rows), self.gap());
+        let (verb, dimmed) = (style.verb, style.dimmed);
+        let (columns, gap) = (self.columns(rows), self.gap());
         let mut top = rect.top() + pad_y;
         for row in rows {
             let left = rect.left() + pad_x;
@@ -594,7 +620,9 @@ impl TextPainter {
             for (i, cell) in row.text.split('\t').enumerate() {
                 let mut pen = start;
                 for letter in cell.chars() {
-                    let color = if index < row.dimmed {
+                    let color = if index < row.verb {
+                        verb
+                    } else if index < row.dimmed {
                         dimmed
                     } else {
                         row.color
@@ -939,7 +967,7 @@ background = "#ff00ff"
 font = "serif"
 size = 28
 text = "#00ff00"
-dimmed = "#00ffff"
+verb = "#00ffff"
 background = "#111111"
 border = "#ffff00"
 border_width = 2
@@ -996,7 +1024,7 @@ offset = [20, 20]
                 .pixels()
                 .iter()
                 .any(|p| p.green() > 200 && p.blue() > 200 && p.red() < 30),
-            "dimmed verb colour"
+            "the verb's colour"
         );
         frame.status = Status::default();
         painter.paint(&mut pixmap, &frame);
@@ -1125,7 +1153,8 @@ offset = [20, 20]
                 text: "AB".into(),
                 typed: 0,
                 target: None,
-                pixels: false,
+                verb: 0,
+                kind: Kind::Plain,
             }],
             highlights: vec![Highlight {
                 rect: BoxRect::new(20, 100, 40, 20),
@@ -1372,26 +1401,74 @@ offset = [20, 20]
     }
 
     #[test]
-    fn a_tag_found_in_pixels_has_its_own_look() {
+    fn tags_in_pixels_and_match_labels_have_their_own_looks() {
         let style = Style {
             text: Color::rgba(255, 0, 0, 255),
             background: Color::rgba(0, 0, 0, 255),
             position: Position::TopLeft,
             ..Style::default()
         };
-        let teal = style.for_pixels().text;
+        let (teal, mauve) = (style.for_pixels().text, style.for_labels().text);
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
-        let tag = |x, pixels| Tag {
+        let tag = |x, kind| Tag {
             at: Point::new(x, 20),
             position: Position::TopLeft,
             text: "WW".into(),
             typed: 0,
+            verb: 0,
             target: None,
-            pixels,
+            kind,
         };
         let frame = Frame {
-            tags: vec![tag(20, false), tag(120, true)],
+            tags: vec![
+                tag(20, Kind::Plain),
+                tag(120, Kind::Pixels),
+                tag(220, Kind::Label),
+            ],
+            ..Frame::default()
+        };
+        let mut pixmap = Pixmap::new(300, 60).unwrap();
+        painter.paint(&mut pixmap, &frame);
+        let is = |c: Color| {
+            move |p: PremultipliedColorU8| (p.red(), p.green(), p.blue()) == (c.r, c.g, c.b)
+        };
+        let red = bounds(&pixmap, is(style.text));
+        let pixels = bounds(&pixmap, is(teal));
+        let labels = bounds(&pixmap, is(mauve));
+        assert!(red[2] <= 100, "[style] letters only on the first: {red:?}");
+        assert!(
+            (120..200).contains(&pixels[0]) && pixels[2] <= 200,
+            "teal letters only on the second: {pixels:?}"
+        );
+        assert!(
+            labels[0] >= 220,
+            "mauve letters only on the third: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_verb_in_front_of_the_letters_has_its_own_colour() {
+        let style = Style {
+            text: Color::rgba(255, 0, 0, 255),
+            dimmed: Color::rgba(0, 0, 255, 255),
+            background: Color::rgba(0, 0, 0, 255),
+            position: Position::TopLeft,
+            ..Style::default()
+        };
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
+        // `,` armed, `W` typed, `M` still to type.
+        let frame = Frame {
+            tags: vec![Tag {
+                at: Point::new(20, 20),
+                position: Position::TopLeft,
+                text: ",WM".into(),
+                typed: 2,
+                verb: 1,
+                target: None,
+                kind: Kind::Plain,
+            }],
             ..Frame::default()
         };
         let mut pixmap = Pixmap::new(200, 60).unwrap();
@@ -1399,12 +1476,13 @@ offset = [20, 20]
         let is = |c: Color| {
             move |p: PremultipliedColorU8| (p.red(), p.green(), p.blue()) == (c.r, c.g, c.b)
         };
-        let red = bounds(&pixmap, is(style.text));
-        let pixels = bounds(&pixmap, is(teal));
-        assert!(red[2] <= 100, "[style] letters only on the first: {red:?}");
+        let verb = bounds(&pixmap, is(style.verb));
+        let dimmed = bounds(&pixmap, is(style.dimmed));
+        let text = bounds(&pixmap, is(style.text));
+        assert!(verb[2] <= dimmed[0], "the verb first: {verb:?} {dimmed:?}");
         assert!(
-            pixels[0] >= 120,
-            "teal letters only on the second: {pixels:?}"
+            dimmed[2] <= text[0],
+            "then the typed letter: {dimmed:?} {text:?}"
         );
     }
 
@@ -1472,7 +1550,8 @@ offset = [20, 20]
                 text: "AA".into(),
                 typed: 0,
                 target: None,
-                pixels: false,
+                verb: 0,
+                kind: Kind::Plain,
             }],
             dots: vec![Dot {
                 from: Point::new(100, 80),
@@ -1604,7 +1683,8 @@ mod collision_tests {
                 position: Position::BottomRight,
                 text: text.into(),
                 typed: 0,
-                pixels: false,
+                verb: 0,
+                kind: Kind::Plain,
             })
             .collect(),
             dots: vec![],
@@ -1768,7 +1848,12 @@ mod capture_replay {
                 position: config.style.position,
                 target: Some(target.hit.offset(shift)),
                 typed: 0,
-                pixels: target.in_pixels(),
+                verb: 0,
+                kind: if target.in_pixels() {
+                    Kind::Pixels
+                } else {
+                    Kind::Plain
+                },
                 text: label
                     .iter()
                     .map(|&i| config.style.case.of(config.alphabet.letters()[i].label))

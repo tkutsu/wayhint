@@ -89,6 +89,7 @@ struct FileInput {
     text: Option<Color>,
     #[serde(alias = "matched")]
     dimmed: Option<Color>,
+    verb: Option<Color>,
     background: Option<Color>,
     border: Option<Color>,
     border_width: Option<f32>,
@@ -108,6 +109,7 @@ impl FileInput {
             size: self.size.unwrap_or(base.style.size),
             text: self.text.unwrap_or(base.style.text),
             dimmed: self.dimmed.unwrap_or(base.style.dimmed),
+            verb: self.verb.unwrap_or(base.style.verb),
             background: self.background.unwrap_or(base.style.background),
             border: self.border.unwrap_or(base.style.border),
             border_width: self.border_width.unwrap_or(base.style.border_width),

@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     geometry::{Point, Rect},
     keys::{Key, KeyCode},
-    overlay::{Event, Frame, Overlay, Tag},
+    overlay::{Event, Frame, Kind, Overlay, Tag},
     search::{self, Chosen},
     selection::{Input, Selector, Step},
     snapshot::{Snapshot, Target},
@@ -508,7 +508,10 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
                 (skip, dimmed)
             };
             let text = prefix.chars().chain(label[skip..].iter().map(letter));
-            tag(target, text.collect(), dimmed, config)
+            Tag {
+                verb: prefix.chars().count(),
+                ..tag(target, text.collect(), dimmed, config)
+            }
         })
         .collect();
     let info = match said {
@@ -541,12 +544,17 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
         },
         text,
         typed,
-        pixels: target.in_pixels(),
+        verb: 0,
+        kind: if target.in_pixels() {
+            Kind::Pixels
+        } else {
+            Kind::Plain
+        },
     }
 }
 
-/// A tag on the box `shown`, for the point `hit`, placed as a target's
-/// is: text mode's labels on its matches.
+/// A label on the box `shown`, for the point `hit`, placed as a target's
+/// tag is: text mode's labels on its matches, in `[style.labels]`.
 pub fn tag_on(shown: Rect, hit: Point, text: String, typed: usize, config: &Config) -> Tag {
     Tag {
         at: spot_on(shown, config),
@@ -554,7 +562,8 @@ pub fn tag_on(shown: Rect, hit: Point, text: String, typed: usize, config: &Conf
         position: config.style.position,
         text,
         typed,
-        pixels: false,
+        verb: 0,
+        kind: Kind::Label,
     }
 }
 
@@ -965,7 +974,7 @@ mod tests {
             frame(&selector, &config, &scene, &Said::Nothing)
                 .tags
                 .into_iter()
-                .map(|t| (t.text, t.pixels))
+                .map(|t| (t.text, t.kind == Kind::Pixels))
                 .collect::<Vec<_>>()
         };
         let pair = |a: &str, b: &str| [(a.to_owned(), false), (b.to_owned(), true)];
@@ -995,8 +1004,9 @@ mod tests {
         assert_eq!(frame.tags[0].position, Position::Center);
         assert_eq!(frame.tags[0].at, Point::new(157, 246));
         assert_eq!(frame.tags[0].target, Some(Point::new(157, 246)));
-        assert!(
-            frame.tags[0].pixels,
+        assert_eq!(
+            frame.tags[0].kind,
+            Kind::Pixels,
             "keep the existing terminal hint style"
         );
         assert_eq!(frame.tags[1].position, Position::TopLeft);

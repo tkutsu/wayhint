@@ -65,7 +65,7 @@ use self::{
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 pub use self::{
-    draw::{Dot, Frame, Highlight, Tag},
+    draw::{Dot, Frame, Highlight, Kind, Tag},
     font::load as load_font,
 };
 use crate::{
