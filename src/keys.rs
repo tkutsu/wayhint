@@ -48,7 +48,8 @@ impl KeyCode {
         Self(code)
     }
 
-    /// Whether this is one of the four arrows, which nudge and repeat.
+    /// Whether this is one of the four arrows, which move the pointer and
+    /// repeat.
     pub const fn is_arrow(self) -> bool {
         matches!(self, Self::UP | Self::DOWN | Self::LEFT | Self::RIGHT)
     }

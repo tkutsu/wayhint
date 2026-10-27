@@ -435,8 +435,7 @@ struct FilePointer {
     settle: Option<u16>,
 }
 
-/// How far one arrow press moves the pointer or a command, in px, unless
-/// the file says.
+/// How far one arrow press moves the pointer, in px, unless the file says.
 const NUDGE: u16 = 10;
 /// How many wheel notches a scroll turns, unless the file says: about half
 /// a page in most apps.
@@ -449,13 +448,17 @@ const SETTLE: u16 = 150;
 const SETTLE_MAX: u16 = 2000;
 
 /// Where the cursor goes after a click: `[pointer] after`.
+///
+/// `Leave` by default: the arrows, a hover and a hold's drag all put the
+/// cursor somewhere on purpose, and putting it back would undo them.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum After {
-    /// Back where it was, so the mouse is where you left it.
-    #[default]
+    /// Back where it was before wayhint moved it, so the mouse is where
+    /// you left it.
     Restore,
-    /// On the target, for focus-follows-mouse setups.
+    /// Where wayhint put it: on the target, or where the arrows took it.
+    #[default]
     Leave,
 }
 
@@ -532,7 +535,7 @@ pub struct Config {
     /// `[text] hints`.
     pub text_hints: bool,
     pub after: After,
-    /// Px one arrow press moves the pointer or a command: `[pointer] nudge`.
+    /// Px one arrow press moves the pointer: `[pointer] nudge`.
     pub nudge: i32,
     /// Wheel notches one scroll turns: `[pointer] scroll`.
     pub scroll: u16,
@@ -778,7 +781,7 @@ impl Verbs {
         for (key, what) in [
             ("Space", "at the pointer"),
             ("Enter", "confirm a completed tag or text match"),
-            ("arrows", "move the pointer, or after a key the click"),
+            ("arrows", "move the pointer"),
             ("Backspace", "take back a key"),
         ] {
             if keys::named(key) == Some(self.close.0.code) {
@@ -801,11 +804,9 @@ impl Verbs {
         for (key, what) in [
             ("tag", "a control with no text"),
             ("Shift+label", "pick that match"),
-            (
-                "Tab, arrows",
-                "the next match; with nothing typed, move the pointer",
-            ),
-            ("Enter", "with nothing typed, at the pointer"),
+            ("Tab", "the next match, the pointer with it"),
+            ("arrows", "move the pointer from the match"),
+            ("Enter", "where the pointer is, even with nothing typed"),
             ("Backspace", "take back a key"),
         ] {
             lines.push(format!("{key}\t{what}"));
@@ -1186,15 +1187,15 @@ impl Config {
         out.push_str(&self.marks.render());
         let after = match self.after {
             After::Restore => {
-                "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
+                "\"restore\"   # the cursor goes back; \"leave\" keeps it where wayhint put it"
             }
             After::Leave => {
-                "\"leave\"   # the cursor stays on the target; \"restore\" puts it back"
+                "\"leave\"   # the cursor stays where wayhint put it; \"restore\" puts it back"
             }
         };
         let _ = write!(
             out,
-            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves the pointer or a click; held, it goes on, faster\n",
+            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves the pointer; held, it goes on, faster\n",
             self.nudge
         );
         let _ = writeln!(
@@ -1453,7 +1454,7 @@ mod tests {
         assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Right));
         assert_eq!(config.verbs.action_of(key(51, true)), None, "< isn't ,");
         assert_eq!(labels(&config), "asdfghjkl", "nothing left out");
-        assert_eq!(config.after, After::Restore);
+        assert_eq!(config.after, After::Leave, "the arrows' moves stay");
     }
 
     #[test]

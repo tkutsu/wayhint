@@ -69,8 +69,9 @@ const RECHECK_TIMEOUT: Duration = Duration::from_millis(300);
 /// frame, and a shell has a handful.
 const FRAMES_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// How long a window's picture may take, connecting included: the
-/// spike's took 6 to 12 ms.
+/// How long a scan's pictures may take, all of them and connecting
+/// included: the spike's took 6 to 12 ms each. Shared, so windows with no
+/// tree can't each add their own wait before `Esc` is read.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long reading text for text mode may take, every window together.
@@ -305,6 +306,7 @@ impl Desktop {
             self.read(w).await
         });
         let reads = self.runtime.block_on(future::join_all(reads));
+        let until = Instant::now() + CAPTURE_TIMEOUT;
         let mut seen = Vec::new();
         // `anyhow!` copies the text into the error: `Error::msg` takes it
         // as it is, and an error can't hold a borrowed `&String`.
@@ -319,7 +321,7 @@ impl Desktop {
         for (window, read) in readable.into_iter().zip(reads) {
             if is_terminal(window, terminals) {
                 if terminal_hint {
-                    match read_terminal(&mut self.camera, window, pixels) {
+                    match read_terminal(&mut self.camera, window, pixels, until) {
                         Ok(terminal) => seen.push(terminal),
                         Err(e) => failed.push(Unread::new(window, e)),
                     }
@@ -334,7 +336,7 @@ impl Desktop {
                 }
                 (Err(e), None) => failed.push(Unread::new(window, e)),
                 (Err(no_tree), Some(detector)) => {
-                    match look(&mut self.camera, window, detector, false) {
+                    match look(&mut self.camera, window, detector, false, until) {
                         Ok((found, picture, stats)) => {
                             seen.push(Seen::Pixels(window.clone(), found, Some(picture), stats));
                         }
@@ -971,6 +973,7 @@ fn read_terminal(
     camera: &mut Option<Camera>,
     window: &Window,
     pixels: Option<Detector>,
+    until: Instant,
 ) -> Result<Seen> {
     let (found, picture, stats) = if is_kitty(window) {
         let (found, stats) = terminal_cursor(window)?;
@@ -981,7 +984,7 @@ fn read_terminal(
             "only Kitty supplies a layer's terminal cursor"
         );
         if let Some(detector) = pixels {
-            let (found, picture, stats) = look(camera, window, detector, true)?;
+            let (found, picture, stats) = look(camera, window, detector, true, until)?;
             (found, Some(picture), stats)
         } else {
             let patch = pixels::terminal_patch(window.rect.w, window.rect.h);
@@ -1001,10 +1004,11 @@ fn read_terminal(
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
 pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) -> Result<Snapshot> {
     let terminal = is_terminal(window, terminals);
+    let until = Instant::now() + CAPTURE_TIMEOUT;
     let seen = if terminal {
-        read_terminal(&mut None, window, Some(detector))?
+        read_terminal(&mut None, window, Some(detector), until)?
     } else {
-        let (found, picture, stats) = look(&mut None, window, detector, false)?;
+        let (found, picture, stats) = look(&mut None, window, detector, false, until)?;
         Seen::Pixels(window.clone(), found, Some(picture), stats)
     };
     let mut snapshot = Snapshot::build(1, window.monitor, [seen.read()]);
@@ -1016,17 +1020,17 @@ pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) ->
     Ok(snapshot)
 }
 
-/// Takes a picture of `window` and finds its tags, with the `camera`
-/// made on first use. Also returns the picture, shrunk, with its pixels
-/// per logical pixel, and what it cost.
+/// Takes a picture of `window` by `until` and finds its tags, with the
+/// `camera` made on first use. Also returns the picture, shrunk, with its
+/// pixels per logical pixel, and what it cost.
 fn look(
     camera: &mut Option<Camera>,
     window: &Window,
     detector: Detector,
     terminal: bool,
+    until: Instant,
 ) -> Result<(Found, (Frame, f64), Stats)> {
     let start = Instant::now();
-    let until = start + CAPTURE_TIMEOUT;
     let camera = match camera {
         Some(camera) => camera,
         empty => empty.insert(Camera::connect(until)?),
@@ -1089,7 +1093,7 @@ mod tests {
         let mut window = window("test", Rect::new(100, 50, 800, 600));
         window.class = "foot".into();
         let mut camera = None;
-        let seen = read_terminal(&mut camera, &window, None).unwrap();
+        let seen = read_terminal(&mut camera, &window, None, Instant::now()).unwrap();
         let snapshot = Snapshot::build(1, 0, [seen.read()]);
         assert!(camera.is_none());
         assert_eq!(snapshot.targets.len(), 1);

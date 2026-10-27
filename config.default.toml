@@ -59,8 +59,8 @@
 
 # Built in, unless chosen as the close key: Backspace takes back the last
 # key, Space acts at the pointer, Enter confirms a completed tag or text
-# match, Tab works in text mode, and the arrows move the pointer before any
-# other key, then where a click lands, held for faster.
+# match, Tab works in text mode, and the arrows move the pointer, held for
+# faster: Space or a verb typed twice acts where it is.
 
 # Other keys that type a tag letter, for a layer that sends a different
 # character from the same key: "key" = "letter".
@@ -90,8 +90,8 @@
 # case = "upper"            # the tags' letters: upper or lower; the keys are the same
 
 [style.leader]
-# The line from a tag to the dot where it clicks: shown when an arrow moves
-# a click, or when a tag had to move off its target to stay readable. Each
+# The line from a tag to the dot where it clicks: shown when a tag had to
+# move off its target to stay readable. Each
 # is drawn inside an outline, so it shows on light and dark windows alike.
 # Unset colours follow the tags: the line and dot take [style] text, the
 # outline takes [style] background.
@@ -166,12 +166,14 @@
 # Text mode is what `wayhint` runs; `wayhint --hints` runs tags alone, on a
 # compositor shortcut of its own, and launching one closes the other.
 # Typing finds text on screen from the start of a word, in any case. Enter
-# acts on the current match, Tab and the arrows move between matches, and
-# Shift on a tag letter picks the match with that label. Targets with no
+# acts on the current match, Tab and Shift+Tab move between matches, and
+# Shift on a tag letter picks the match with that label. The pointer goes
+# to the current match, the arrows move it from there, and Enter clicks
+# where it is; another match takes it again. Targets with no
 # text to type keep a tag. A verb goes first, before the text, and
-# Backspace with nothing typed takes it back. With nothing typed, the
-# arrows move the pointer, Enter acts there and the help key lists the
-# keys. The close key leaves wayhint.
+# Backspace with nothing typed takes it back. With nothing typed, Enter
+# acts at the pointer and the help key lists the keys. The close key
+# leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.
@@ -197,8 +199,8 @@
 
 
 [pointer]
-# after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
-# nudge = 10                # px one arrow press moves the pointer or a click; held, it goes on, faster
+# after = "leave"           # the cursor stays where wayhint put it; "restore" puts it back after a click, undoing the arrows
+# nudge = 10                # px one arrow press moves the pointer; held, it goes on, faster
 # scroll = 5                # wheel notches one scroll_up or scroll_down turns
 # settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
 
