@@ -162,13 +162,15 @@
 
 
 [text]
-# Text mode is a run of its own, `wayhint --text`, on a compositor shortcut
-# beside plain `wayhint` for tags; launching one closes the other.
-# Typing finds text on screen from the start of a word, Enter acts on the
-# current match, Tab and the arrows move between matches (with nothing
-# typed, the arrows move the pointer). Targets with no
+# Text mode is what `wayhint` runs; `wayhint --hints` runs tags alone, on a
+# compositor shortcut of its own, and launching one closes the other.
+# Typing finds text on screen from the start of a word, in any case. Enter
+# acts on the current match, Tab and the arrows move between matches, and
+# Shift on a tag letter picks the match with that label. Targets with no
 # text to type keep a tag. A verb goes first, before the text, and
-# Backspace with nothing typed takes it back; the close key leaves wayhint.
+# Backspace with nothing typed takes it back. With nothing typed, the
+# arrows move the pointer, Enter acts there and the help key lists the
+# keys. The close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
 # Start uses the first visible line's left edge; end uses the last visible
 # line's rightmost pixel. Center uses the middle of the first visible line.

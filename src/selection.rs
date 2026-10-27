@@ -92,7 +92,22 @@ pub fn free_labels(count: usize, size: usize, free: &dyn Fn(&[usize]) -> bool) -
 /// while a shorter one is free, as stable beats short. One more target
 /// splits one label into `size`, so all but one keep theirs.
 pub fn relabel(kept: &[Option<&[usize]>], size: usize) -> Vec<Vec<usize>> {
-    let all = all_labels(kept.len(), size);
+    claim(&all_labels(kept.len(), size), kept)
+}
+
+/// As [`relabel`], for labels that share the keys with text: chosen from
+/// those [`free_labels`] gives `kept.len()` targets, so every one is free.
+pub fn relabel_free(
+    kept: &[Option<&[usize]>],
+    size: usize,
+    free: &dyn Fn(&[usize]) -> bool,
+) -> Vec<Vec<usize>> {
+    claim(&free_labels(kept.len(), size, free), kept)
+}
+
+/// A label from `all` for each target: the one `kept` names if it's there
+/// and no target before took it, else the first still free.
+fn claim(all: &[Vec<usize>], kept: &[Option<&[usize]>]) -> Vec<Vec<usize>> {
     let index: HashMap<&[usize], usize> = all
         .iter()
         .enumerate()
@@ -887,6 +902,16 @@ mod tests {
             "the new one takes the first free label"
         );
         assert_eq!(relabelled(&[Some("f"), None]), ["f", "a"]);
+    }
+
+    #[test]
+    fn a_free_label_found_again_stays_and_a_taken_one_goes() {
+        // `a` starts a word now: the target that had it takes a free one.
+        let free = |label: &[usize]| label != [0];
+        let kept: [Option<&[usize]>; 3] = [Some(&[0]), None, Some(&[3])];
+        assert_eq!(relabel_free(&kept, 4, &free), [vec![1], vec![2], vec![3]]);
+        let none = [None, None];
+        assert_eq!(relabel_free(&none, 4, &free), free_labels(2, 4, &free));
     }
 
     #[test]

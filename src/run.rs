@@ -39,10 +39,10 @@
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
 //!
-//! A run is in one mode. `--text` makes it text mode, every round: the
-//! tags of targets whose text can be typed go, and typing searches the
-//! windows' text instead (`search.rs`); the other tags stay, typed as
-//! before. `Enter` acts on the current match as on a tag, after its text
+//! A run is in one mode: text mode, unless `--hints` asks for tags alone.
+//! In text mode, every round, the tags of targets whose text can be typed
+//! go, and typing searches the windows' text instead (`search.rs`); the
+//! other tags stay, typed as before. `Enter` acts on the current match as on a tag, after its text
 //! is read again and found unchanged, and the close key ends the run. The
 //! compositor's shortcuts switch modes: launching one stops a run in the
 //! other (`toggle.rs`).
@@ -129,8 +129,8 @@ enum Done {
     Refused,
 }
 
-/// The run: `start` says how its picks start (`--verb` the first,
-/// `--text` every one); static mode never scans again.
+/// The run: `start` says how its picks start (`--verb` the first, text
+/// mode or `--hints` every one); static mode never scans again.
 pub fn run(
     mut config: Config,
     once: bool,
@@ -213,8 +213,8 @@ impl Session {
             )?;
 
             // `take` hands `--verb` to the first pick only, so later
-            // rounds start with the default action again; `--text` keeps
-            // every round in text mode. `snapshot` is what the pick ends
+            // rounds start with the default action again; the mode is
+            // every round's. `snapshot` is what the pick ends
             // in: the last scan, or a block opened in it.
             let mut snapshot = scans.latest.clone();
             let first = Start {

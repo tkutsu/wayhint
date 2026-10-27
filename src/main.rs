@@ -86,11 +86,11 @@ fn dispatch(cli: &Cli) -> Result<()> {
         Config::load(cli.config.as_deref(), &layout)
     };
     match &cli.command {
-        None => match toggle::start_or_stop(cli.text)? {
+        None => match toggle::start_or_stop(!cli.hints)? {
             Some(socket) => {
                 let start = pick::Start {
                     verb: cli.verb,
-                    text: cli.text,
+                    text: !cli.hints,
                     holding: false,
                 };
                 run::run(config()?, cli.once, cli.static_mode, start, socket)

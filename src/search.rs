@@ -1,15 +1,20 @@
-//! Text mode, a run of its own (`--text`): typing finds text on screen,
-//! and Enter acts on the current match. The glue between `overlay` (keys and pixels), `text`
-//! (what the keys find) and the apps ([`Source`]), as `pick` is for tags.
+//! Text mode, what `wayhint` runs (`--hints` runs tags alone): typing
+//! finds text on screen, and Enter acts on the current match. The glue
+//! between `overlay` (keys and pixels), `text` (what the keys find) and the
+//! apps ([`Source`]), as `pick` is for tags.
 //!
 //! ```text
-//! --text -> text read once -> keys: query edits, arrows
+//! wayhint -> text read -> keys: query edits, arrows
 //!                                |
-//!                 an arrow with nothing typed or armed: moves the pointer
+//!                 nothing typed or armed: an arrow moves the pointer,
+//!                   Enter acts there, the help key lists the keys, and
+//!                   the windows are scanned again every [scan] refresh
 //!                 Backspace with nothing typed: takes back a verb
-//!                 close key: leave wayhint
-//!                 a verb key before any text, or a named one any time: armed
+//!                 close key: leave wayhint, or let go of a hold
+//!                 a verb key before any text (a capital or a symbol), or
+//!                   a named one any time: armed
 //!                 Enter: the armed verb (or the default) on the current match
+//!                 Shift on a match's label: that match, as Enter
 //!                 one match left (with [text] auto_accept): as Enter
 //!                 a whole tag typed (with [text] hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
@@ -21,12 +26,20 @@
 //! label is never a query, and what's typed is both until one of them
 //! wins ([`Hints`]).
 //!
-//! The text is read once, as text mode starts. Where a match is, the app is
-//! asked only for matches it wasn't asked about before, and only once the
-//! keys typed so far are all in. Nothing is scanned again while text mode
-//! is up; the match is checked again before acting on it (see `run.rs`).
+//! Two matches or more get labels of their own, typed with Shift on the
+//! tag letters: case means nothing to the search, so a capital is free to
+//! pick with. They go in reading order, and change as the query does.
+//!
+//! The text is read as text mode starts, and again whenever a refresh
+//! finds the windows changed while nothing is typed: the first key freezes
+//! what was read. Where a match is, the app is asked only for matches it
+//! wasn't asked about before, and only once the keys typed so far are all
+//! in. The match is checked again before acting on it (see `run.rs`).
 
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, bail};
 
@@ -38,7 +51,7 @@ use crate::{
     keys::KeyCode,
     overlay::{Event, Frame, Highlight, Overlay, Tag},
     pick::{self, Mouse, Pick, Source},
-    selection::{self, Selector, Step, free_labels},
+    selection::{self, Selector, Step, relabel_free},
     snapshot::{Snapshot, Target},
     status::{Message, Status},
     style::{Input, Notice},
@@ -88,6 +101,17 @@ impl Hints {
     /// Tags for `shown`'s targets that no text of `search` is on, in
     /// labels no word of it starts with. None without `[text] hints`.
     fn new(search: &Search, shown: &Snapshot, config: &Config) -> Self {
+        Self::keeping(search, shown, config, &|_| None)
+    }
+
+    /// The same, where a target `kept` names a label for keeps it if it
+    /// can (see `selection::relabel_free`): a refresh moves no tag.
+    fn keeping(
+        search: &Search,
+        shown: &Snapshot,
+        config: &Config,
+        kept: &dyn Fn(usize) -> Option<Vec<usize>>,
+    ) -> Self {
         if !config.text_hints {
             return Self(Vec::new());
         }
@@ -110,7 +134,9 @@ impl Hints {
             })
             .collect();
         let free = |label: &[usize]| !search.starts_a_word(&spell(label, config));
-        let labels = free_labels(untyped.len(), config.alphabet.len(), &free);
+        let before: Vec<Option<Vec<usize>>> = untyped.iter().map(|&i| kept(i)).collect();
+        let before: Vec<Option<&[usize]>> = before.iter().map(Option::as_deref).collect();
+        let labels = relabel_free(&before, config.alphabet.len(), &free);
         Self(untyped.into_iter().zip(labels).collect())
     }
 
@@ -174,16 +200,157 @@ impl Hints {
     }
 }
 
+/// The matches' labels, in their order: none for fewer than two, which
+/// Enter tells apart alone.
+fn match_labels(search: &Search, config: &Config) -> Vec<Vec<usize>> {
+    match search.matches().len() {
+        0 | 1 => Vec::new(),
+        count => selection::labels(count, config.alphabet.len()),
+    }
+}
+
+/// The matches' labels still open after `picking`, in capitals, since
+/// Shift types them, with what's typed of them dimmed.
+fn label_tags(search: &Search, picking: &[usize], config: &Config) -> Vec<Tag> {
+    let letters = config.alphabet.letters();
+    let typed: Vec<Option<usize>> = picking.iter().copied().map(Some).collect();
+    match_labels(search, config)
+        .iter()
+        .zip(search.matches())
+        .filter(|(label, _)| opens(label, &typed))
+        .map(|(label, found)| {
+            let text = label
+                .iter()
+                .flat_map(|&i| letters[i].label.to_uppercase())
+                .collect();
+            pick::tag_on(found.parts[0], found.point(), text, typed.len(), config)
+        })
+        .collect()
+}
+
+/// Text mode as it stands: what was read, typed and armed, and what the
+/// info line says.
+struct Typing {
+    search: Search,
+    hints: Hints,
+    /// The verb typed so far, on a copy: a block opened here starts its
+    /// lines' text mode from the pick's selector again.
+    command: Selector,
+    /// For each character of the query, the tag letter its key is, if any.
+    pressed: Vec<Option<usize>>,
+    /// The tag letters typed with Shift so far: a match's label.
+    picking: Vec<usize>,
+    /// The query changed since the matches were found.
+    stale: bool,
+    /// What was typed that matched nothing, and until when it's named.
+    missed: Option<(String, Instant)>,
+    /// The help key has every key listed under the input box.
+    help: bool,
+    /// A hold keeps a button down: the input box says `drop`.
+    holding: bool,
+}
+
+impl Typing {
+    /// Whether nothing is typed or armed: an arrow moves the pointer,
+    /// Enter acts there, and the windows are scanned again.
+    fn idle(&self) -> bool {
+        self.search.query().is_empty() && self.command.is_blank()
+    }
+
+    /// What text mode shows: [`frame`], with the tags on the targets with
+    /// no text and the labels on the matches.
+    fn draw(&self, shown: &Snapshot, config: &Config) -> Frame {
+        let info = if self.help {
+            Some(Message::new(Notice::Help, config.verbs.text_legend()))
+        } else {
+            let missed = self.missed.as_ref();
+            missed.map(|m| Message::new(Notice::NoMatch, m.0.clone()))
+        };
+        let mut tags = self.hints.tags(&self.pressed, shown, config);
+        if !self.stale {
+            tags.extend(label_tags(&self.search, &self.picking, config));
+        }
+        let verb = self.command.armed().map(Action::name);
+        let (search, input) = (Some(&self.search), &config.input);
+        Frame {
+            tags,
+            ..frame(search, self.stale, verb, self.holding, input, info)
+        }
+    }
+
+    /// Scans the windows again, and if they changed, reads their text
+    /// again and draws it, a target found again keeping its tag. Whether
+    /// they changed; `None` from a source that never does.
+    fn refresh(
+        &mut self,
+        overlay: &mut Overlay,
+        shown: &mut Snapshot,
+        source: &mut dyn Source,
+        config: &Config,
+    ) -> Result<Option<bool>> {
+        // What shows while a slow scan goes on: `scanning` under the box.
+        let busy = config.info.scanning.then(|| {
+            let mut busy = self.draw(shown, config);
+            busy.status.info = Some(pick::scanning());
+            busy
+        });
+        let mut slowed = false;
+        let fresh = source.rescan(&mut || {
+            if let Some(busy) = &busy {
+                slowed = overlay.update(busy).is_ok();
+            }
+        })?;
+        let Some(mut fresh) = fresh else {
+            return Ok(None);
+        };
+        fresh.merge_nearby(config.merge_distance);
+        let changed = fresh.targets != shown.targets
+            || fresh.obstacles != shown.obstacles
+            || fresh.texts != shown.texts;
+        if !changed {
+            if slowed {
+                overlay.update(&self.draw(shown, config))?;
+            }
+            return Ok(Some(false));
+        }
+        let survivors = fresh.survivors(shown);
+        let before: HashMap<usize, Vec<usize>> = self.hints.0.iter().cloned().collect();
+        *shown = fresh;
+        overlay.set_layout(shown);
+        self.search = Search::new(source.read_text(shown));
+        let kept = |i: usize| survivors[i].and_then(|was| before.get(&was).cloned());
+        let hints = Hints::keeping(&self.search, shown, config, &kept);
+        // A label now on another target: a key typed for the old one
+        // during the scan must not land there.
+        let moved = hints.0.iter().any(|(now, label)| {
+            before
+                .iter()
+                .any(|(was, old)| old == label && survivors[*now] != Some(*was))
+        });
+        self.hints = hints;
+        let frame = self.draw(shown, config);
+        if moved {
+            overlay.show(&frame)?;
+        } else {
+            overlay.update(&frame)?;
+        }
+        Ok(Some(true))
+    }
+}
+
 /// Text mode, until a match or a tag is chosen or the close key leaves.
 /// `selector` holds the verb from `--verb`, if any. A verb typed here
-/// comes first, before the text; a named verb key works at any point.
-/// Letters and digits in the active layout always go into the query.
+/// comes first, before the text: a capital or a symbol, or a named key at
+/// any point. Lower-case letters and digits always go into the query.
 /// Before any text or verb, an arrow moves the pointer, as it does with
-/// the tags, and a verb typed twice acts where it went.
+/// the tags, and a verb typed twice acts where it went. While a hold keeps
+/// a button down (`holding`), the close key lets go where it is. A refresh
+/// may change `shown`, which ends as the snapshot the pick was made in.
 pub fn search(
     overlay: &mut Overlay,
-    shown: &Snapshot,
+    shown: &mut Snapshot,
     selector: &Selector,
+    holding: bool,
     mouse: &mut dyn Mouse,
     source: &mut dyn Source,
     config: &Config,
@@ -192,7 +359,7 @@ pub fn search(
         desktop::warn(&format!("wayhint: no text mode: {e:#}"));
         return Ok(Pick::Leave);
     }
-    let result = keys(overlay, shown, selector, mouse, source, config);
+    let result = keys(overlay, shown, selector, holding, mouse, source, config);
     overlay.stop_typing();
     result
 }
@@ -201,37 +368,60 @@ pub fn search(
 #[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 fn keys(
     overlay: &mut Overlay,
-    shown: &Snapshot,
+    shown: &mut Snapshot,
     selector: &Selector,
+    holding: bool,
     mouse: &mut dyn Mouse,
     source: &mut dyn Source,
     config: &Config,
 ) -> Result<Pick> {
-    let (input, cursor) = (&config.input, config.text_cursor);
-    // The verb typed so far, on a copy: a block opened here starts its
-    // lines' text mode from `selector` again.
-    let mut command = selector.clone();
-    let verb = |command: &Selector| command.armed().map(Action::name);
+    let cursor = config.text_cursor;
     // Nothing shows while the text is read: no tag to type yet.
-    overlay.update(&frame(None, false, verb(&command), input, None))?;
-    let mut search = Search::new(source.read_text(shown));
-    let hints = Hints::new(&search, shown, config);
-    // For each character of the query, the tag letter its key is, if any.
-    let mut pressed: Vec<Option<usize>> = Vec::new();
-    let draw =
-        |search: &Search, pressed: &[_], command: &Selector, stale, missed: Option<&str>| Frame {
-            tags: hints.tags(pressed, shown, config),
-            ..frame(Some(search), stale, verb(command), input, missed)
-        };
-    overlay.update(&draw(&search, &pressed, &command, false, None))?;
-    // The query changed since the matches were found.
-    let mut stale = false;
-    // What was typed that matched nothing, and until when it's named.
-    let mut missed: Option<(String, Instant)> = None;
+    let verb = selector.armed().map(Action::name);
+    overlay.update(&frame(None, false, verb, holding, &config.input, None))?;
+    let search = Search::new(source.read_text(shown));
+    let mut now = Typing {
+        hints: Hints::new(&search, shown, config),
+        search,
+        command: selector.clone(),
+        pressed: Vec::new(),
+        picking: Vec::new(),
+        stale: false,
+        missed: None,
+        help: false,
+        holding,
+    };
+    overlay.update(&now.draw(shown, config))?;
+    // When the windows are next scanned again, as the tags' are, and
+    // further apart while nothing changes (see `pick::slower`).
+    let mut every = config.refresh;
+    let next = |every: Option<Duration>| every.map(|every| Instant::now() + every);
+    let mut due = next(every);
     loop {
-        let Some(event) = overlay.next_event(missed.as_ref().map(|m| m.1))? else {
-            missed = None;
-            overlay.update(&draw(&search, &pressed, &command, stale, None))?;
+        // Only while nothing is typed: a key freezes what was read.
+        let refresh = due.filter(|_| now.idle());
+        let wake = refresh
+            .into_iter()
+            .chain(now.missed.as_ref().map(|m| m.1))
+            .min();
+        let Some(event) = overlay.next_event(wake)? else {
+            let at = Instant::now();
+            if now.missed.as_ref().is_some_and(|m| m.1 <= at) {
+                now.missed = None;
+                overlay.update(&now.draw(shown, config))?;
+            }
+            if refresh.is_some_and(|due| due <= at) {
+                // A scan holds up the keys, so none while an arrow is
+                // held: the pointer would freeze mid-move.
+                if !overlay.holding() {
+                    every = match now.refresh(overlay, shown, source, config)? {
+                        None => None,
+                        Some(false) => every.map(pick::slower),
+                        Some(true) => config.refresh,
+                    };
+                }
+                due = next(every);
+            }
             continue;
         };
         let (key, mods, typed, ticks) = match event {
@@ -255,13 +445,12 @@ fn keys(
             Event::Workspace => return Ok(Pick::Rescan),
         };
         if config.verbs.is_close(key) {
-            return Ok(Pick::Leave);
+            return Ok(if holding { Pick::Release } else { Pick::Leave });
         }
         // Before any text or verb, an arrow moves the pointer, held for
         // faster; after, it goes through the matches, once a press.
         if let Some(by) = pick::arrow(key.code, ticks, config)
-            && search.query().is_empty()
-            && command.is_blank()
+            && now.idle()
         {
             mouse.move_by(by)?;
             continue;
@@ -269,30 +458,90 @@ fn keys(
         if ticks > 0 {
             continue;
         }
-        // A verb: a named key (PageDown) any time; a character only before
-        // any text, and only one that's no letter or digit (`,`), which
-        // costs just the searches that start with it. Typed twice, it's
-        // done again where the last command was.
-        if let Some(action) = config.verbs.action_of(key)
-            && (crate::keys::name_of(key.code).is_some()
-                || search.query().is_empty() && typed.is_some_and(|c| !c.is_alphanumeric()))
-        {
-            if let Step::Again(act) = command.press(selection::Input::Verb(action, mods)) {
-                return Ok(Pick::Again { act });
-            }
-            let said = missed.as_ref().map(|m| m.0.as_str());
-            overlay.update(&draw(&search, &pressed, &command, stale, said))?;
+        let letter = config.alphabet.index_of(key.code);
+        let action = config.verbs.action_of(key);
+        let help = config.verbs.is_help(key);
+        // A key that types nothing and means nothing here (a modifier on
+        // its own) leaves the info line as it is.
+        let built_in = key.code.is_arrow()
+            || matches!(key.code, KeyCode::BACKSPACE | KeyCode::ENTER | KeyCode::TAB);
+        if typed.is_none() && letter.is_none() && action.is_none() && !help && !built_in {
             continue;
         }
+        // The help key, with nothing typed, lists every key until the next.
+        if help && now.idle() {
+            now.help = !now.help;
+            overlay.update(&now.draw(shown, config))?;
+            continue;
+        }
+        now.help = false;
+        // A verb: a named key (PageDown) any time; a character only before
+        // any text, and only one that's no lower-case letter or digit (`,`,
+        // `A`), which costs just the searches that start with it. Typed
+        // twice, it's done again where the last command was.
+        if let Some(action) = action
+            && (crate::keys::name_of(key.code).is_some()
+                || now.search.query().is_empty()
+                    && typed.is_some_and(|c| c.is_uppercase() || !c.is_alphanumeric()))
+        {
+            if let Step::Again(act) = now.command.press(selection::Input::Verb(action, mods)) {
+                return Ok(Pick::Again { act });
+            }
+            overlay.update(&now.draw(shown, config))?;
+            continue;
+        }
+        // Shift on a tag letter picks a match by its label, once there are
+        // two or more to tell apart; with fewer, it's text.
+        if key.shift
+            && !mods.ctrl
+            && !mods.alt
+            && let Some(letter) = letter
+            && !now.search.query().is_empty()
+        {
+            if now.stale {
+                find(&mut now.search, shown, source);
+                now.stale = false;
+            }
+            let labels = match_labels(&now.search, config);
+            if !labels.is_empty() {
+                // After a whole label, a letter starts the next one.
+                let from = if labels.contains(&now.picking) {
+                    &[][..]
+                } else {
+                    now.picking.as_slice()
+                };
+                let picking = [from, &[letter]].concat();
+                let keys: Vec<Option<usize>> = picking.iter().copied().map(Some).collect();
+                if let Some(index) = labels.iter().position(|label| *label == picking) {
+                    now.search.select(index);
+                    if config.hint_auto_accept
+                        && let Some(chosen) =
+                            choose(&now.search, shown, now.command.act(mods), cursor)
+                    {
+                        return Ok(Pick::Text(Box::new(chosen)));
+                    }
+                    now.picking = picking;
+                } else if labels.iter().any(|label| opens(label, &keys)) {
+                    now.picking = picking;
+                }
+                // A letter no label goes on with is dropped.
+                overlay.update(&now.draw(shown, config))?;
+                continue;
+            }
+        }
         let edit = match key.code {
-            // Backspace takes back the last character; with nothing
-            // typed, the verb.
+            // Backspace takes back the last letter of a label, else the
+            // last character; with nothing typed, the verb.
             KeyCode::BACKSPACE => {
-                if search.pop() {
-                    pressed.pop();
+                if now.picking.pop().is_some() {
+                    overlay.update(&now.draw(shown, config))?;
+                    continue;
+                }
+                if now.search.pop() {
+                    now.pressed.pop();
                     true
                 } else {
-                    command.press(selection::Input::Backspace);
+                    now.command.press(selection::Input::Backspace);
                     false
                 }
             }
@@ -304,59 +553,60 @@ fn keys(
             | KeyCode::TAB => false,
             // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
             // tag, as a Ctrl- or Alt-click, as with the tags.
-            _ => {
-                let letter = config.alphabet.index_of(key.code);
-                match typed {
-                    Some(c) if !mods.ctrl && !mods.alt => {
-                        search.push(c);
-                        pressed.push(letter);
-                        true
-                    }
-                    _ if mods.ctrl || mods.alt => {
-                        let last = [pressed.as_slice(), &[letter]].concat();
-                        let Some(index) = hints.picked(&last) else {
-                            continue;
-                        };
-                        if config.hint_auto_accept {
-                            return Ok(Pick::Target {
-                                index,
-                                act: command.act(mods),
-                            });
-                        }
-                        // Ctrl/Alt may type no character. Keep the tag's
-                        // letter so it can be edited or confirmed later.
-                        let Some(letter) = letter else { continue };
-                        search.push(config.alphabet.letters()[letter].label);
-                        pressed.push(Some(letter));
-                        true
-                    }
-                    _ => continue,
+            _ => match typed {
+                Some(c) if !mods.ctrl && !mods.alt => {
+                    now.search.push(c);
+                    now.pressed.push(letter);
+                    true
                 }
-            }
+                _ if mods.ctrl || mods.alt => {
+                    let last = [now.pressed.as_slice(), &[letter]].concat();
+                    let Some(index) = now.hints.picked(&last) else {
+                        continue;
+                    };
+                    if config.hint_auto_accept {
+                        return Ok(Pick::Target {
+                            index,
+                            act: now.command.act(mods),
+                        });
+                    }
+                    // Ctrl/Alt may type no character. Keep the tag's
+                    // letter so it can be edited or confirmed later.
+                    let Some(letter) = letter else { continue };
+                    now.search.push(config.alphabet.letters()[letter].label);
+                    now.pressed.push(Some(letter));
+                    true
+                }
+                _ => continue,
+            },
         };
-        stale |= edit;
+        if edit {
+            now.picking.clear();
+        }
+        now.stale |= edit;
         if edit
             && key.code != KeyCode::BACKSPACE
-            && let Some(index) = hints.choice(&pressed, &search, config, false)
+            && let Some(index) = now.hints.choice(&now.pressed, &now.search, config, false)
         {
-            let act = command.act(mods);
+            let act = now.command.act(mods);
             return Ok(Pick::Target { index, act });
         }
         // Every key typed so far first: fast typing asks the apps once.
         // A key that moves through the matches needs them found.
-        if stale && (!edit || !overlay.has_events()?) {
-            find(&mut search, shown, source);
-            stale = false;
+        if now.stale && (!edit || !overlay.has_events()?) {
+            find(&mut now.search, shown, source);
+            now.stale = false;
             // A character that leaves nothing to match stays typed, to
             // edit or take back; the info line names the query.
             if config.info.no_match
                 && key.code != KeyCode::BACKSPACE
-                && !search.query().is_empty()
-                && search.matches().is_empty()
-                && !hints.open(&pressed)
+                && !now.search.query().is_empty()
+                && now.search.matches().is_empty()
+                && !now.hints.open(&now.pressed)
             {
                 let until = Instant::now() + config.info.duration;
-                missed = Some((format!("no text has \"{}\"", search.query()), until));
+                let said = format!("no text has \"{}\"", now.search.query());
+                now.missed = Some((said, until));
             }
             // Typed into one match, not backed into it. An Enter that
             // comes after the typing acts below, with its own Ctrl and
@@ -364,32 +614,43 @@ fn keys(
             if config.text_auto_accept
                 && edit
                 && key.code != KeyCode::BACKSPACE
-                && unique(&search)
-                && !hints.open(&pressed)
-                && let Some(chosen) = choose(&search, shown, command.act(Mods::NONE), cursor)
+                && unique(&now.search)
+                && !now.hints.open(&now.pressed)
+                && let Some(chosen) =
+                    choose(&now.search, shown, now.command.act(Mods::NONE), cursor)
             {
                 return Ok(Pick::Text(Box::new(chosen)));
             }
         }
         match key.code {
             KeyCode::ENTER => {
-                if let Some(index) = hints.choice(&pressed, &search, config, true) {
+                if let Some(index) = now.hints.choice(&now.pressed, &now.search, config, true) {
                     return Ok(Pick::Target {
                         index,
-                        act: command.act(mods),
+                        act: now.command.act(mods),
                     });
                 }
-                if let Some(chosen) = choose(&search, shown, command.act(mods), cursor) {
+                // Nothing typed: at the pointer, as `Space` is with the tags.
+                if now.search.query().is_empty() {
+                    let act = now.command.act(mods);
+                    return Ok(Pick::Here {
+                        act,
+                        from: mouse.at()?,
+                    });
+                }
+                if let Some(chosen) = choose(&now.search, shown, now.command.act(mods), cursor) {
                     return Ok(Pick::Text(Box::new(chosen)));
                 }
             }
-            KeyCode::RIGHT | KeyCode::DOWN => search.next(),
-            KeyCode::TAB if !key.shift => search.next(),
-            KeyCode::LEFT | KeyCode::UP | KeyCode::TAB => search.previous(),
+            KeyCode::RIGHT | KeyCode::DOWN => now.search.next(),
+            KeyCode::TAB if !key.shift => now.search.next(),
+            KeyCode::LEFT | KeyCode::UP | KeyCode::TAB => now.search.previous(),
             _ => {}
         }
-        let said = missed.as_ref().map(|m| m.0.as_str());
-        overlay.update(&draw(&search, &pressed, &command, stale, said))?;
+        if !edit && key.code != KeyCode::ENTER {
+            now.picking.clear();
+        }
+        overlay.update(&now.draw(shown, config))?;
     }
 }
 
@@ -474,20 +735,22 @@ fn choose(search: &Search, shown: &Snapshot, act: Act, cursor: TextCursor) -> Op
 /// and the input box. `search` is `None` while the text is being read, and
 /// `stale` while the query's matches are being found: the box shows `...`
 /// for the count then, and nothing is marked. The box names the armed
-/// `verb`, dimmed, before the query; with no query yet, it shows
-/// `[input] placeholder`, dimmed too. Under it, `missed` says what was
-/// typed that matched nothing.
+/// `verb`, or `drop` while `holding`, dimmed, before the query; with no
+/// query yet, it shows `[input] placeholder`, dimmed too. Under it, `info`
+/// says what was typed that matched nothing, or lists the keys.
 fn frame(
     search: Option<&Search>,
     stale: bool,
     verb: Option<&'static str>,
+    holding: bool,
     input: &Input,
-    missed: Option<&str>,
+    info: Option<Message>,
 ) -> Frame {
     let status = Status {
-        info: missed.map(|m| Message::new(Notice::NoMatch, m)),
+        info,
         ..Status::text(
             verb,
+            holding,
             search.map(Search::query),
             search.filter(|_| !stale).map(Search::position),
             input,
@@ -555,7 +818,14 @@ mod tests {
     }
 
     fn frame(search: Option<&Search>, stale: bool, verb: Option<&'static str>) -> Frame {
-        super::frame(search, stale, verb, &Input::new(&Style::default()), None)
+        super::frame(
+            search,
+            stale,
+            verb,
+            false,
+            &Input::new(&Style::default()),
+            None,
+        )
     }
 
     #[test]
@@ -608,7 +878,7 @@ mod tests {
             ..Input::new(&Style::default())
         };
         let display = |stale| {
-            super::frame(Some(&found), stale, Some("double"), &input, None)
+            super::frame(Some(&found), stale, Some("double"), false, &input, None)
                 .status
                 .line()
                 .unwrap()
@@ -621,9 +891,9 @@ mod tests {
             placeholder: "find…".into(),
             ..input
         };
-        let waiting = super::frame(Some(&search(&["x"])), false, None, &empty, None);
+        let waiting = super::frame(Some(&search(&["x"])), false, None, false, &empty, None);
         assert_eq!(waiting.status.line().unwrap().0, "find…");
-        let reading = super::frame(None, false, None, &empty, None);
+        let reading = super::frame(None, false, None, false, &empty, None);
         assert_eq!(reading.status.line().unwrap().0, "find… ...");
     }
 
@@ -917,5 +1187,52 @@ mod tests {
         assert!(found.pop());
         pressed.pop();
         assert!(hints.open(&pressed), "Backspace restores the tag prefix");
+    }
+
+    #[test]
+    fn a_refresh_leaves_each_tag_on_its_target() {
+        let (shown, found) = buttons("Save add");
+        let config = config("");
+        // The icon had f and the pixel tag d: they keep them.
+        let kept = |i: usize| [None, Some(vec![3]), Some(vec![2])][i].clone();
+        let hints = Hints::keeping(&found, &shown, &config, &kept);
+        assert_eq!(hints.0, [(1, vec![3]), (2, vec![2])]);
+    }
+
+    #[test]
+    fn two_matches_or_more_get_capital_labels_in_reading_order() {
+        let config = config("");
+        let mut found = search(&["contact", "falcon"]);
+        typed(&mut found, "fa");
+        assert!(
+            match_labels(&found, &config).is_empty(),
+            "one: Enter is enough"
+        );
+        let mut found = search(&["contact", "control", "console"]);
+        typed(&mut found, "con");
+        assert_eq!(match_labels(&found, &config), [[0], [1], [2]]);
+        let texts = |picking: &[usize]| -> Vec<String> {
+            label_tags(&found, picking, &config)
+                .into_iter()
+                .map(|t| t.text)
+                .collect()
+        };
+        assert_eq!(texts(&[]), ["A", "S", "D"]);
+        assert_eq!(texts(&[1]), ["S"]);
+        let tag = &label_tags(&found, &[], &config)[1];
+        assert_eq!(tag.target, Some(found.matches()[1].point()));
+        found.select(2);
+        assert_eq!(found.position(), (3, 3));
+        found.select(7);
+        assert_eq!(found.position(), (3, 3), "no such match: the current stays");
+    }
+
+    #[test]
+    fn the_key_list_says_how_text_mode_works() {
+        let legend = config("").verbs.text_legend();
+        assert!(legend.starts_with("text Enter\tleft click\n"), "{legend}");
+        assert!(legend.contains(", text Enter\tright click"), "{legend}");
+        assert!(legend.contains("Shift+label\tpick that match"), "{legend}");
+        assert!(legend.ends_with("Esc\tleave"), "{legend}");
     }
 }
