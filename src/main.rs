@@ -136,6 +136,17 @@ impl pick::Source for Saved {
     }
 }
 
+/// No pointer to read or move: the overlay alone clicks nothing.
+impl pick::Mouse for Saved {
+    fn at(&self) -> Result<Point> {
+        anyhow::bail!("no pointer when drawing from a file")
+    }
+
+    fn move_by(&mut self, _: Point) -> Result<Point> {
+        anyhow::bail!("no pointer to move when drawing from a file")
+    }
+}
+
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
@@ -164,13 +175,12 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         snapshot.targets.len(),
         overlay.keyboard_mode()
     );
-    let cursor = || anyhow::bail!("no pointer when drawing from a file");
     match pick::pick(
         &mut overlay,
         config,
         &mut snapshot,
         pick::Start::default(),
-        &cursor,
+        &mut Saved,
         &mut Saved,
     )? {
         Pick::Target { index, act } => {

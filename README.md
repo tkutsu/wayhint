@@ -52,9 +52,10 @@ a single tag that puts the cursor in it.
 Type a verb key before a tag for a right, middle or double click, a hover,
 the mouse's back and forward buttons, a scroll, or a press-and-hold that
 becomes a drag or a long press. Hold `Shift`, `Ctrl` or `Alt` on the last
-letter to click with that modifier. The arrows move where one click lands,
-so a tag near a spot can click anywhere around it. A verb typed twice does
-it again in the same place.
+letter to click with that modifier. The arrows move the pointer itself
+before any other key, and after one they move where that click lands, so
+a tag near a spot can click anywhere around it. A verb typed twice does
+it again in the same place, or where the arrows took the pointer.
 
 ### Tags that keep up
 
@@ -171,10 +172,11 @@ listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 | `Home` / `End` then a tag | The mouse's back and forward buttons |
 | `PageUp` / `PageDown` then a tag | Turns the wheel 5 notches up or down there |
 | `;` then a tag | Hold: presses the left button and keeps it down; the next tag or `Space` lets go there |
-| a verb twice | Does it again where the last command was |
+| a verb twice | Does it again where the last command was, or where the arrows took the pointer |
 | `Shift`, `Ctrl` or `Alt` on a tag's last letter | The same click with that key held |
 | `Space` | The default action, or the verb typed before it, where the pointer is |
-| arrows, before the last letter or `Space` | Move where that one click lands, 10 px a press; held, faster |
+| arrows, before any other key | Move the pointer, 10 px a press; held, faster. During a hold, that drags |
+| arrows, after a verb or letter | Move where that one click lands, the same way |
 | the repeat key, if you set one | The last command again on the same control, even after its tag changed |
 | `?` | Every key and what it does, under the input box; any other key closes it |
 | `Backspace` | Takes back the last letter or verb |
@@ -286,8 +288,10 @@ follows the pointer.
 A hold keeps its button down across rounds. The tags come back with
 `drop` in the input box, and whatever you pick next (a tag,
 `Space`, a text match, a verb typed twice) is where it lets go, moving
-there in small steps so apps see a drag. `; ;` or the close key lets go where it
-went down: a long press. A scroll never clicks, so it never ends the run.
+there in small steps so apps see a drag. The arrows, before any other key,
+drag the pointer as you press them; then `Space`, `; ;` or the close key
+lets go where it is. With no arrows, that's where it went down: a long
+press. A scroll never clicks, so it never ends the run.
 
 ### Text mode
 
@@ -297,7 +301,8 @@ key goes into the query, spaces and punctuation included. A verb on a
 named key (`PageDown`, `Home`) works at any point, and one on a letter or
 digit is for tag runs only, since that key is always text. Each visible
 match gets a yellow box, and the current one is orange. The arrows, `Tab`
-and `Shift+Tab` move between matches and wrap. `Enter` clicks the middle
+and `Shift+Tab` move between matches and wrap. Before any text or verb,
+the arrows move the pointer, as they do with tags. `Enter` clicks the middle
 of the current match's first line, and `Shift`, `Ctrl` or `Alt` held on
 `Enter` hold that key through the click. `Backspace` with nothing typed
 takes back the verb.
