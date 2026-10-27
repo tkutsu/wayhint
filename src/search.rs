@@ -10,19 +10,19 @@
 //!                 an arrow: moves the pointer from there
 //!                 nothing typed or armed: Enter acts at the pointer, the
 //!                   help key lists the keys, and the windows are scanned
-//!                   again every [scan] refresh
+//!                   again every [scan] refresh_ms
 //!                 Backspace with nothing typed: takes back a verb
 //!                 close key: leave wayhint, or let go of a hold
 //!                 a verb key before any text (a capital or a symbol), or
 //!                   a named one any time: armed
 //!                 Enter: the armed verb (or the default) on the current match,
 //!                        where the pointer is if the arrows moved it
-//!                 one match left (with [text] auto_accept): as Enter
-//!                 a whole tag typed (with [text] hints): its target, as a tag
+//!                 one match left (with [words] auto_accept): as Enter
+//!                 a whole tag typed (with [words] fallback_hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
 //! ```
 //!
-//! With `[text] hints`, the targets typing can't find keep a tag: those
+//! With `[words] fallback_hints`, the targets typing can't find keep a tag: those
 //! whose text wasn't read (an icon, a window read from pixels) or has no
 //! word. Their labels are ones no word on screen starts with, so a whole
 //! label is never a query, and what's typed is both until one of them
@@ -56,7 +56,7 @@ use crate::{
     text::{Check, Match, Place, Search, Span},
 };
 
-/// How many characters `[text] auto_accept` waits for before acting on
+/// How many characters `[words] auto_accept` waits for before acting on
 /// the only match: fewer match too much by chance.
 pub const UNIQUE: usize = 3;
 
@@ -100,7 +100,7 @@ fn opens(label: &[usize], pressed: &[Option<usize>]) -> bool {
 
 impl Hints {
     /// Tags for `shown`'s targets that no text of `search` is on, in
-    /// labels no word of it starts with. None without `[text] hints`.
+    /// labels no word of it starts with. None without `[words] fallback_hints`.
     fn new(search: &Search, shown: &Snapshot, config: &Config) -> Self {
         Self::keeping(search, shown, config, &|_| None)
     }
@@ -175,7 +175,7 @@ impl Hints {
     }
 
     /// The tags still open after `pressed`, drawn as `pick` draws its own:
-    /// with `[input] hints`, only the letters left to type; without, the
+    /// with `[input] show_typed_hints`, only the letters left to type; without, the
     /// whole label with what's typed dimmed.
     fn tags(&self, pressed: &[Option<usize>], shown: &Snapshot, config: &Config) -> Vec<Tag> {
         let done = pressed.len();
@@ -267,7 +267,17 @@ impl Typing {
             let missed = self.missed.as_ref();
             missed.map(|m| Message::new(Notice::NoMatch, m.0.clone()))
         };
-        let tags = self.hints.tags(&self.pressed, shown, config);
+        let tags = self
+            .hints
+            .tags(&self.pressed, shown, config)
+            .into_iter()
+            .filter(|tag| {
+                tag.kind != crate::overlay::Kind::Window
+                    || self.command.armed().is_none()
+                        && self.command.act(Mods::NONE).action == Action::Left
+                        && !self.holding
+            })
+            .collect();
         let verb = self.command.armed().map(Action::name);
         let (search, input) = (Some(&self.search), &config.input);
         Frame {
@@ -480,6 +490,11 @@ fn keys(
                 || now.search.query().is_empty()
                     && typed.is_some_and(|c| c.is_uppercase() || !c.is_alphanumeric()))
         {
+            if action.scrolls() {
+                return Ok(Pick::Scroll {
+                    act: Act { action, mods },
+                });
+            }
             if let Step::Again(act) = now.command.press(selection::Input::Verb(action, mods)) {
                 return Ok(Pick::Again { act });
             }
@@ -512,6 +527,9 @@ fn keys(
                     let Some(index) = now.hints.picked(&last) else {
                         continue;
                     };
+                    if !pick::available(&shown.targets[index], &now.command, holding) {
+                        continue;
+                    }
                     if config.hint_auto_accept {
                         return Ok(Pick::Target {
                             index,
@@ -531,7 +549,10 @@ fn keys(
         now.stale |= edit;
         if edit
             && key.code != KeyCode::BACKSPACE
-            && let Some(index) = now.hints.choice(&now.pressed, &now.search, config, false)
+            && let Some(index) = now
+                .hints
+                .choice(&now.pressed, &now.search, config, false)
+                .filter(|&i| pick::available(&shown.targets[i], &now.command, holding))
         {
             let act = now.command.act(mods);
             return Ok(Pick::Target { index, act });
@@ -574,7 +595,11 @@ fn keys(
         }
         match key.code {
             KeyCode::ENTER => {
-                if let Some(index) = now.hints.choice(&now.pressed, &now.search, config, true) {
+                if let Some(index) = now
+                    .hints
+                    .choice(&now.pressed, &now.search, config, true)
+                    .filter(|&i| pick::available(&shown.targets[i], &now.command, holding))
+                {
                     return Ok(Pick::Target {
                         index,
                         act: now.command.act(mods),
@@ -605,7 +630,7 @@ fn unique(search: &Search) -> bool {
     search.query().chars().count() >= UNIQUE && search.matches().len() == 1
 }
 
-/// The windows' texts, and with `[text.starts]`, where each word's first
+/// The windows' texts, and with `[words.first_character]`, where each word's first
 /// letter shows, asked of the apps now: the first letter typed then asks
 /// nothing. A text read from a name has no letters to ask about.
 fn read(shown: &Snapshot, source: &mut dyn Source, config: &Config) -> Search {
@@ -711,7 +736,7 @@ fn choose(
 
 /// What text mode shows: every match's lines, the current one's marked,
 /// and the input box; with no query, each word's first letter marked if
-/// `[text.starts]` says. `search` is `None` while the text is being read, and
+/// `[words.first_character]` says. `search` is `None` while the text is being read, and
 /// `stale` while the query's matches are being found: the box shows `...`
 /// for the count then, and nothing is marked. The box names the armed
 /// `verb`, or `drop` while `holding`, dimmed, before the query; with no
@@ -1093,6 +1118,48 @@ mod tests {
     }
 
     #[test]
+    fn text_mode_window_hints_hide_when_any_verb_is_armed() {
+        let (mut shown, found) = buttons("Save");
+        shown.targets[2].role = "window".into();
+        let config = config("");
+        let mut now = Typing {
+            hints: Hints::new(&found, &shown, &config),
+            search: found,
+            command: Selector::new(shown.targets.len(), config.alphabet.len(), Action::Left),
+            pressed: Vec::new(),
+            stale: false,
+            missed: None,
+            help: false,
+            holding: false,
+            jumped: None,
+            aimed: false,
+        };
+        assert!(
+            now.draw(&shown, &config)
+                .tags
+                .iter()
+                .any(|tag| tag.kind == crate::overlay::Kind::Window)
+        );
+        for action in Action::ALL {
+            now.command
+                .press(selection::Input::Verb(action, Mods::NONE));
+            assert!(
+                !now.draw(&shown, &config)
+                    .tags
+                    .iter()
+                    .any(|tag| tag.kind == crate::overlay::Kind::Window)
+            );
+        }
+        now.command.press(selection::Input::Backspace);
+        assert!(
+            now.draw(&shown, &config)
+                .tags
+                .iter()
+                .any(|tag| tag.kind == crate::overlay::Kind::Window)
+        );
+    }
+
+    #[test]
     fn hints_go_on_targets_with_no_text_in_letters_no_word_starts_with() {
         let (shown, found) = buttons("Save add");
         let hints = Hints::new(&found, &shown, &config(""));
@@ -1106,7 +1173,7 @@ mod tests {
         let texts: Vec<&str> = tags.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, ["D", "F"]);
         assert_eq!(tags[0].target, Some(shown.targets[1].hit));
-        let off = Hints::new(&found, &shown, &config("[text]\nhints = false"));
+        let off = Hints::new(&found, &shown, &config("[words]\nfallback_hints = false"));
         assert_eq!(off.0, Vec::<(usize, Vec<usize>)>::new());
     }
 
@@ -1135,7 +1202,7 @@ mod tests {
         let pressed = [Some(2)];
         for text in [false, true] {
             let config = config(&format!(
-                "[hints]\nauto_accept = false\n[text]\nauto_accept = {text}"
+                "[hints]\nauto_accept = false\n[words]\nauto_accept = {text}"
             ));
             let hints = Hints::new(&found, &shown, &config);
             assert_eq!(hints.choice(&pressed, &found, &config, false), None);

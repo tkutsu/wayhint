@@ -145,36 +145,18 @@ pub fn group(frame: &Frame, words: &[Corners], policy: &Policy) -> Found {
     }
 }
 
-/// A terminal's preferred focus patch, 10 px from its bottom-right edges.
+/// A terminal's fallback focus patch, 10 px from its left and bottom edges.
 pub fn terminal_patch(width: i32, height: i32) -> Rect {
     let (w, h) = (36.min(width), 24.min(height));
-    let (right, bottom) = (10.min(width - w), 10.min(height - h));
-    Rect::new(width - w - right, height - h - bottom, w, h)
+    let (left, bottom) = (10.min(width - w), 10.min(height - h));
+    Rect::new(left, height - h - bottom, w, h)
 }
 
-/// A terminal's body: the clearest patch near its bottom right. Text and
+/// A terminal's body: a fixed patch near its bottom left. Text and
 /// TUI widgets are keyboard driven, so they never become separate hints.
-/// If the lower half is completely occupied, its least busy patch.
 pub fn terminal(frame: &Frame) -> Corners {
-    let space = Space::pixels(frame);
     let (w, h) = (frame.width as i32, frame.height as i32);
-    let preferred = terminal_patch(w, h);
-    if space.ink(preferred) == 0 {
-        return [
-            preferred.x,
-            preferred.y,
-            preferred.right(),
-            preferred.bottom(),
-        ];
-    }
-    let (bw, bh) = (preferred.w, preferred.h);
-    let (last_x, last_y) = (preferred.x, preferred.y);
-    let (x, y) = (4.min(last_x), (h / 2).min(last_y));
-    let area = Rect::new(x, y, last_x - x + bw, last_y - y + bh);
-    let aim = preferred.center();
-    let r = space
-        .spot(area, (bw, bh), aim, 2)
-        .unwrap_or(Rect::new(0, 0, w, h));
+    let r = terminal_patch(w, h);
     [r.x, r.y, r.right(), r.bottom()]
 }
 

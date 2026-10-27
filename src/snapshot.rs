@@ -153,11 +153,22 @@ pub struct Target {
 }
 
 impl Target {
-    /// Found in its window's pixels: a guess, drawn in `[style.pixels]`.
+    /// Window focus targets require the default left action.
+    pub fn allows(&self, action: crate::action::Action) -> bool {
+        self.role != "window" || action == crate::action::Action::Left
+    }
+
+    /// A pixel detection or fixed terminal fallback, drawn in `[hints.pixels]`.
     pub fn in_pixels(&self) -> bool {
         self.object.is_none()
-            && [PIXELS, PIXEL_BODY, PIXEL_BLOCK, PIXEL_MEDIA, "terminal"]
-                .contains(&self.role.as_str())
+            && [
+                PIXELS,
+                PIXEL_BODY,
+                PIXEL_BLOCK,
+                PIXEL_MEDIA,
+                "terminal fallback",
+            ]
+            .contains(&self.role.as_str())
     }
 
     /// The box its tag is placed on: the part in view.
@@ -174,6 +185,7 @@ impl Target {
 #[derive(PartialEq, Eq, Hash)]
 enum Same<'a> {
     Object(&'a ObjectId),
+    Window(&'a str),
     /// The window's address and the box within the window.
     Pixels(&'a str, Rect),
 }
@@ -182,6 +194,12 @@ enum Same<'a> {
 pub enum Read<'a> {
     /// Its accessibility tree, and what the filter kept of it.
     Tree(&'a Tree, &'a Filtered, &'a Stats),
+    /// A terminal's visible cursor, or a fixed focus hint when unavailable.
+    Terminal {
+        window: &'a Window,
+        cursor: Option<Rect>,
+        stats: &'a Stats,
+    },
     /// What the pixel detector found in its picture, which had `scale`
     /// pixels per logical pixel.
     Pixels {
@@ -190,8 +208,7 @@ pub enum Read<'a> {
         scale: f64,
         stats: &'a Stats,
     },
-    /// Nothing to tag, but text to read: kitty, which text mode asks
-    /// itself what it shows.
+    /// No content targets; kept for a window hint or Kitty's text source.
     Untagged(&'a Window),
 }
 
@@ -214,6 +231,33 @@ impl Snapshot {
         for (window, read) in reads.into_iter().enumerate() {
             let (tree, filtered, stats) = match read {
                 Read::Tree(tree, filtered, stats) => (tree, filtered, stats),
+                Read::Terminal {
+                    window: seen,
+                    cursor,
+                    stats,
+                } => {
+                    let rect = cursor
+                        .unwrap_or_else(|| crate::pixels::terminal_patch(seen.rect.w, seen.rect.h))
+                        .offset(seen.rect.origin());
+                    targets.push(Target {
+                        editable: true,
+                        ..pixel_target(
+                            window,
+                            rect,
+                            if cursor.is_some() {
+                                "terminal"
+                            } else {
+                                "terminal fallback"
+                            },
+                        )
+                    });
+                    windows.push(Scanned {
+                        window: seen.clone(),
+                        stats: stats.clone(),
+                        pixels: false,
+                    });
+                    continue;
+                }
                 Read::Pixels {
                     window: seen,
                     found,
@@ -302,11 +346,19 @@ impl Snapshot {
         };
         let mut cells: HashMap<_, Vec<usize>> = HashMap::new();
         for (i, target) in self.targets.iter().enumerate() {
+            if target.role == "window" {
+                continue;
+            }
             cells.entry(cell(target.hit)).or_default().push(i);
         }
         let mut seen = vec![false; self.targets.len()];
         let mut keep = vec![false; self.targets.len()];
         for start in 0..self.targets.len() {
+            if self.targets[start].role == "window" {
+                seen[start] = true;
+                keep[start] = true;
+                continue;
+            }
             if seen[start] {
                 continue;
             }
@@ -402,6 +454,9 @@ impl Snapshot {
             return Same::Object(object);
         }
         let window = &self.windows[target.window].window;
+        if target.role == "window" {
+            return Same::Window(&window.address);
+        }
         let origin = window.rect.origin();
         let rect = target.rect.offset(Point::new(-origin.x, -origin.y));
         Same::Pixels(&window.address, rect)
@@ -574,6 +629,22 @@ mod tests {
         assert_eq!((control.role.as_str(), control.editable), ("pixels", false));
         assert_eq!(body.role, "pixel body");
         assert!(body.editable && body.opens.is_empty() && body.object.is_none());
+    }
+
+    #[test]
+    fn a_window_hint_never_merges_with_a_control_at_the_same_point() {
+        let mut snapshot = hints(&[(30, 20), (30, 20)]);
+        snapshot.targets[0].role = "window".into();
+        snapshot.merge_nearby(50);
+        assert_eq!(snapshot.targets.len(), 2);
+        assert!(snapshot.targets[0].allows(crate::action::Action::Left));
+        for action in crate::action::Action::ALL {
+            assert_eq!(
+                snapshot.targets[0].allows(action),
+                action == crate::action::Action::Left
+            );
+            assert!(snapshot.targets[1].allows(action));
+        }
     }
 
     #[test]

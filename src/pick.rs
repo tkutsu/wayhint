@@ -22,17 +22,19 @@ use crate::{
 
 /// How far inside its monitor's edge the arrows stop the pointer, in px.
 const EDGE: i32 = 5;
-/// A held arrow speeds up by one `[pointer] nudge` a tick every this many
+/// A held arrow speeds up by one `[pointer] nudge_px` a tick every this many
 /// ticks (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` a tick.
 const SPEED_UP: u16 = 8;
 const TOP_SPEED: u16 = 4;
 /// The longest a screen that stays the same waits between refreshes: each
-/// one that finds nothing changed doubles `[scan] refresh`, up to this.
+/// one that finds nothing changed doubles `[scan] refresh_ms`, up to this.
 const IDLE_REFRESH: Duration = Duration::from_secs(2);
 
 /// How a pick ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
+    /// Scroll the currently focused window, without choosing a target.
+    Scroll { act: Act },
     /// Do `act` at the target at `index`.
     Target { index: usize, act: Act },
     /// Do `act` where the pointer is (`Space`).
@@ -139,7 +141,7 @@ pub trait Mouse {
 /// ([`text`]). The arrows move the pointer through `mouse`, held for
 /// faster, and `Space` or a verb typed twice acts where it is.
 ///
-/// Every `[scan] refresh` with no pick, `source` scans again and the tags
+/// Every `[scan] refresh_ms` with no pick, `source` scans again and the tags
 /// follow: a target found again keeps its tag, and what was typed for it
 /// stays typed (see `Selector::relabel`). While nothing changes, the scans
 /// come further apart (see `IDLE_REFRESH`).
@@ -156,7 +158,7 @@ pub trait Mouse {
 /// is where it's let go, and the close key lets go where it is.
 ///
 /// The input box's second line says `no targets` while nothing has a tag,
-/// names a letter no tag goes on with for `[info] duration`, and shows
+/// names a letter no tag goes on with for `[messages] duration`, and shows
 /// every key while the help key has it up (see [`Said`]).
 #[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 pub fn pick(
@@ -296,10 +298,26 @@ pub fn pick(
         let Some(input) = input_of(key, mods, config) else {
             continue;
         };
+        if let Input::Verb(action, mods) = input
+            && action.scrolls()
+        {
+            return Ok(Pick::Scroll {
+                act: Act { action, mods },
+            });
+        }
         said = Said::Nothing;
         // The command as it stood before this key: what a block opens with.
         let before = selector.clone();
-        match selector.press(input) {
+        let step = selector.press(input);
+        let step = if let Step::Picked { index, .. } = step
+            && !available(&shown.targets[index], &before, start.holding)
+        {
+            selector = before.clone();
+            Step::Ignored
+        } else {
+            step
+        };
+        match step {
             Step::Typing => {
                 overlay.update(&tags(&selector, shown, &said))?;
             }
@@ -320,7 +338,7 @@ pub fn pick(
             Step::Here(act) => return Ok(Pick::Here { act }),
             Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
-            // The letter is dropped, and named for `[info] duration`.
+            // The letter is dropped, and named for `[messages] duration`.
             Step::Ignored => {
                 if let Input::Letter(letter, _) = input
                     && config.info.no_match
@@ -457,12 +475,12 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     }
 }
 
-/// The tags still possible after what's been typed, in `[style] case`,
+/// The tags still possible after what's been typed, in `[hints] case`,
 /// and the input box.
 ///
 /// The input box names the armed verb, dimmed, or `drop` while a hold
 /// keeps a button down: a verb with no key (`--verb`) and `Space`, which
-/// uses no tag, show nowhere else. With `[input] hints`, the letters typed
+/// uses no tag, show nowhere else. With `[input] show_typed_hints`, the letters typed
 /// follow it there, and the tags keep only the letters still to type.
 /// Without, each tag reads as the whole command: everything typed so far,
 /// dimmed, then the letters still to type. So an armed verb's key goes in
@@ -473,8 +491,8 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 /// Under what's typed, the box says what `said` holds, or `no targets`
 /// while nothing has a tag.
 ///
-/// A tag sits at `[style] position` on its target's visible box, moved by
-/// `[style] offset`.
+/// A tag sits at `[hints] position` on its target's visible box, moved by
+/// `[hints] offset`.
 ///
 fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Frame {
     let letters = config.alphabet.letters();
@@ -495,7 +513,9 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .labels()
         .iter()
         .zip(scene.targets)
-        .filter(|(label, _)| selector.matches(label))
+        .filter(|(label, target)| {
+            selector.matches(label) && available(target, selector, scene.holding)
+        })
         .collect();
     let letter = |&i: &usize| style.case.of(letters[i].label);
     let tags: Vec<Tag> = open
@@ -533,8 +553,8 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
 }
 
 /// `target`'s tag, reading `text` with its first `typed` characters dimmed.
-/// The tag goes at `[style] position` on the target's box, moved by
-/// `[style] offset`.
+/// The tag goes at `[hints] position` on the target's box, moved by
+/// `[hints] offset`.
 pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag {
     let [x, y] = config.style.offset;
     let position = config.style.position;
@@ -544,6 +564,7 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
         position,
         control: (position == Position::Auto).then_some(shown),
         target: Some(target.hit),
+        object: target.object.clone(),
         text,
         typed,
         verb: 0,
@@ -553,6 +574,15 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
             Kind::Plain
         },
     };
+    if target.role == "window" {
+        return Tag {
+            at: Point::new(shown.right() - 10, shown.y + 10),
+            position: Position::TopRight,
+            control: Some(shown),
+            kind: Kind::Window,
+            ..tag
+        };
+    }
     if target.role == "terminal" {
         // On the cursor, wherever the tags go elsewhere.
         return Tag {
@@ -562,12 +592,26 @@ pub fn tag(target: &Target, text: String, typed: usize, config: &Config) -> Tag 
             ..tag
         };
     }
+    if target.role == "terminal fallback" {
+        return Tag {
+            at: Point::new(shown.x, shown.bottom()),
+            position: Position::BottomLeft,
+            control: None,
+            ..tag
+        };
+    }
     tag
+}
+
+/// Window focus hints disappear while a verb or a drag is active.
+pub fn available(target: &Target, command: &Selector, holding: bool) -> bool {
+    target.allows(command.act(Mods::NONE).action)
+        && (target.role != "window" || command.armed().is_none() && !holding)
 }
 
 /// The input box with the tags up: the armed verb's name, dimmed, or
 /// `drop` while a hold keeps a button down (whatever comes next lets go),
-/// then, with `[input] hints`, the letters typed so far.
+/// then, with `[input] show_typed_hints`, the letters typed so far.
 fn status(selector: &Selector, config: &Config, holding: bool) -> Status {
     let letters = config.alphabet.letters();
     let typed = selector
@@ -583,7 +627,7 @@ fn status(selector: &Selector, config: &Config, holding: bool) -> Status {
     )
 }
 
-/// How far the arrow `code` goes: `[pointer] nudge` px its way, and held
+/// How far the arrow `code` goes: `[pointer] nudge_px` px its way, and held
 /// down, on at each of its `ticks`, faster (see `speed`). `None` for a key
 /// that is no arrow.
 pub fn arrow(code: KeyCode, ticks: u16, config: &Config) -> Option<Point> {
@@ -598,7 +642,7 @@ pub fn arrow(code: KeyCode, ticks: u16, config: &Config) -> Option<Point> {
     Some(Point::new(x * step, y * step))
 }
 
-/// How many `[pointer] nudge` steps an arrow moves at its `ticks`th tick
+/// How many `[pointer] nudge_px` steps an arrow moves at its `ticks`th tick
 /// held down, 0 being its press: one, and one more every `SPEED_UP` ticks,
 /// up to `TOP_SPEED`.
 fn speed(ticks: u16) -> i32 {
@@ -648,7 +692,7 @@ mod tests {
 
     fn refresh_scene() -> (Config, Snapshot, Selector) {
         let config = Config::parse(
-            "[keys]\nalphabet = \"ab\"\nleft = \"\"",
+            "[keys]\nalphabet = \"ab\"\ndefault_action = \"left\"",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
@@ -747,7 +791,7 @@ mod tests {
         // no key typed for a, s or d can reach it.
         let (_, mut shown, _) = refresh_scene();
         let config = Config::parse(
-            "[keys]\nalphabet = \"asdf\"\nleft = \"\"",
+            "[keys]\nalphabet = \"asdf\"\ndefault_action = \"left\"",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
@@ -950,7 +994,7 @@ mod tests {
         let selector = Selector::new(2, 2, Action::Left);
         let tags = |extra: &str| {
             let config = Config::parse(
-                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\n{extra}"),
+                &format!("[keys]\nalphabet = \"ab\"\ndefault_action = \"left\"\n{extra}"),
                 &crate::keys::Layout::named("us", ""),
             )
             .unwrap();
@@ -962,13 +1006,49 @@ mod tests {
         };
         let pair = |a: &str, b: &str| [(a.to_owned(), false), (b.to_owned(), true)];
         assert_eq!(tags(""), pair("A", "B"));
-        assert_eq!(tags("[style]\ncase = \"lower\""), pair("a", "b"));
+        assert_eq!(tags("[hints]\ncase = \"lower\""), pair("a", "b"));
+    }
+
+    #[test]
+    fn window_hint_uses_its_corner_and_hides_for_every_armed_verb() {
+        let config = Config::parse(
+            "[hints]\nposition = \"bottom\"\noffset = [50, 50]",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let mut targets = three_buttons();
+        targets[0].role = "window".into();
+        targets[0].visible = Rect::new(100, 50, 800, 600);
+        let scene = Scene {
+            targets: &targets,
+            holding: false,
+        };
+        let mut selector = Selector::new(targets.len(), config.alphabet.len(), Action::Left);
+        let first = frame(&selector, &config, &scene, &Said::Nothing);
+        let tag = &first.tags[0];
+        assert_eq!(
+            (tag.kind, tag.position, tag.at),
+            (Kind::Window, Position::TopRight, Point::new(890, 60))
+        );
+        assert_eq!(tag.target, Some(targets[0].hit));
+        for action in Action::ALL {
+            selector.press(Input::Verb(action, Mods::NONE));
+            let shown = frame(&selector, &config, &scene, &Said::Nothing);
+            assert!(!shown.tags.iter().any(|t| t.kind == Kind::Window));
+            assert!(!available(&targets[0], &selector, false));
+        }
+        selector.press(Input::Backspace);
+        assert_eq!(
+            frame(&selector, &config, &scene, &Said::Nothing).tags,
+            first.tags
+        );
+        assert!(!available(&targets[0], &selector, true));
     }
 
     #[test]
     fn terminal_hint_is_centered_on_the_cursor_despite_general_style_offsets() {
         let config = Config::parse(
-            "[style]\nposition = \"top-left\"\noffset = [5, 2]",
+            "[hints]\nposition = \"top-left\"\noffset = [5, 2]",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();
@@ -989,11 +1069,31 @@ mod tests {
         assert_eq!(frame.tags[0].target, Some(Point::new(157, 246)));
         assert_eq!(
             frame.tags[0].kind,
-            Kind::Pixels,
-            "keep the existing terminal hint style"
+            Kind::Plain,
+            "a reported cursor uses the normal hint style"
         );
         assert_eq!(frame.tags[1].position, Position::TopLeft);
         assert_eq!(frame.tags[1].at, Point::new(185, 92));
+    }
+
+    #[test]
+    fn terminal_fallback_uses_pixel_style_at_the_fixed_bottom_left_anchor() {
+        let config = Config::parse(
+            "[hints]\nposition = \"top-right\"\noffset = [5, 2]",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let mut target = three_buttons().remove(0);
+        target.role = "terminal fallback".into();
+        target.rect = crate::pixels::terminal_patch(800, 600).offset(Point::new(100, 50));
+        target.visible = target.rect;
+        target.hit = target.rect.center();
+        let tag = tag(&target, "A".into(), 0, &config);
+        assert_eq!(tag.kind, Kind::Pixels);
+        assert_eq!(tag.position, Position::BottomLeft);
+        assert_eq!(tag.at, Point::new(110, 640));
+        assert_eq!(tag.target, Some(target.hit));
+        assert!(tag.control.is_none());
     }
 
     /// Three buttons in a row.
@@ -1023,7 +1123,9 @@ mod tests {
         };
         let shown = |extra: &str, holding| {
             let config = Config::parse(
-                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\nright = \",\"\n{extra}"),
+                &format!(
+                    "[keys]\nalphabet = \"ab\"\ndefault_action = \"left\"\nright = \",\"\n{extra}"
+                ),
                 &crate::keys::Layout::named("us", ""),
             )
             .unwrap();
@@ -1040,7 +1142,7 @@ mod tests {
         let (tags, input) = shown("", false);
         assert_eq!(tags, [owned("A", 0), owned("B", 0)], "only what's left");
         assert_eq!(input, Some(owned("right A", 6)), "the verb dimmed");
-        let (tags, input) = shown("[input]\nhints = false", false);
+        let (tags, input) = shown("[input]\nshow_typed_hints = false", false);
         assert_eq!(
             tags,
             [owned(",AA", 2), owned(",AB", 2)],
@@ -1104,7 +1206,7 @@ mod tests {
         assert_eq!(help.kind, Notice::Help);
         assert!(help.text.contains("Esc\tleave"), "{}", help.text);
         let quiet = Config::parse(
-            "[info]\nno_targets = false",
+            "[messages]\nno_targets = false",
             &crate::keys::Layout::named("us", ""),
         )
         .unwrap();

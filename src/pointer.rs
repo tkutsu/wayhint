@@ -99,7 +99,7 @@ pub struct Pointer {
     /// All monitors together: absolute motion is a fraction of this box.
     extent: Rect,
     held: Vec<u32>,
-    /// Wheel notches a scroll turns: `[pointer] scroll`.
+    /// Wheel notches a scroll turns: `[pointer] scroll_steps`.
     notches: u16,
 }
 

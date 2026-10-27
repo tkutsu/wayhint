@@ -1,4 +1,4 @@
-//! How a tag looks: the `[style]` table.
+//! How a tag looks: the `[hints]` table.
 //!
 //! Every field has a default that looks fine untouched, so the file only
 //! holds what you change. Opacity is each colour's alpha: a translucent
@@ -80,14 +80,15 @@ impl fmt::Display for Color {
     }
 }
 
-/// Where a tag sits on its target: `[style] position`. The tag's own
+/// Where a tag sits on its target: `[hints] position`. The tag's own
 /// matching point goes on the target's, so `BottomRight` puts the tag in
 /// the box's bottom-right corner, inside it if it fits.
 ///
 /// `Auto` starts as `Left`, at the box's start, then the overlay moves the
-/// tag out beside the box: to its left, under it or over it, the first
-/// where no other control is (see `overlay::draw::Side`). Boxed in, it
-/// stays at the start. The input box has no `Auto`: nothing is beside it.
+/// tag outside an edge, aligned to its centre: left, below, above, then right. Aligned rows
+/// and columns share the side toward their screen edge; two blocked
+/// members make the whole line try another side. Boxed in, it stays at
+/// the centre. The input box has no `Auto`: nothing is beside it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Position {
@@ -144,10 +145,74 @@ impl Position {
     }
 }
 
-/// The farthest `[style] offset` moves a tag, either way, in px.
+/// The farthest `[hints] offset` moves a tag, either way, in px.
 const OFFSET: i32 = 500;
 
-/// The `[style]` table. `#[serde(default)]` fills every missing field from
+/// The direction from a gradient's first colour to its second, across a monitor.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    Left,
+    #[default]
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Direction {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    /// Start and end in fractions of the monitor's width and height.
+    pub const fn ends(self) -> ((f32, f32), (f32, f32)) {
+        match self {
+            Self::Left => ((1.0, 0.0), (0.0, 0.0)),
+            Self::Right => ((0.0, 0.0), (1.0, 0.0)),
+            Self::Top => ((0.0, 1.0), (0.0, 0.0)),
+            Self::Bottom => ((0.0, 0.0), (0.0, 1.0)),
+            Self::TopLeft => ((1.0, 1.0), (0.0, 0.0)),
+            Self::TopRight => ((0.0, 1.0), (1.0, 0.0)),
+            Self::BottomLeft => ((1.0, 0.0), (0.0, 1.0)),
+            Self::BottomRight => ((0.0, 0.0), (1.0, 1.0)),
+        }
+    }
+}
+
+/// Keep an omitted endpoint solid when effective settings are read back.
+fn render_gradient(
+    out: &mut String,
+    name: &str,
+    direction_name: &str,
+    start: Color,
+    end: Option<Color>,
+    direction: Direction,
+) {
+    match end {
+        Some(color) => {
+            let _ = writeln!(out, "{name}_end = \"{color}\"");
+        }
+        None => {
+            let _ = writeln!(out, "# {name}_end = \"{start}\"   # unset: solid colour");
+        }
+    }
+    let _ = writeln!(out, "{direction_name} = \"{}\"", direction.name());
+}
+
+/// The `[hints]` table. `#[serde(default)]` fills every missing field from
 /// `Style::default()`, and `deny_unknown_fields` rejects `colour = ...`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -157,6 +222,9 @@ pub struct Style {
     /// Text size in px.
     pub size: f32,
     pub text: Color,
+    /// A second colour enables one monitor-wide gradient on hint letters.
+    pub text_end: Option<Color>,
+    pub text_direction: Direction,
     /// Letters already typed, a placeholder. Once called `matched`, which
     /// a file may still say.
     #[serde(alias = "matched")]
@@ -165,6 +233,9 @@ pub struct Style {
     /// `drop` in the input box.
     pub verb: Color,
     pub background: Color,
+    /// A second colour enables one monitor-wide gradient on hint backgrounds.
+    pub background_end: Option<Color>,
+    pub background_direction: Direction,
     pub border: Color,
     pub border_width: f32,
     pub radius: f32,
@@ -175,13 +246,13 @@ pub struct Style {
     pub offset: [i32; 2],
     /// The letters' case on the tags.
     pub case: Case,
-    /// The line from a tag to its dot, and the dot: `[style.leader]`.
-    pub leader: Leader,
-    /// How tags found in a window's pixels differ: `[style.pixels]`.
+    /// The tiny arrow toward a tag's target: `[hints.arrow]`.
+    pub arrow: Arrow,
+    /// How tags found in a window's pixels differ: `[hints.pixels]`.
     pub pixels: Look,
 }
 
-/// Which case tags are drawn in: `[style] case`. The keys are the same
+/// Which case tags are drawn in: `[hints] case`. The keys are the same
 /// either way.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -215,14 +286,16 @@ impl Case {
     }
 }
 
-/// The letters of tags found in pixels, unless `[style.pixels] text` sets
+/// The letters of tags found in pixels, unless `[hints.pixels] text` sets
 /// them: teal.
 const PIXELS_TEXT: Color = Color::rgba(0x94, 0xe2, 0xd5, 0xff);
 
-/// A table that changes part of `[style]` for one kind of tag:
-/// `[style.pixels]` for tags found in a window's pixels, which are guesses
+/// A table that changes part of `[hints]` for one kind of tag:
+/// `[hints.pixels]` for tags found in a window's pixels, which are guesses
 /// and miss more often than tags from the accessibility tree. Unset fields
-/// are `[style]`'s, but for the letters, which have a colour of their own.
+/// are `[hints]`'s, but for solid letters, which have a colour of their own.
+/// A hint gradient is shared; setting this table's text or background makes
+/// that part solid instead.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Look {
@@ -241,7 +314,7 @@ pub struct Look {
 impl Look {
     /// The table as TOML, for `wayhint config`, under `header`. An unset
     /// field is written commented out, as the value it has now (`now`):
-    /// `[style]`'s, or the letters' own colour.
+    /// `[hints]`'s, or the letters' own colour.
     fn render(&self, header: &str, now: &Style) -> String {
         let mut out = format!("\n{header}\n");
         let quote = crate::config::quote;
@@ -276,80 +349,61 @@ impl Look {
                 (false, "text") => {
                     writeln!(out, "# {name} = {value}   # unset: this table's default")
                 }
-                (false, _) => writeln!(out, "# {name} = {value}   # unset: [style]'s"),
+                (false, _) => writeln!(out, "# {name} = {value}   # unset: [hints]'s"),
             };
         }
         out
     }
 }
 
-/// `[style.leader]`: the line from a tag to where it clicks, and the dot
-/// there, drawn when an arrow moves a click or a tag had to move off its
-/// target. Each is a stroke inside an outline, so it shows on light and
-/// dark windows alike. An unset colour is the tags' own: the letters' for
-/// the line and dot, the background's for the outline.
+/// A short arrow from a hint toward its target.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Leader {
-    pub line: Option<Color>,
-    pub dot: Option<Color>,
+pub struct Arrow {
+    pub color: Option<Color>,
     pub outline: Option<Color>,
-    /// The line's width, in px.
-    pub width: f32,
-    /// The dot's radius, in px.
-    pub radius: f32,
-    /// The outline's width, in px: all of it around the dot, half on each
-    /// side of the line. 0 for none.
+    pub length: f32,
     pub outline_width: f32,
 }
 
-impl Default for Leader {
+impl Default for Arrow {
     fn default() -> Self {
         Self {
-            line: None,
-            dot: None,
+            color: None,
             outline: None,
-            width: 1.0,
-            radius: 3.0,
+            length: 3.0,
             outline_width: 2.0,
         }
     }
 }
 
-impl Leader {
-    /// The line's, the dot's and the outline's colours, unset ones taken
-    /// from the tags' `style`.
-    pub fn colors(&self, style: &Style) -> (Color, Color, Color) {
+impl Arrow {
+    /// Unset colors follow the hint's text and background.
+    pub fn colors(&self, style: &Style) -> (Color, Color) {
         (
-            self.line.unwrap_or(style.text),
-            self.dot.unwrap_or(style.text),
+            self.color.unwrap_or(style.text),
             self.outline.unwrap_or(style.background),
         )
     }
 
     fn validate(&self) -> Result<()> {
         for (name, value) in [
-            ("width", self.width),
-            ("radius", self.radius),
+            ("length", self.length),
             ("outline_width", self.outline_width),
         ] {
             if !(0.0..=50.0).contains(&value) {
-                bail!("[style.leader] {name}: {value} px is outside 0-50");
+                bail!("[hints.arrow] {name}: {value} px is outside 0-50");
             }
         }
         Ok(())
     }
 
-    /// The table as TOML, for `wayhint config`. An unset colour is written
-    /// commented out, as the tags' colour it is now, so the file still
-    /// follows the tags.
+    /// Preserve inheritance when printing a config that can be read again.
     fn render(&self, style: &Style) -> String {
-        let (line, dot, outline) = self.colors(style);
-        let mut out =
-            String::from("\n[style.leader]   # the line from a tag to its dot, and the dot\n");
+        let (color, outline) = self.colors(style);
+        let mut out = String::from("\n[hints.arrow]\n");
         for (name, set, now, from) in [
-            ("line", self.line, line, "text"),
-            ("dot", self.dot, dot, "text"),
+            ("color", self.color, color, "text"),
             ("outline", self.outline, outline, "background"),
         ] {
             match set {
@@ -357,17 +411,12 @@ impl Leader {
                     let _ = writeln!(out, "{name} = \"{color}\"");
                 }
                 None => {
-                    let _ = writeln!(out, "# {name} = \"{now}\"   # unset: the tags' {from}");
+                    let _ = writeln!(out, "# {name} = \"{now}\"   # follows hints.{from}");
                 }
             }
         }
-        let _ = writeln!(out, "width = {}   # the line's, in px", self.width);
-        let _ = writeln!(out, "radius = {}   # the dot's, in px", self.radius);
-        let _ = writeln!(
-            out,
-            "outline_width = {}   # px, around the dot and across the line; 0 for none",
-            self.outline_width
-        );
+        let _ = writeln!(out, "length = {}", self.length);
+        let _ = writeln!(out, "outline_width = {}", self.outline_width);
         out
     }
 }
@@ -378,9 +427,13 @@ impl Default for Style {
             font: "sans-serif:bold".into(),
             size: 13.0,
             text: Color::rgba(0xff, 0xff, 0xff, 0xff),
+            text_end: None,
+            text_direction: Direction::default(),
             dimmed: Color::rgba(0xff, 0xff, 0xff, 0x66),
             verb: Color::rgba(0xfa, 0xb3, 0x87, 0xff),
             background: Color::rgba(0x1e, 0x1e, 0x2e, 0xf0),
+            background_end: None,
+            background_direction: Direction::default(),
             border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
             border_width: 1.0,
             radius: 4.0,
@@ -388,7 +441,7 @@ impl Default for Style {
             position: Position::default(),
             offset: [0, 0],
             case: Case::default(),
-            leader: Leader::default(),
+            arrow: Arrow::default(),
             pixels: Look::default(),
         }
     }
@@ -397,14 +450,19 @@ impl Default for Style {
 impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
-        self.validate_table("style")?;
-        self.for_pixels().validate_table("style.pixels")
+        self.validate_table("hints")?;
+        self.for_pixels().validate_table("hints.pixels")
     }
 
-    /// The look of tags found in pixels: this one, with `[style.pixels]`
+    /// The look of tags found in pixels: this one, with `[hints.pixels]`
     /// over it.
     pub fn for_pixels(&self) -> Self {
-        self.with(&self.pixels, PIXELS_TEXT)
+        let text = if self.text_end.is_some() {
+            self.text
+        } else {
+            PIXELS_TEXT
+        };
+        self.with(&self.pixels, text)
     }
 
     /// This look with `p`'s fields over it, the letters in `text` unless
@@ -414,9 +472,11 @@ impl Style {
             font: p.font.clone().unwrap_or_else(|| self.font.clone()),
             size: p.size.unwrap_or(self.size),
             text: p.text.unwrap_or(text),
+            text_end: self.text_end.filter(|_| p.text.is_none()),
             dimmed: p.dimmed.unwrap_or(self.dimmed),
             verb: p.verb.unwrap_or(self.verb),
             background: p.background.unwrap_or(self.background),
+            background_end: self.background_end.filter(|_| p.background.is_none()),
             border: p.border.unwrap_or(self.border),
             border_width: p.border_width.unwrap_or(self.border_width),
             radius: p.radius.unwrap_or(self.radius),
@@ -449,25 +509,50 @@ impl Style {
         if self.font.trim().is_empty() {
             bail!("[{table}] font: empty");
         }
-        self.leader.validate()
+        self.arrow.validate()
     }
 
-    /// The table as TOML, `[style.leader]` and `[style.pixels]` too, for
+    /// The table as TOML, `[hints.arrow]` and `[hints.pixels]` too, for
     /// `wayhint config`.
     pub fn render(&self) -> String {
         format!(
-            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
+            "{}{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
             self.render_table(
-                "style",
+                "hints",
                 "on the target: auto (beside it, where no other control is), or "
             ),
+            self.render_gradients(),
             self.case.name(),
-            self.leader.render(self),
+            self.arrow.render(self),
             self.pixels.render(
-                "[style.pixels]   # tags found in a window's pixels: guesses; unset fields are [style]'s",
+                "[hints.pixels]   # tags found in a window's pixels: guesses; unset fields are [hints]'s",
                 &self.for_pixels(),
             ),
         )
+    }
+
+    /// Optional hint gradients stay unset when the config is printed and read again.
+    fn render_gradients(&self) -> String {
+        let mut out = String::new();
+        for (name, start, end, direction) in [
+            ("text", self.text, self.text_end, self.text_direction),
+            (
+                "background",
+                self.background,
+                self.background_end,
+                self.background_direction,
+            ),
+        ] {
+            render_gradient(
+                &mut out,
+                name,
+                &format!("{name}_direction"),
+                start,
+                end,
+                direction,
+            );
+        }
+        out
     }
 
     /// A complete look under its owning table, for `wayhint config`.
@@ -515,7 +600,7 @@ impl Style {
 
 /// The input box, resolved from `[input]`: what's typed. An armed verb's
 /// name, `drop` while a hold is down, the tag letters typed so far, and
-/// text mode's query with its decorations. `[info]`'s messages are its
+/// text mode's query with its decorations. `[messages]`'s messages are its
 /// second line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Input {
@@ -554,9 +639,9 @@ impl Input {
         let (header, fields) = look.split_once('\n').unwrap();
         let quote = crate::config::quote;
         format!(
-            "\n{header}   # what's typed, and [info]'s messages under it\n\
+            "\n{header}   # what's typed, and [messages]'s messages under it\n\
              visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
-             hints = {}   # typed tag letters show here, and leave the tags\n\
+             show_typed_hints = {}   # typed tag letters show here, and leave the tags\n\
              placeholder = {}   # shown while nothing is typed in text mode\n\
              prefix = {}   # before the query, as \"find: \"\n\
              suffix = {}   # after the query, before the match count\n{fields}",
@@ -584,7 +669,7 @@ pub enum Notice {
     Help,
 }
 
-/// `[info]`: which messages the input box's second line shows, for how
+/// `[messages]`: which messages the input box's second line shows, for how
 /// long, and in which colours.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // independent switches, as the file has them
@@ -606,7 +691,7 @@ pub struct Info {
     pub badges: Badges,
 }
 
-/// A message's icon, a glyph from `[info] icon_font` (`""` for none), and
+/// A message's icon, a glyph from `[messages] icon_font` (`""` for none), and
 /// the colour of the icon and the words.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Badge {
@@ -662,12 +747,12 @@ impl Info {
     pub fn render(&self) -> String {
         let quote = crate::config::quote;
         let mut out = format!(
-            "\n[info]   # the input box's second line: what wayhint has to say\n\
+            "\n[messages]   # the input box's second line: what wayhint has to say\n\
              visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
              scanning = {}   # once a scan takes over half a second\n\
              no_targets = {}   # while nothing on the monitor has a tag\n\
-             no_match = {}   # a key that matches no tag, or a character no text, is dropped and named\n\
-             duration = {}   # ms a message stays\n\
+             no_match = {}   # report a tag key or query that matches nothing\n\
+             duration_ms = {}   # message lifetime\n\
              icon_font = {}   # a fontconfig pattern for the icons: a Nerd Font's symbols\n",
             self.visible,
             self.scanning,
@@ -691,11 +776,13 @@ impl Info {
 }
 
 /// How text mode marks a match: a translucent box over its text, which
-/// shows through. `[text.matches]` for every match, `[text.matches.current]`
+/// shows through. `[words.matches]` for every match, `[words.matches.current]`
 /// for the selected one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mark {
     pub background: Color,
+    pub background_end: Option<Color>,
+    pub background_direction: Direction,
     pub border: Color,
     pub border_width: f32,
     pub radius: f32,
@@ -712,7 +799,7 @@ pub struct Marks {
 }
 
 impl Marks {
-    /// The marks a file with no `[text.matches]` or `[text.starts]` gets.
+    /// The marks a file with no `[words.matches]` or `[words.first_character]` gets.
     #[cfg(test)]
     pub const fn new(style: &Style) -> Self {
         let all = Mark::new(style);
@@ -727,26 +814,25 @@ impl Marks {
     pub fn render(&self) -> String {
         format!(
             "\n{}\n{}\n{}",
-            self.all.render("text.matches"),
-            self.current.render("text.matches.current"),
+            self.all.render("words.matches"),
+            self.current.render("words.matches.current"),
             self.starts.render(),
         )
     }
 }
 
 /// How text mode marks the first letter of each word, what typing starts a
-/// match from, while nothing is typed: `[text.starts]`.
+/// match from, while nothing is typed: `[words.first_character]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Starts {
     pub mark: StartMark,
-    /// The underline's colour, and its height in px.
-    pub line: Color,
+    /// Underline height or dot diameter, in logical px.
     pub thickness: f32,
-    /// The box over the letter.
+    /// Shared fill; border, radius and padding apply only to boxes.
     pub look: Mark,
 }
 
-/// Which mark `[text.starts]` draws.
+/// Which mark `[words.first_character]` draws.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StartMark {
@@ -754,17 +840,19 @@ pub enum StartMark {
     Off,
     Underline,
     Box,
+    Dot,
 }
 
 impl Starts {
-    /// Off; drawn, a blue line 2 px high, or a box of the same blue, see-through.
+    /// Off; when enabled, blue with a 2 px underline height or dot diameter.
     pub const fn new() -> Self {
         Self {
             mark: StartMark::Off,
-            line: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
             thickness: 2.0,
             look: Mark {
-                background: Color::rgba(0x89, 0xb4, 0xfa, 0x66),
+                background: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
+                background_end: None,
+                background_direction: Direction::Right,
                 border: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
                 border_width: 0.0,
                 radius: 2.0,
@@ -776,11 +864,11 @@ impl Starts {
     pub fn validate(&self) -> Result<()> {
         if !(0.5..=20.0).contains(&self.thickness) {
             bail!(
-                "[text.starts] thickness: {} px is outside 0.5-20",
+                "[words.first_character] thickness: {} px is outside 0.5-20",
                 self.thickness
             );
         }
-        self.look.validate("text.starts")
+        self.look.validate("words.first_character")
     }
 
     /// The table as TOML, for `wayhint config`.
@@ -789,16 +877,29 @@ impl Starts {
             StartMark::Off => "off",
             StartMark::Underline => "underline",
             StartMark::Box => "box",
+            StartMark::Dot => "dot",
         };
-        let look = self.look.render("text.starts");
-        let (header, fields) = look.split_once('\n').unwrap();
-        format!(
-            "{header}   # the first letter of each word, while nothing is typed\n\
-             mark = \"{mark}\"   # off, underline, or box: the fields below\n\
-             line = \"{}\"   # the underline\n\
-             thickness = {}   # the underline's, in px\n{fields}",
-            self.line, self.thickness,
-        )
+        let mut out = format!(
+            "[words.first_character]   # the first character of each word, while nothing is typed\n\
+             mark = \"{mark}\"   # off, underline, box or dot\n\
+             color = \"{}\"\n",
+            self.look.background,
+        );
+        render_gradient(
+            &mut out,
+            "color",
+            "direction",
+            self.look.background,
+            self.look.background_end,
+            self.look.background_direction,
+        );
+        let _ = writeln!(
+            out,
+            "thickness = {}   # underline height or dot diameter, in px",
+            self.thickness,
+        );
+        self.look.render_shape(&mut out);
+        out
     }
 }
 
@@ -808,6 +909,8 @@ impl Mark {
     pub const fn new(style: &Style) -> Self {
         Self {
             background: Color::rgba(0xff, 0xff, 0x00, 0x80),
+            background_end: None,
+            background_direction: Direction::Right,
             border: style.border,
             border_width: 0.0,
             radius: style.radius,
@@ -845,6 +948,20 @@ impl Mark {
     pub fn render(&self, table: &str) -> String {
         let mut out = format!("[{table}]\n");
         let _ = writeln!(out, "background = \"{}\"", self.background);
+        render_gradient(
+            &mut out,
+            "background",
+            "background_direction",
+            self.background,
+            self.background_end,
+            self.background_direction,
+        );
+        self.render_shape(&mut out);
+        out
+    }
+
+    /// Border and geometry fields shared by match and first-character boxes.
+    fn render_shape(&self, out: &mut String) {
         let _ = writeln!(out, "border = \"{}\"", self.border);
         let _ = writeln!(out, "border_width = {}", self.border_width);
         let _ = writeln!(out, "radius = {}", self.radius);
@@ -853,7 +970,6 @@ impl Mark {
             "padding = [{}, {}]   # vertical, horizontal",
             self.padding[0], self.padding[1]
         );
-        out
     }
 }
 
@@ -885,7 +1001,7 @@ mod tests {
                 ..pixels.clone()
             },
             style,
-            "the rest is [style]'s"
+            "the rest is [hints]'s"
         );
         let mut bordered = style.clone();
         bordered.pixels.border = Some(Color::rgba(0xff, 0, 0, 0xff));
@@ -948,7 +1064,7 @@ mod tests {
     fn render_round_trips() {
         #[derive(Deserialize)]
         struct File {
-            style: Style,
+            hints: Style,
         }
         let style = Style {
             size: 20.0,
@@ -957,7 +1073,7 @@ mod tests {
             ..Style::default()
         };
         let text = style.render();
-        assert_eq!(toml::from_str::<File>(&text).unwrap().style, style);
+        assert_eq!(toml::from_str::<File>(&text).unwrap().hints, style);
     }
 
     #[test]

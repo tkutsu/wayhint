@@ -166,7 +166,15 @@ fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Resul
     let stack = desktop.stack(monitor.id)?;
     let terminals = crate::config::terminal_processes(config)?;
     let terminal_hint = crate::config::terminal_hint(config)?;
-    let (snapshot, unread) = desktop.scan(&stack, &monitor, pixels, terminal_hint, &terminals);
+    let window_hint = crate::config::window_hint(config)?;
+    let (snapshot, unread) = desktop.scan(
+        &stack,
+        &monitor,
+        pixels,
+        terminal_hint,
+        window_hint,
+        &terminals,
+    );
     let tags = |w: &Window| {
         let targets = snapshot.targets.iter();
         targets

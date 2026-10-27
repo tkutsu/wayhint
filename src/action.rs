@@ -8,7 +8,10 @@
 /// `clap::ValueEnum` lets `--verb` take these by name (`--verb right`); it
 /// lower-cases the variant names, the same names [`Action::name`] gives the
 /// config fields, and a test keeps the two in step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Left,
     Right,
@@ -21,10 +24,10 @@ pub enum Action {
     Back,
     /// The mouse's forward button (`BTN_EXTRA`).
     Forward,
-    /// The wheel, `[pointer] scroll` notches up.
+    /// The wheel, `[pointer] scroll_steps` notches up.
     #[value(name = "scroll_up")]
     ScrollUp,
-    /// The wheel, `[pointer] scroll` notches down.
+    /// The wheel, `[pointer] scroll_steps` notches down.
     #[value(name = "scroll_down")]
     ScrollDown,
     /// Press the left button and keep it down: the next command lets go
@@ -74,8 +77,12 @@ impl Action {
             Self::Hover => "move there and stay, for tooltips",
             Self::Back => "the mouse's back button",
             Self::Forward => "the mouse's forward button",
-            Self::ScrollUp => "the wheel up, [pointer] scroll notches",
-            Self::ScrollDown => "the wheel down, [pointer] scroll notches",
+            Self::ScrollUp => {
+                "scroll the focused window up immediately, [pointer] scroll_steps notches"
+            }
+            Self::ScrollDown => {
+                "scroll the focused window down immediately, [pointer] scroll_steps notches"
+            }
             Self::Hold => "press and keep down; the next tag or Space lets go there",
         }
     }
@@ -101,6 +108,11 @@ impl Action {
     /// doesn't.
     pub const fn clicks(self) -> bool {
         !matches!(self, Self::Hover | Self::ScrollUp | Self::ScrollDown)
+    }
+
+    /// Scroll actions run immediately on the focused window.
+    pub const fn scrolls(self) -> bool {
+        matches!(self, Self::ScrollUp | Self::ScrollDown)
     }
 
     /// Whether Ctrl and Alt are held through it: a Ctrl-scroll

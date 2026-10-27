@@ -5,7 +5,7 @@
 //! The first line is a list of segments, each with its role and whether
 //! it's dimmed; the dimmed ones come first. Joined, they read as the box's
 //! first line. The raw values come too: what's typed even when the tags
-//! show it instead (`[input] hints = false`), the armed verb, a hold.
+//! show it instead (`[input] show_typed_hints = false`), the armed verb, a hold.
 
 use serde::Serialize;
 
@@ -18,7 +18,7 @@ pub struct Status {
     /// `None` between rounds: while the windows are read, or a command is
     /// done.
     pub mode: Option<Mode>,
-    /// The tag letters typed, in `[style] case`, or the text query.
+    /// The tag letters typed, in `[hints] case`, or the text query.
     pub input: String,
     /// The armed verb's name.
     pub verb: Option<&'static str>,
@@ -156,12 +156,16 @@ impl Status {
         };
         let matches = match query {
             None => {
-                segments.push(Segment::new(Role::Placeholder, &input.placeholder, true));
-                segments.push(Segment::new(Role::MatchCount, " ...", true));
+                if !input.placeholder.is_empty() {
+                    segments.push(Segment::new(Role::Placeholder, &input.placeholder, true));
+                    segments.push(Segment::new(Role::MatchCount, " ...", true));
+                }
                 Some(pending)
             }
             Some("") => {
-                segments.push(Segment::new(Role::Placeholder, &input.placeholder, true));
+                if !input.placeholder.is_empty() {
+                    segments.push(Segment::new(Role::Placeholder, &input.placeholder, true));
+                }
                 None
             }
             Some(query) => {
@@ -223,7 +227,7 @@ impl Status {
     }
 
     /// What the overlay draws of it: the first line only if `input`
-    /// (`[input] visible`), the message only if `info` (`[info]
+    /// (`[input] visible`), the message only if `info` (`[messages]
     /// visible`). The feed always gets the whole.
     pub fn visible(&self, input: bool, info: bool) -> Self {
         Self {

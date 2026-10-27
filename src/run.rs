@@ -13,7 +13,7 @@
 //! Every window the focused monitor shows gets tags, not just the focused
 //! one, except where another window covers them. A menu an app opens
 //! during the run counts as a window right above its own. While the tags
-//! are up, the windows are scanned again every `[scan] refresh`, so a page that
+//! are up, the windows are scanned again every `[scan] refresh_ms`, so a page that
 //! loaded or a window that opened gets tags without a key, and a target
 //! found again keeps its tag. While nothing changes, the scans come further
 //! apart, up to 2 s, and they reuse the round's first scan's pictures of
@@ -187,12 +187,50 @@ pub fn run(
         conn,
     };
 
-    let result = session.rounds(&config, once || static_mode, static_mode, start);
+    let result = session.start(&config, once || static_mode, static_mode, start);
     session.clean_up();
     result
 }
 
 impl Session {
+    /// A scroll supplied on launch acts before the first scan.
+    fn start(
+        &mut self,
+        config: &Config,
+        once: bool,
+        static_mode: bool,
+        mut start: Start,
+    ) -> Result<()> {
+        if let Some(action) = start.verb.filter(|action| action.scrolls()) {
+            start.verb = None;
+            self.scroll(
+                config,
+                Act {
+                    action,
+                    mods: Mods::NONE,
+                },
+            )?;
+            if once {
+                return Ok(());
+            }
+            self.overlay.grab_keyboard()?;
+            sleep(config.settle);
+        }
+        self.rounds(config, once, static_mode, start)
+    }
+
+    /// Scroll immediately, without retaining a target for repeat.
+    fn scroll(&mut self, config: &Config, act: Act) -> Result<Done> {
+        self.last = None;
+        self.act(
+            act.action,
+            act.mods,
+            desktop::cursor()?,
+            config.after == After::Restore,
+        )?;
+        Ok(Done::Acted { ends: false })
+    }
+
     /// One round per action, until something ends the run.
     fn rounds(
         &mut self,
@@ -242,6 +280,7 @@ impl Session {
             // Moved out, so `scans` lets go of the desktop for the click.
             let scanned = scans.latest;
             let done = match picked {
+                Pick::Scroll { act } => self.scroll(config, act)?,
                 Pick::Leave => return self.go_home(config),
                 // Frozen hints belong only to the workspace first scanned.
                 Pick::Rescan if static_mode => return Ok(()),
@@ -371,7 +410,19 @@ impl Session {
         command: Command,
         at: Option<Point>,
     ) -> Result<Done> {
+        if !target.allows(command.act.action) {
+            return Ok(Done::Refused);
+        }
         match self.desktop.recheck(snapshot, target)? {
+            Verdict::Click { .. } if target.role == "window" => {
+                self.overlay.clear()?;
+                if !self.overlay.grabs_without_focus() {
+                    self.overlay.release_keyboard()?;
+                }
+                desktop::focus_window(&snapshot.windows[target.window].window.address)?;
+                self.last = None;
+                Ok(Done::Acted { ends: false })
+            }
             Verdict::Click { editable } => {
                 let restore = config.after == After::Restore;
                 let Act { action, mods } = command.act;
@@ -416,9 +467,9 @@ impl Session {
     /// button down and the cursor on it, and puts the cursor back only once
     /// it's let go.
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
-        self.spot = Some(at);
         let home = self.home.take();
         if let Some(held) = self.held.take() {
+            self.spot = Some(at);
             self.overlay.clear()?;
             let from = desktop::cursor().unwrap_or(held.at);
             self.pointer.drag(from, at)?;
@@ -436,6 +487,16 @@ impl Session {
         if !mods.is_empty() || !self.overlay.grabs_without_focus() {
             self.overlay.release_keyboard()?;
         }
+        let at = if action.scrolls() {
+            let Some(at) = self.desktop.scroll_target()? else {
+                desktop::log("wayhint: no focused window is visible to scroll");
+                return Ok(());
+            };
+            at
+        } else {
+            at
+        };
+        self.spot = Some(at);
         // Back where it was before wayhint moved it, if it did.
         let back = if restore && action.restores() {
             home.or_else(|| desktop::cursor().ok())
@@ -640,7 +701,7 @@ impl pick::Mouse for Hand<'_> {
 
 /// One scan of the windows `monitor` shows, and what they are, bottom to
 /// top, with `slow` called once it has taken `SLOW`. A scan slower than
-/// `[scan] refresh` is logged once a run: the tags then lag behind the
+/// `[scan] refresh_ms` is logged once a run: the tags then lag behind the
 /// screen by more than the setting says.
 fn scan(
     desktop: &mut Desktop,
@@ -658,6 +719,7 @@ fn scan(
                 monitor,
                 config.pixels,
                 config.terminal_hint,
+                config.window_hint,
                 &config.terminal_processes,
             );
             anyhow::Ok((stack, scan))
@@ -673,7 +735,7 @@ fn scan(
         && warned.insert("slow scan".into())
     {
         desktop::log(&format!(
-            "wayhint: a scan took {} ms, more than [scan] refresh ({} ms)",
+            "wayhint: a scan took {} ms, more than [scan] refresh_ms ({} ms)",
             took.as_millis(),
             every.as_millis()
         ));
@@ -681,7 +743,7 @@ fn scan(
     Ok((stack, scanned))
 }
 
-/// Shows `scanning` alone, in the input box, if `[info] scanning` says to:
+/// Shows `scanning` alone, in the input box, if `[messages] scanning` says to:
 /// a round's first scan is slow, with no tags up yet.
 fn say_scanning(overlay: &mut Overlay, config: &Config) {
     if config.info.scanning {

@@ -4,9 +4,8 @@
 //! `Pixmap`; `fontdue` rasterizes each letter into a coverage map (how much
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
-//! CPU draws that in well under a millisecond. Dots, for where a tag moved
-//! off its target clicks, are two filled circles, each on a line back to
-//! its tag.
+//! CPU draws that in well under a millisecond. Tiny arrows at the tags'
+//! edges point toward their targets.
 //!
 //! Everything is laid out in logical px, as the rest of wayhint counts,
 //! and drawn at the monitor's scale: shapes through a scaling transform,
@@ -17,12 +16,12 @@
 //! glyph from a Nerd Font's symbols, then the words, both in the
 //! message's colour.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use tiny_skia::{
-    BlendMode, FillRule, IntRect, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
-    PremultipliedColorU8, Rect, Stroke, Transform,
+    BlendMode, FillRule, GradientStop, IntRect, LinearGradient, Paint, Path, PathBuilder, Pixmap,
+    PixmapPaint, PremultipliedColorU8, Rect, SpreadMode, Stroke, Transform,
 };
 
 use crate::{
@@ -31,7 +30,7 @@ use crate::{
     placement::{self, Label},
     space::Space,
     status::{Message, Status},
-    style::{Color, Info, Mark, Marks, Position, StartMark, Style},
+    style::{Color, Direction, Info, Mark, Marks, Position, StartMark, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -46,12 +45,11 @@ const MESSAGE_WIDTH: f32 = 16.0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frame {
     pub tags: Vec<Tag>,
-    /// Where tags moved off their targets click: the tag says which, the
-    /// dot says where, and the line between says which dot is whose.
-    pub dots: Vec<Dot>,
+    /// Overrides for arrows when a click moves or a tag is displaced.
+    pub arrows: Vec<ArrowTarget>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
-    /// The first letter of each word, in `[text.starts]`, under the
+    /// The first letter of each word, in `[words.first_character]`, under the
     /// matches: what typing finds.
     pub starts: Vec<BoxRect>,
     /// The input box: its first line, an armed verb, `drop`, the tag
@@ -65,17 +63,16 @@ pub struct Frame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Highlight {
     pub rect: BoxRect,
-    /// Part of the current match, drawn in `[text.matches.current]`.
+    /// Part of the current match, drawn in `[words.matches.current]`.
     pub current: bool,
 }
 
-/// Where a tag moved off its target clicks, `at`, and its source: the
-/// tag's outline, or `from`.
+/// An arrow pointing toward `at`, from the tag's edge or `from`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Dot {
+pub struct ArrowTarget {
     pub from: Point,
     pub at: Point,
-    /// The tag whose outline the line follows; `None` starts at `from`.
+    /// The tag whose edge the arrow follows; `None` starts at `from`.
     pub tag: Option<usize>,
 }
 
@@ -87,7 +84,7 @@ pub struct Tag {
     /// Which of the tag's own points sits on `at`: its bottom-right corner
     /// for `BottomRight`, so the tag lies up and left of it.
     pub position: Position,
-    /// Its target's box, for `Position::Auto`: the tag goes beside it.
+    /// Its target's box, for `Position::Auto`: the tag goes by its centre.
     pub control: Option<BoxRect>,
     pub text: String,
     /// How many leading letters are already typed (drawn dimmed).
@@ -96,17 +93,30 @@ pub struct Tag {
     pub verb: usize,
     /// The click point; absent for a box. Placement never changes it.
     pub target: Option<Point>,
+    /// Distinct accessible objects can share the same box and click point.
+    pub object: Option<crate::desktop::tree::ObjectId>,
     pub kind: Kind,
+}
+
+type PlacementKey = (Point, Point, Option<crate::desktop::tree::ObjectId>);
+
+impl Tag {
+    /// Keep placement tied to its object as labels shorten or gain a verb.
+    fn placement_key(&self) -> Option<PlacementKey> {
+        self.target.map(|hit| (self.at, hit, self.object.clone()))
+    }
 }
 
 /// Which look a tag is drawn in.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `[style]`.
+    /// `[hints]`.
     #[default]
     Plain,
-    /// Found in its window's pixels: `[style.pixels]`.
+    /// Found in its window's pixels: `[hints.pixels]`.
     Pixels,
+    /// A window focus hint, placed last without an arrow.
+    Window,
 }
 
 /// A rasterized letter: where it sits relative to the pen, and its pixels.
@@ -133,10 +143,10 @@ struct Row {
 /// glyphs.
 pub struct Painter {
     tags: TextPainter,
-    /// Tags found in pixels: `[style.pixels]`.
+    /// Tags found in pixels: `[hints.pixels]`.
     pixels: TextPainter,
     input: TextPainter,
-    /// The messages' icons: `[info] icon_font`, at the input box's size.
+    /// The messages' icons: `[messages] icon_font`, at the input box's size.
     icons: TextPainter,
     marks: Marks,
     /// The messages' icons and colours.
@@ -144,33 +154,36 @@ pub struct Painter {
     /// Buffer px per logical px: the monitor's scale.
     scale: f32,
     space: Option<Space>,
-    regions: Vec<BoxRect>,
+    /// Each target surface and the area its labels may use.
+    regions: Vec<(BoxRect, BoxRect)>,
     /// Every target's box: what `Position::Auto` keeps its tags off.
     controls: Vec<BoxRect>,
-    /// How far each tag was moved off its own box, keyed by its anchor and
-    /// click point: a verb typed in front of the letters changes the text
+    /// How far each tag was moved off its own box, keyed by its object,
+    /// anchor and click point: a verb typed in front changes the text
     /// and the box's size, never where the tag points.
-    placed: HashMap<(Point, Point), Point>,
+    placed: HashMap<PlacementKey, Point>,
     /// Which side of its control each `Auto` tag took, with the same key
     /// and for the same reason: a shorter tag must not hop to the left.
-    sides: HashMap<(Point, Point), Side>,
+    sides: HashMap<PlacementKey, Side>,
+    /// Shared placements stay anchored, including after filtering.
+    shared: HashSet<PlacementKey>,
 }
 
 /// Where a `Position::Auto` tag goes by its control, tried in this order:
-/// to its left, under it, over it, and boxed in, at its start inside.
-/// The tag lines up with the control's start, or its middle on the left.
+/// left, below, above, right, centred along each edge, then centred inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Left,
     Below,
     Above,
-    Start,
+    Right,
+    Center,
 }
 
-/// The gap between a tag beside its control and the control, in px.
-const BESIDE: i32 = 1;
+/// The gap between a tag's near edge and its target's edge, in px.
+const BESIDE: i32 = 3;
 
-/// What an `Auto` tag must keep off: every control, the tags placed
+/// What an `Auto` tag must keep off: neighbouring controls, tags placed
 /// before it, and anything outside `bounds`, its window on the screen.
 struct Around<'a> {
     controls: &'a [BoxRect],
@@ -179,25 +192,89 @@ struct Around<'a> {
 }
 
 impl Side {
-    const ORDER: [Self; 4] = [Self::Left, Self::Below, Self::Above, Self::Start];
+    const ORDER: [Self; 5] = [
+        Self::Left,
+        Self::Below,
+        Self::Above,
+        Self::Right,
+        Self::Center,
+    ];
 
     /// The point by `control` this side's tag sits on, and which of the
     /// tag's own points goes there.
     const fn anchor(self, control: BoxRect) -> (Point, Position) {
-        let middle = control.y + control.h / 2;
+        let middle = control.center();
         match self {
-            Self::Left => (Point::new(control.x - BESIDE, middle), Position::Right),
+            Self::Left => (Point::new(control.x - BESIDE, middle.y), Position::Right),
             Self::Below => (
-                Point::new(control.x, control.bottom() + BESIDE),
-                Position::TopLeft,
+                Point::new(middle.x, control.bottom() + BESIDE),
+                Position::Top,
             ),
-            Self::Above => (
-                Point::new(control.x, control.y - BESIDE),
-                Position::BottomLeft,
+            Self::Above => (Point::new(middle.x, control.y - BESIDE), Position::Bottom),
+            Self::Right => (
+                Point::new(control.right() + BESIDE, middle.y),
+                Position::Left,
             ),
-            Self::Start => (Point::new(control.x, middle), Position::Left),
+            Self::Center => (middle, Position::Center),
         }
     }
+}
+
+impl Around<'_> {
+    /// Enclosing controls are containers, rather than neighbours to avoid.
+    fn clear(&self, rect: BoxRect, control: BoxRect) -> bool {
+        rect.intersect(self.bounds) == Some(rect)
+            && rect.intersect(control).is_none()
+            && self.controls.iter().all(|&other| {
+                other.intersect(control) == Some(control) || rect.intersect(other).is_none()
+            })
+            && !self
+                .tags
+                .iter()
+                .any(|&other| placement::touches(rect, other))
+    }
+}
+
+/// Keep targets in line order, tolerating small overlaps in adjacent hit boxes.
+fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, BoxRect)> {
+    let along = |r: BoxRect| {
+        if vertical {
+            (r.y, r.bottom())
+        } else {
+            (r.x, r.right())
+        }
+    };
+    let mut line: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|&(i, r)| {
+            !candidates
+                .iter()
+                .any(|&(j, other)| i != j && r != other && r.intersect(other) == Some(other))
+        })
+        .collect();
+    line.sort_unstable_by_key(|&(i, r)| (along(r), i));
+    if line
+        .windows(2)
+        .any(|pair| along(pair[0].1).1 - along(pair[1].1).0 > 4)
+    {
+        line.clear();
+    }
+    line
+}
+
+/// Layer surfaces can be thinner than a label; their labels may use the monitor.
+pub(super) fn label_region(
+    surface: BoxRect,
+    kind: crate::desktop::Kind,
+    screen: BoxRect,
+) -> (BoxRect, BoxRect) {
+    let labels = if matches!(kind, crate::desktop::Kind::Layer { .. }) {
+        screen
+    } else {
+        surface
+    };
+    (surface, labels)
 }
 
 impl Painter {
@@ -228,14 +305,15 @@ impl Painter {
             controls: Vec::new(),
             placed: HashMap::new(),
             sides: HashMap::new(),
+            shared: HashSet::new(),
         })
     }
 
-    /// The font and look `tag` is drawn in: `[style]` or `[style.pixels]`,
+    /// The font and look `tag` is drawn in: `[hints]` or `[hints.pixels]`,
     /// by its kind.
     const fn look(&self, tag: &Tag) -> &TextPainter {
         match tag.kind {
-            Kind::Plain => &self.tags,
+            Kind::Plain | Kind::Window => &self.tags,
             Kind::Pixels => &self.pixels,
         }
     }
@@ -245,7 +323,7 @@ impl Painter {
         &mut self,
         area: BoxRect,
         obstacles: &[BoxRect],
-        regions: Vec<BoxRect>,
+        regions: Vec<(BoxRect, BoxRect)>,
         controls: Vec<BoxRect>,
     ) {
         self.space = Some(Space::rectangles(area, obstacles));
@@ -253,6 +331,141 @@ impl Painter {
         self.controls = controls;
         self.placed.clear();
         self.sides.clear();
+        self.shared.clear();
+    }
+
+    /// Rows and columns share an outward side. One obstruction is tolerated;
+    /// two make the entire line try the remaining sides in default order.
+    #[allow(clippy::cast_precision_loss)]
+    fn line_sides(
+        &self,
+        frame: &Frame,
+        bounds: &[BoxRect],
+        controls: &[BoxRect],
+        area: (f32, f32),
+    ) -> Vec<Option<Side>> {
+        let eligible: Vec<_> = frame
+            .tags
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tag)| {
+                (tag.position == Position::Auto)
+                    .then_some(tag.control)
+                    .flatten()
+                    .map(|r| (i, r))
+            })
+            .collect();
+        if eligible.iter().all(|&(i, _)| {
+            frame.tags[i]
+                .placement_key()
+                .is_some_and(|key| self.sides.contains_key(&key))
+        }) {
+            return vec![None; frame.tags.len()];
+        }
+        let mut lines = Vec::new();
+        // Match starts, centres or ends, allowing four logical pixels of jitter.
+        for vertical in [true, false] {
+            for alignment in 0..3 {
+                let cross = |r: BoxRect| {
+                    if vertical {
+                        r.x + r.w * alignment / 2
+                    } else {
+                        r.y + r.h * alignment / 2
+                    }
+                };
+                let mut ordered = eligible.clone();
+                ordered.sort_unstable_by_key(|&(i, r)| {
+                    let b = bounds[i];
+                    (b.x, b.y, b.w, b.h, cross(r), i)
+                });
+                let mut remaining = ordered.as_slice();
+                while let Some(&(first, anchor)) = remaining.first() {
+                    let end = remaining.partition_point(|&(i, r)| {
+                        bounds[i] == bounds[first] && cross(r) - cross(anchor) <= 4
+                    });
+                    let line = line_members(&remaining[..end], vertical);
+                    remaining = &remaining[end..];
+                    if line.len() < 2 {
+                        continue;
+                    }
+                    let centre = line
+                        .iter()
+                        .map(|&(_, r)| {
+                            if vertical {
+                                r.center().x as f32 / area.0
+                            } else {
+                                r.center().y as f32 / area.1
+                            }
+                        })
+                        .sum::<f32>()
+                        / line.len() as f32;
+                    let preferred = match (vertical, centre <= 0.5) {
+                        (true, true) => Side::Left,
+                        (true, false) => Side::Right,
+                        (false, true) => Side::Above,
+                        (false, false) => Side::Below,
+                    };
+                    lines.push((centre.min(1.0 - centre), line, preferred));
+                }
+            }
+        }
+        // Where a grid has both axes, the line nearer a screen edge wins.
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.len().cmp(&a.1.len())));
+        let mut sides = vec![None; frame.tags.len()];
+        for (_, line, preferred) in lines {
+            if line.iter().any(|&(i, _)| sides[i].is_some()) {
+                continue;
+            }
+            let side = std::iter::once(preferred)
+                .chain(Side::ORDER)
+                .find(|&side| {
+                    side == Side::Center
+                        || line
+                            .iter()
+                            .filter(|&&(i, control)| {
+                                let around = Around {
+                                    controls,
+                                    tags: &[],
+                                    bounds: bounds[i],
+                                };
+                                !around.clear(
+                                    self.side_rect(&frame.tags[i], control, side, area),
+                                    control,
+                                )
+                            })
+                            .take(2)
+                            .count()
+                            < 2
+                })
+                .unwrap();
+            for (i, _) in line {
+                sides[i] = Some(side);
+            }
+        }
+        sides
+    }
+
+    /// The final candidate includes the configured offset before clearance is checked.
+    #[allow(clippy::cast_precision_loss)]
+    fn side_rect(&self, tag: &Tag, control: BoxRect, side: Side, area: (f32, f32)) -> BoxRect {
+        let (at, position) = side.anchor(control);
+        let [x, y] = self.look(tag).style.offset;
+        let at = at.offset(Point::new(x, y));
+        let dimensions @ (w, h) = self.look(tag).size(&tag.text);
+        if side == Side::Center {
+            return whole_px(place(at, position, dimensions, area).unwrap());
+        }
+        let (across, down) = position.halves();
+        // Check the requested side before monitor-edge clamping can hide it.
+        whole_px(
+            Rect::from_xywh(
+                (at.x as f32 - w * across as f32 / 2.0).round(),
+                (at.y as f32 - h * down as f32 / 2.0).round(),
+                w,
+                h,
+            )
+            .unwrap(),
+        )
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -262,12 +475,7 @@ impl Painter {
         let bounds: Vec<_> = frame
             .tags
             .iter()
-            .map(|tag| {
-                tag.target
-                    .and_then(|p| self.regions.iter().rev().find(|r| r.contains(p)))
-                    .and_then(|r| r.intersect(screen))
-                    .unwrap_or(screen)
-            })
+            .map(|tag| self.label_bounds(tag, screen))
             .collect();
         // Text mode's matches are controls too: tags keep off them.
         let controls: Vec<_> = self
@@ -276,61 +484,82 @@ impl Painter {
             .copied()
             .chain(frame.highlights.iter().map(|h| h.rect))
             .collect();
+        let sides = self.line_sides(frame, &bounds, &controls, area);
         // Each tag's own spot, clear of the tags placed before it.
         let mut originals = Vec::with_capacity(frame.tags.len());
-        for (tag, &bounds) in frame.tags.iter().zip(&bounds) {
-            let wh = self.look(tag).size(&tag.text);
+        let mut ordinary_originals = Vec::with_capacity(frame.tags.len());
+        for ((tag, &bounds), side) in frame.tags.iter().zip(&bounds).zip(sides) {
             let rect = match tag.control.filter(|_| tag.position == Position::Auto) {
                 Some(control) => {
                     let around = Around {
                         controls: &controls,
-                        tags: &originals,
+                        tags: &ordinary_originals,
                         bounds,
                     };
-                    self.beside(tag, control, wh, &around, area)
+                    self.beside(tag, control, side, &around, area)
                 }
-                None => whole_px(place(tag.at, tag.position, wh, area).unwrap()),
+                None => whole_px(
+                    place(tag.at, tag.position, self.look(tag).size(&tag.text), area).unwrap(),
+                ),
             };
             originals.push(rect);
+            if tag.kind != Kind::Window {
+                ordinary_originals.push(rect);
+            }
         }
         let labels: Vec<_> = frame
             .tags
             .iter()
             .zip(&originals)
-            .zip(bounds)
+            .zip(bounds.iter().copied())
+            .filter(|((tag, _), _)| tag.kind != Kind::Window)
             .map(|((tag, &rect), bounds)| {
-                let moved = tag.target.and_then(|hit| self.placed.get(&(tag.at, hit)));
+                let moved = tag.placement_key().and_then(|key| self.placed.get(&key));
                 Label {
                     rect: moved.map_or(rect, |&by| rect.offset(by)),
                     target: tag.target,
                     bounds,
+                    fixed: tag
+                        .placement_key()
+                        .is_some_and(|key| self.shared.contains(&key)),
                 }
             })
             .collect();
         let space = self
             .space
             .get_or_insert_with(|| Space::rectangles(screen, &[]));
-        let boxes = placement::resolve(&labels, space);
+        let mut ordinary = placement::resolve(&labels, space).into_iter();
+        let mut boxes: Vec<_> = frame
+            .tags
+            .iter()
+            .map(|tag| {
+                if tag.kind == Kind::Window {
+                    BoxRect::default()
+                } else {
+                    ordinary.next().unwrap()
+                }
+            })
+            .collect();
+        self.window_boxes(frame, &originals, &bounds, &controls, &mut boxes);
         let mut result = frame.clone();
         for (i, ((tag, &original), rect)) in
             frame.tags.iter().zip(&originals).zip(boxes).enumerate()
         {
-            // The first placement after a scan holds: two tags with one
-            // anchor and click point then start from the same spot each
-            // time, and resolve the same way.
-            if let Some(hit) = tag.target {
+            // Each object keeps its own displacement through filtering.
+            if let Some(key) = tag.placement_key() {
                 let by = Point::new(rect.x - original.x, rect.y - original.y);
-                self.placed.entry((tag.at, hit)).or_insert(by);
+                self.placed.entry(key).or_insert(by);
             }
             result.tags[i].at = rect.origin();
             result.tags[i].position = Position::TopLeft;
             if rect != original
+                && tag.kind != Kind::Window
                 && let Some(at) = tag.target
-                && !result.dots.iter().any(|d| d.tag == Some(i))
+                && !result.arrows.iter().any(|d| d.tag == Some(i))
             {
-                result.dots.push(Dot {
+                result.arrows.push(ArrowTarget {
                     from: rect.center(),
-                    at,
+                    at: tag.control.map_or(at, BoxRect::center),
                     tag: Some(i),
                 });
             }
@@ -338,95 +567,157 @@ impl Painter {
         result
     }
 
-    /// An `Auto` tag of size `wh` by its `control`: on the first side of
-    /// `Side::ORDER` that stays in its bounds, off the control, and clear
-    /// of every other control and the tags placed so far, then moved by
-    /// the look's offset. A control around this one (a list round its item)
-    /// isn't in the way. Each tag keeps the side it took until the next
-    /// scan.
+    /// Keep labels on their window's exposed region, clipped to the monitor.
+    fn label_bounds(&self, tag: &Tag, screen: BoxRect) -> BoxRect {
+        if tag.kind == Kind::Window {
+            return tag
+                .control
+                .and_then(|r| r.intersect(screen))
+                .unwrap_or(screen);
+        }
+        tag.target
+            .and_then(|p| {
+                self.regions
+                    .iter()
+                    .rev()
+                    .find(|(surface, _)| surface.contains(p))
+            })
+            .and_then(|(_, labels)| labels.intersect(screen))
+            .unwrap_or(screen)
+    }
+
+    /// Window tags yield to every ordinary label and small control.
+    fn window_boxes(
+        &self,
+        frame: &Frame,
+        originals: &[BoxRect],
+        bounds: &[BoxRect],
+        controls: &[BoxRect],
+        boxes: &mut [BoxRect],
+    ) {
+        for (i, tag) in frame
+            .tags
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.kind == Kind::Window)
+        {
+            let mut blocked: Vec<_> = controls
+                .iter()
+                .copied()
+                .filter(|r| r.w <= 192 && r.h <= 96)
+                .collect();
+            blocked.extend(boxes.iter().copied().filter(|r| !r.is_empty()));
+            let original = originals[i];
+            let kept = tag
+                .placement_key()
+                .and_then(|key| self.placed.get(&key))
+                .map_or(original, |&by| original.offset(by));
+            boxes[i] = placement::window(kept, bounds[i], &blocked);
+        }
+    }
+
+    /// An `Auto` tag by its `control`: on the first side of
+    /// `Side::ORDER` that stays in its bounds and clear of controls and
+    /// earlier tags, or on its line's shared side. The look's offset is
+    /// included in clearance checks. Each tag keeps its side until the next scan.
     fn beside(
         &mut self,
         tag: &Tag,
         control: BoxRect,
-        wh: (f32, f32),
+        shared: Option<Side>,
         around: &Around,
         area: (f32, f32),
     ) -> BoxRect {
-        let rect = |side: Side, by: Point| {
-            let (at, position) = side.anchor(control);
-            whole_px(place(at.offset(by), position, wh, area).unwrap())
-        };
-        let clear = |side: Side| {
-            let r = rect(side, Point::default());
-            side == Side::Start
-                || r.intersect(around.bounds) == Some(r)
-                    && r.intersect(control).is_none()
-                    && around.controls.iter().all(|&other| {
-                        other.intersect(control) == Some(control) || r.intersect(other).is_none()
-                    })
-                    && !around
-                        .tags
-                        .iter()
-                        .any(|&other| placement::touches(r, other))
-        };
-        let key = tag.target.map(|hit| (tag.at, hit));
-        let kept = key.and_then(|key| self.sides.get(&key)).copied();
-        let side = kept.unwrap_or_else(|| Side::ORDER.into_iter().find(|&s| clear(s)).unwrap());
+        let rect = |side: Side| self.side_rect(tag, control, side, area);
+        let clear = |side: Side| side == Side::Center || around.clear(rect(side), control);
+        let key = tag.placement_key();
+        let kept = key.as_ref().and_then(|key| self.sides.get(key)).copied();
+        let side = kept
+            .or(shared)
+            .unwrap_or_else(|| Side::ORDER.into_iter().find(|&s| clear(s)).unwrap());
+        let result = rect(side);
         if let Some(key) = key {
+            if shared.is_some() {
+                self.shared.insert(key.clone());
+            }
             self.sides.insert(key, side);
         }
-        let [x, y] = self.look(tag).style.offset;
-        rect(side, Point::new(x, y))
+        result
     }
 
     /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
     ///
-    /// Words' first letters go first, then highlights, under everything
-    /// else. Lines start at their tags' nearest edges and go under the
-    /// tags. Dots follow, then the input box.
+    /// Words' first letters and highlights go under arrows and tags.
     pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let scaled = Transform::from_scale(self.scale, self.scale);
-        for &letter in &frame.starts {
-            self.paint_start(pixmap, letter, scaled);
-        }
-        for highlight in &frame.highlights {
-            self.paint_highlight(pixmap, *highlight, scaled);
-        }
         #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
         let area = (
             pixmap.width() as f32 / self.scale,
             pixmap.height() as f32 / self.scale,
         );
+        for &letter in &frame.starts {
+            self.paint_start(pixmap, letter, scaled, area);
+        }
+        for highlight in &frame.highlights {
+            self.paint_highlight(pixmap, *highlight, scaled, area);
+        }
         let arranged = self.arrange(frame, area);
         let tags = &arranged;
-        let mut lines = Vec::new();
-        for &dot in &tags.dots {
-            let from = if let Some(tag) = dot.tag.and_then(|i| tags.tags.get(i)) {
-                let Some(rect) = place(tag.at, tag.position, self.look(tag).size(&tag.text), area)
-                else {
+        let mut arrows = Vec::new();
+        for (i, tag) in tags.tags.iter().enumerate() {
+            if tag.kind == Kind::Window {
+                continue;
+            }
+            let at = tags
+                .arrows
+                .iter()
+                .find(|d| d.tag == Some(i))
+                .map(|d| d.at)
+                .or_else(|| tag.control.map(BoxRect::center));
+            let Some(at) = at else { continue };
+            let look = self.look(tag);
+            let rect = place(tag.at, tag.position, look.size(&tag.text), area).unwrap();
+            let control = tag.control.filter(|r| at == r.center());
+            let to = if let Some(control) = control {
+                let Some(target) = padded(control, [0.0, 0.0]) else {
                     continue;
                 };
-                let Some(from) = nearest_edge(rect, self.look(tag).style.radius, centre(dot.at))
-                else {
+                // Centered fallbacks and clamped hints need no arrow inside a control.
+                if rect.intersect(&target).is_some() {
+                    continue;
+                }
+                let middle = (
+                    rect.x() + rect.width() / 2.0,
+                    rect.y() + rect.height() / 2.0,
+                );
+                let Some(edge) = nearest_edge(target, 0.0, middle) else {
                     continue;
                 };
-                from
+                edge
             } else {
-                centre(dot.from)
+                centre(at)
             };
-            lines.extend(self.line(from, centre(dot.at)));
+            if let Some(from) = nearest_edge(rect, look.style.radius, to) {
+                arrows.extend(Self::arrow(from, to, &look.style, control.is_some()));
+            }
         }
-        paint_layer(pixmap, &lines, self.scale);
+        for arrow in tags.arrows.iter().filter(|d| d.tag.is_none()) {
+            arrows.extend(Self::arrow(
+                centre(arrow.from),
+                centre(arrow.at),
+                &self.tags.style,
+                false,
+            ));
+        }
+        paint_layer(pixmap, &arrows, self.scale);
         for tag in &tags.tags {
             let look = match tag.kind {
-                Kind::Plain => &mut self.tags,
+                Kind::Plain | Kind::Window => &mut self.tags,
                 Kind::Pixels => &mut self.pixels,
             };
             look.paint_tag(pixmap, tag, area);
         }
-        let dots: Vec<Part> = tags.dots.iter().flat_map(|dot| self.dot(dot.at)).collect();
-        paint_layer(pixmap, &dots, self.scale);
         self.paint_input(pixmap, frame, area);
     }
 
@@ -447,7 +738,8 @@ impl Painter {
         let Some(rect) = place(at, style.position, self.input.size_of(&rows), (w, h)) else {
             return;
         };
-        self.input.draw(pixmap, rect, &rows, Some(&mut self.icons));
+        self.input
+            .draw(pixmap, rect, &rows, Some(&mut self.icons), false);
     }
 
     /// The input box's lines: what's typed, then the message, wrapped
@@ -488,92 +780,85 @@ impl Painter {
         rows
     }
 
-    /// The line from a tag to where it clicks, inside its outline, so it
-    /// shows on light and dark windows alike: `[style.leader]`, by default
-    /// the tags' letters on their background. It stops where its outline
-    /// meets the dot's, so a translucent dot shows no line through it.
-    fn line(&self, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Vec<Part> {
-        let style = &self.tags.style;
-        let leader = &style.leader;
-        let (line, _, outline) = leader.colors(style);
-        let reach = leader.radius + leader.outline_width;
-        let half = f32::midpoint(leader.width, leader.outline_width);
-        let stop = (reach * reach - half * half).max(0.0).sqrt();
-        let length = (x1 - x0).hypot(y1 - y0);
-        if length <= stop {
+    /// A short triangle touches a target edge, or marks a point override without a tail.
+    fn arrow(
+        (x, y): (f32, f32),
+        (to_x, to_y): (f32, f32),
+        style: &Style,
+        touch_edge: bool,
+    ) -> Vec<Part> {
+        let arrow = &style.arrow;
+        let (color, outline) = arrow.colors(style);
+        let distance = (to_x - x).hypot(to_y - y);
+        let length = arrow
+            .length
+            .min(if touch_edge { distance } else { distance - 1.0 });
+        if length <= 0.0 {
             return Vec::new();
         }
-        let keep = 1.0 - stop / length;
-        let mut path = PathBuilder::new();
-        path.move_to(x0, y0);
-        path.line_to(x0 + (x1 - x0) * keep, y0 + (y1 - y0) * keep);
-        let Some(path) = path.finish() else {
-            return Vec::new();
+        let (dx, dy) = ((to_x - x) / distance, (to_y - y) / distance);
+        let (x, y, tip_x, tip_y) = if touch_edge {
+            (to_x - dx * length, to_y - dy * length, to_x, to_y)
+        } else {
+            (x, y, x + dx * length, y + dy * length)
         };
-        // tiny-skia draws a 0 px stroke a pixel wide, so a part set to 0
-        // is left out, not stroked.
-        [
-            (
-                leader.width + leader.outline_width,
-                outline,
-                leader.outline_width > 0.0,
-            ),
-            (leader.width, line, leader.width > 0.0),
-        ]
-        .into_iter()
-        .filter(|&(_, _, shown)| shown)
-        .map(|(width, color, _)| Part {
-            path: path.clone(),
-            width: Some(width),
+        let half = length * 0.65;
+        let mut path = PathBuilder::new();
+        path.move_to(x - dy * half, y + dx * half);
+        path.line_to(tip_x, tip_y);
+        path.line_to(x + dy * half, y - dx * half);
+        path.close();
+        let path = path.finish().unwrap();
+        let mut parts = Vec::new();
+        if arrow.outline_width > 0.0 {
+            parts.push(Part {
+                path: path.clone(),
+                width: Some(arrow.outline_width),
+                color: outline,
+            });
+        }
+        parts.push(Part {
+            path,
+            width: None,
             color,
-        })
-        .collect()
-    }
-
-    /// The dot where a tag clicks, inside its outline: `[style.leader]`.
-    fn dot(&self, at: Point) -> Vec<Part> {
-        let style = &self.tags.style;
-        let leader = &style.leader;
-        let (_, dot, outline) = leader.colors(style);
-        let (x, y) = centre(at);
-        [
-            (leader.radius + leader.outline_width, outline),
-            (leader.radius, dot),
-        ]
-        .into_iter()
-        .filter_map(|(radius, color)| {
-            Some(Part {
-                path: PathBuilder::from_circle(x, y, radius)?,
-                width: None,
-                color,
-            })
-        })
-        .collect()
+        });
+        parts
     }
 
     /// One line of a match: its box grown by the mark's padding, filled
     /// and bordered as a tag is, with no letters.
-    fn paint_highlight(&self, pixmap: &mut Pixmap, highlight: Highlight, scaled: Transform) {
+    fn paint_highlight(
+        &self,
+        pixmap: &mut Pixmap,
+        highlight: Highlight,
+        scaled: Transform,
+        area: (f32, f32),
+    ) {
         let mark = if highlight.current {
             self.marks.current
         } else {
             self.marks.all
         };
         if let Some(rect) = padded(highlight.rect, mark.padding) {
-            paint_box(pixmap, rect, &mark, scaled);
+            paint_box(pixmap, rect, &mark, scaled, area);
         }
     }
 
-    /// A word's first letter, at `letter`, as `[text.starts]` marks it: a
-    /// line along the bottom of its box, or a box over it.
+    /// A word's first letter, at `letter`, as `[words.first_character]` marks it: a
+    /// line along the bottom of its box, a box over it, or a dot below it.
     #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
-    fn paint_start(&self, pixmap: &mut Pixmap, letter: BoxRect, scaled: Transform) {
+    fn paint_start(
+        &self,
+        pixmap: &mut Pixmap,
+        letter: BoxRect,
+        scaled: Transform,
+        area: (f32, f32),
+    ) {
         let starts = self.marks.starts;
         let (rect, mark) = match starts.mark {
             StartMark::Off => return,
             StartMark::Underline => {
                 let line = Mark {
-                    background: starts.line,
                     border_width: 0.0,
                     radius: starts.thickness / 2.0,
                     ..starts.look
@@ -583,9 +868,20 @@ impl Painter {
                 (Rect::from_xywh(x, y, w, starts.thickness), line)
             }
             StartMark::Box => (padded(letter, starts.look.padding), starts.look),
+            StartMark::Dot => {
+                let diameter = starts.thickness;
+                let x = letter.x as f32 + (letter.w as f32 - diameter) / 2.0;
+                let y = letter.bottom() as f32 + 1.0;
+                let dot = Mark {
+                    border_width: 0.0,
+                    radius: diameter / 2.0,
+                    ..starts.look
+                };
+                (Rect::from_xywh(x, y, diameter, diameter), dot)
+            }
         };
         if let Some(rect) = rect {
-            paint_box(pixmap, rect, &mark, scaled);
+            paint_box(pixmap, rect, &mark, scaled, area);
         }
     }
 }
@@ -718,7 +1014,7 @@ impl TextPainter {
         let row = self.row(&tag.text, tag.verb, tag.typed);
         let size = self.size_of(std::slice::from_ref(&row));
         if let Some(rect) = place(tag.at, tag.position, size, area) {
-            self.draw(pixmap, rect, &[row], None);
+            self.draw(pixmap, rect, &[row], None, true);
         }
     }
 
@@ -732,21 +1028,38 @@ impl TextPainter {
         rect: Rect,
         rows: &[Row],
         mut icons: Option<&mut Self>,
+        gradients: bool,
     ) {
         let s = self.scale;
         let scaled = Transform::from_scale(s, s);
         let style = &self.style;
-        paint_box(
+        #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
+        let area = (pixmap.width() as f32 / s, pixmap.height() as f32 / s);
+        let background = gradient(
+            style.background,
+            style.background_end.filter(|_| gradients),
+            style.background_direction,
+            area,
+        );
+        let text = style.text_end.filter(|_| gradients).map(|end| {
+            let mut paint = gradient(style.text, Some(end), style.text_direction, area);
+            paint.shader.transform(scaled);
+            paint
+        });
+        paint_box_fill(
             pixmap,
             rect,
             &Mark {
                 background: style.background,
+                background_end: None,
+                background_direction: style.background_direction,
                 border: style.border,
                 border_width: style.border_width,
                 radius: style.radius,
                 padding: style.padding,
             },
             scaled,
+            &background,
         );
         let [pad_y, pad_x] = style.padding;
         let (verb, dimmed) = (style.verb, style.dimmed);
@@ -758,7 +1071,7 @@ impl TextPainter {
             if let (Some(icon), Some(icons)) = (&row.icon, icons.as_deref_mut()) {
                 let mut pen = left;
                 for letter in icon.chars() {
-                    pen += icons.letter(pixmap, (pen, baseline), letter, row.color);
+                    pen += icons.letter(pixmap, (pen, baseline), letter, row.color, None);
                 }
             }
             let mut start = left + row.indent;
@@ -766,14 +1079,14 @@ impl TextPainter {
             for (i, cell) in row.text.split('\t').enumerate() {
                 let mut pen = start;
                 for letter in cell.chars() {
-                    let color = if index < row.verb {
-                        verb
+                    let (color, gradient) = if index < row.verb {
+                        (verb, None)
                     } else if index < row.dimmed {
-                        dimmed
+                        (dimmed, None)
                     } else {
-                        row.color
+                        (row.color, text.as_ref())
                     };
-                    pen += self.letter(pixmap, (pen, baseline), letter, color);
+                    pen += self.letter(pixmap, (pen, baseline), letter, color, gradient);
                     index += 1;
                 }
                 // The tab counts as a character.
@@ -792,10 +1105,16 @@ impl TextPainter {
         (pen, baseline): (f32, f32),
         letter: char,
         color: Color,
+        gradient: Option<&Paint<'_>>,
     ) -> f32 {
         let s = self.scale;
         let advance = self.advance(letter);
-        let glyph = self.glyph(letter, color);
+        // Gradient glyphs cache only opaque coverage; their screen position
+        // changes the paint, never the glyph cache key.
+        let glyph = self.glyph(
+            letter,
+            gradient.map_or(color, |_| Color::rgba(255, 255, 255, 255)),
+        );
         let m = glyph.metrics;
         if let Some(ink) = &glyph.pixmap {
             // fontdue measures `ymin` up from the baseline to the glyph's
@@ -805,10 +1124,24 @@ impl TextPainter {
                 (pen * s + m.xmin as f32).round() as i32,
                 (baseline * s - m.ymin as f32 - m.height as f32).round() as i32,
             );
+            let tinted = gradient.map(|paint| {
+                let mut tinted = ink.clone();
+                let mut paint = paint.clone();
+                paint.blend_mode = BlendMode::SourceIn;
+                #[allow(clippy::cast_precision_loss)] // buffer coordinates are far below 2^24
+                paint
+                    .shader
+                    .transform(Transform::from_translate(-x as f32, -y as f32));
+                #[allow(clippy::cast_precision_loss)] // glyph sizes are far below 2^24
+                let rect = Rect::from_xywh(0.0, 0.0, tinted.width() as f32, tinted.height() as f32)
+                    .unwrap();
+                tinted.fill_rect(rect, &paint, Transform::identity(), None);
+                tinted
+            });
             pixmap.draw_pixmap(
                 x,
                 y,
-                ink.as_ref(),
+                tinted.as_ref().unwrap_or(ink).as_ref(),
                 &PixmapPaint::default(),
                 Transform::identity(),
                 None,
@@ -910,16 +1243,27 @@ fn whole_px(rect: Rect) -> BoxRect {
 /// stroked half a width inside, so the whole line stays within the box.
 /// Its padding is the caller's business. `rect` is in logical px, which
 /// `transform` takes to the buffer's.
-fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark, transform: Transform) {
+fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark, transform: Transform, area: (f32, f32)) {
+    let fill = gradient(
+        look.background,
+        look.background_end,
+        look.background_direction,
+        area,
+    );
+    paint_box_fill(pixmap, rect, look, transform, &fill);
+}
+
+/// Fill a box with a solid colour or screen-wide gradient, keeping its border solid.
+fn paint_box_fill(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    look: &Mark,
+    transform: Transform,
+    fill: &Paint<'_>,
+) {
     let inset = look.border_width / 2.0;
     if let Some(path) = rounded_rect(rect, look.radius) {
-        pixmap.fill_path(
-            &path,
-            &paint(look.background),
-            FillRule::Winding,
-            transform,
-            None,
-        );
+        pixmap.fill_path(&path, fill, FillRule::Winding, transform, None);
     }
     if look.border_width > 0.0
         && let Some(inner) = Rect::from_ltrb(
@@ -945,8 +1289,8 @@ fn centre(at: Point) -> (f32, f32) {
     (at.x as f32 + 0.5, at.y as f32 + 0.5)
 }
 
-/// The closest point on a rounded tag's outline. A dot inside the tag
-/// needs no line, which would run through its background and letters.
+/// The closest point on a rounded tag's outline. A target inside the tag
+/// needs no arrow through its background and letters.
 fn nearest_edge(rect: Rect, radius: f32, (x, y): (f32, f32)) -> Option<(f32, f32)> {
     let radius = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
     let inner_x = x.clamp(rect.left() + radius, rect.right() - radius);
@@ -999,7 +1343,7 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
     path.finish()
 }
 
-/// One part of a leader: `path` stroked `width` px wide, or filled when
+/// One part of an arrow: `path` stroked `width` px wide, or filled when
 /// `width` is `None`.
 struct Part {
     path: Path,
@@ -1008,7 +1352,7 @@ struct Part {
 }
 
 /// Paints `parts` on a layer of their own, each replacing what's under it,
-/// then lays the layer over `pixmap`. A translucent line or dot then shows
+/// then lays the layer over `pixmap`. A translucent arrow then shows
 /// the window behind it, not the outline it sits in. The parts are in
 /// logical px, drawn at `scale` buffer px each.
 fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
@@ -1067,6 +1411,34 @@ fn paint(color: Color) -> Paint<'static> {
     paint
 }
 
+/// One gradient over the monitor in logical px; drawing shapes clips its visibility.
+fn gradient(
+    start: Color,
+    end: Option<Color>,
+    direction: Direction,
+    (w, h): (f32, f32),
+) -> Paint<'static> {
+    let Some(end) = end else {
+        return paint(start);
+    };
+    let ((x0, y0), (x1, y1)) = direction.ends();
+    let color = |c: Color| tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a);
+    let shader = LinearGradient::new(
+        tiny_skia::Point::from_xy(x0 * w, y0 * h),
+        tiny_skia::Point::from_xy(x1 * w, y1 * h),
+        vec![
+            GradientStop::new(0.0, color(start)),
+            GradientStop::new(1.0, color(end)),
+        ],
+        SpreadMode::Pad,
+        Transform::identity(),
+    );
+    Paint {
+        shader: shader.unwrap_or_else(|| paint(start).shader),
+        ..Paint::default()
+    }
+}
+
 /// A glyph's coverage map as a pixmap in `color`. Pixmaps store
 /// premultiplied colour (each channel already multiplied by alpha), which is
 /// what makes blending a single multiply-add.
@@ -1107,20 +1479,181 @@ mod tests {
     use super::*;
     use crate::style::Notice;
 
+    fn gradient_tag(x: i32, y: i32, text: &str) -> Tag {
+        Tag {
+            at: Point::new(x, y),
+            position: Position::TopLeft,
+            control: None,
+            text: text.into(),
+            typed: 0,
+            verb: 0,
+            target: None,
+            object: None,
+            kind: Kind::Plain,
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn background_gradients_span_the_monitor_and_stay_inside_tags() {
+        for scale in [1.0, 1.25, 2.0] {
+            for direction in [
+                Direction::Right,
+                Direction::Left,
+                Direction::Bottom,
+                Direction::Top,
+                Direction::BottomRight,
+                Direction::TopLeft,
+                Direction::TopRight,
+                Direction::BottomLeft,
+            ] {
+                let style = Style {
+                    background: Color::rgba(255, 0, 0, 255),
+                    background_end: Some(Color::rgba(0, 0, 255, 255)),
+                    background_direction: direction,
+                    border_width: 0.0,
+                    radius: 4.0,
+                    padding: [5.0, 10.0],
+                    ..Style::default()
+                };
+                let mut painter = TextPainter::new(&style, scale).unwrap();
+                let mut map = Pixmap::new((400.0 * scale) as u32, (200.0 * scale) as u32).unwrap();
+                for (x, y) in [(20, 20), (200, 80), (340, 140)] {
+                    painter.paint_tag(&mut map, &gradient_tag(x, y, " "), (400.0, 200.0));
+                    let (px, py) = (
+                        ((x + 8) as f32 * scale) as u32,
+                        ((y + 8) as f32 * scale) as u32,
+                    );
+                    let (fx, fy) = ((px as f32 + 0.5) / scale, (py as f32 + 0.5) / scale);
+                    let t = match direction {
+                        Direction::Right => fx / 400.0,
+                        Direction::Left => 1.0 - fx / 400.0,
+                        Direction::Bottom => fy / 200.0,
+                        Direction::Top => 1.0 - fy / 200.0,
+                        Direction::BottomRight => (fx * 400.0 + fy * 200.0) / 200_000.0,
+                        Direction::TopLeft => 1.0 - (fx * 400.0 + fy * 200.0) / 200_000.0,
+                        Direction::TopRight => (fx * 400.0 + (200.0 - fy) * 200.0) / 200_000.0,
+                        Direction::BottomLeft => ((400.0 - fx) * 400.0 + fy * 200.0) / 200_000.0,
+                    };
+                    let pixel = map.pixel(px, py).unwrap();
+                    assert_eq!(pixel.alpha(), 255);
+                    assert!(
+                        (f32::from(pixel.blue()) - t * 255.0).abs() < 2.0,
+                        "{direction:?} at {scale}x: {pixel:?}, expected {t}"
+                    );
+                    assert!((f32::from(pixel.red()) - (1.0 - t) * 255.0).abs() < 2.0);
+                }
+                assert_eq!(map.pixel(0, 0).unwrap().alpha(), 0);
+                assert_eq!(
+                    map.pixel((100.0 * scale) as u32, (100.0 * scale) as u32)
+                        .unwrap()
+                        .alpha(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn text_gradients_follow_screen_pixels_preserve_coverage_and_special_colours() {
+        for scale in [1.0, 1.25, 2.0] {
+            for direction in [Direction::Right, Direction::Bottom, Direction::TopLeft] {
+                let style = Style {
+                    text: Color::rgba(255, 0, 0, 255),
+                    text_end: Some(Color::rgba(0, 0, 255, 0)),
+                    text_direction: direction,
+                    dimmed: Color::rgba(0, 255, 0, 180),
+                    verb: Color::rgba(255, 255, 0, 255),
+                    background: Color::rgba(0, 0, 0, 0),
+                    border_width: 0.0,
+                    ..Style::default()
+                };
+                let solid = Style {
+                    text: Color::rgba(255, 255, 255, 255),
+                    text_end: None,
+                    ..style.clone()
+                };
+                let mut painter = TextPainter::new(&style, scale).unwrap();
+                let mut reference = TextPainter::new(&solid, scale).unwrap();
+                let mut map = Pixmap::new((400.0 * scale) as u32, (160.0 * scale) as u32).unwrap();
+                let mut coverage = map.clone();
+                for x in [20, 180, 320] {
+                    let tag = gradient_tag(x, 40, "MMM");
+                    painter.paint_tag(&mut map, &tag, (400.0, 160.0));
+                    reference.paint_tag(&mut coverage, &tag, (400.0, 160.0));
+                }
+                let mut checked = 0;
+                for (i, (pixel, mask)) in map.pixels().iter().zip(coverage.pixels()).enumerate() {
+                    if mask.alpha() == 0 {
+                        assert_eq!(pixel.alpha(), 0);
+                        continue;
+                    }
+                    let fx = ((i % map.width() as usize) as f32 + 0.5) / scale;
+                    let fy = ((i / map.width() as usize) as f32 + 0.5) / scale;
+                    let t = match direction {
+                        Direction::Bottom => fy / 160.0,
+                        Direction::TopLeft => 1.0 - (fx * 400.0 + fy * 160.0) / 185_600.0,
+                        _ => fx / 400.0,
+                    };
+                    let alpha = f32::from(mask.alpha()) * (1.0 - t);
+                    // tiny-skia's integer pipeline rounds interpolation and
+                    // coverage separately, within three channel levels of f32.
+                    assert!((f32::from(pixel.alpha()) - alpha).abs() <= 3.0);
+                    assert!((f32::from(pixel.red()) - alpha * (1.0 - t)).abs() <= 3.0);
+                    assert!(
+                        (f32::from(pixel.blue()) - alpha * t).abs() <= 3.0,
+                        "scale={scale}, t={t}, pixel={pixel:?}, mask={mask:?}, expected alpha={alpha}"
+                    );
+                    checked += 1;
+                }
+                assert!(checked > 100);
+                assert_eq!(
+                    painter.glyphs.len(),
+                    1,
+                    "screen position must not grow the glyph cache"
+                );
+                let mut tag = gradient_tag(20, 90, "MMM");
+                tag.typed = 2;
+                tag.verb = 1;
+                painter.paint_tag(&mut map, &tag, (400.0, 160.0));
+                assert!(
+                    map.pixels()
+                        .iter()
+                        .any(|p| p.red() == 255 && p.green() == 255 && p.blue() == 0)
+                );
+                assert!(map.pixels().iter().any(|p| p.red() == 0
+                    && p.green() == 180
+                    && p.blue() == 0
+                    && p.alpha() == 180));
+            }
+        }
+    }
+
     #[test]
     fn query_has_its_own_font_colours_and_box_above_the_marks() {
         let config = crate::config::Config::parse(
             r##"
-[style]
+[hints]
 size = 8
 text = "#ff0000"
-[text.matches]
+text_end = "#0000ff"
+background_end = "#ffffff"
+[words.matches]
 background = "#0000ff"
 padding = [0, 0]
 radius = 0
-[text.matches.current]
+[words.matches.current]
 background = "#ff00ff"
-[text.input]
+[words.input]
 font = "serif"
 size = 28
 text = "#00ff00"
@@ -1190,6 +1723,52 @@ offset = [20, 20]
             (0, 0, 255),
             "no query left when returning to hints"
         );
+    }
+
+    #[test]
+    fn an_empty_placeholder_hides_the_box_until_input_or_a_message() {
+        let style = Style::default();
+        let input = crate::style::Input {
+            placeholder: String::new(),
+            ..crate::style::Input::new(&style)
+        };
+        let mut painter = Painter::new(
+            &style,
+            &Marks::new(&style),
+            &input.style,
+            &Info::default(),
+            1.0,
+        )
+        .unwrap();
+        let mut pixmap = Pixmap::new(800, 600).unwrap();
+        for (query, message, visible) in [
+            (None, false, false),
+            (Some(""), false, false),
+            (Some("x"), false, true),
+            (Some(""), false, false),
+            (Some(""), true, true),
+            (None, true, true),
+            (Some(""), false, false),
+        ] {
+            let frame = Frame {
+                status: Status {
+                    info: message.then(|| Message::new(crate::style::Notice::NoMatch, "no match")),
+                    ..Status::text(None, false, query, None, &input)
+                },
+                ..Frame::default()
+            };
+            assert_eq!(
+                painter.rows(&frame, 800.0).len(),
+                usize::from(visible),
+                "query {query:?}, message {message}: no empty row above a warning"
+            );
+            painter.paint(&mut pixmap, &frame);
+            assert_eq!(
+                pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0),
+                visible,
+                "query {query:?}, message {message}"
+            );
+        }
     }
 
     #[test]
@@ -1290,7 +1869,7 @@ offset = [20, 20]
         clippy::cast_sign_loss
     )]
     fn a_scaled_monitor_shows_the_same_picture_bigger() {
-        let style = Style {
+        let mut style = Style {
             text: Color::rgba(240, 20, 30, 255),
             background: Color::rgba(30, 30, 30, 255),
             radius: 0.0,
@@ -1298,6 +1877,8 @@ offset = [20, 20]
             padding: [4.0, 6.0],
             ..Style::default()
         };
+        style.arrow.color = Some(Color::rgba(255, 255, 255, 255));
+        style.arrow.outline = Some(Color::rgba(255, 255, 255, 255));
         let mut marks = Marks::new(&style);
         marks.all.background = Color::rgba(0, 0, 255, 255);
         marks.all.border_width = 0.0;
@@ -1311,6 +1892,7 @@ offset = [20, 20]
                 text: "AB".into(),
                 typed: 0,
                 target: None,
+                object: None,
                 verb: 0,
                 kind: Kind::Plain,
             }],
@@ -1318,7 +1900,7 @@ offset = [20, 20]
                 rect: BoxRect::new(20, 100, 40, 20),
                 current: false,
             }],
-            dots: vec![Dot {
+            arrows: vec![ArrowTarget {
                 from: Point::new(150, 20),
                 at: Point::new(150, 100),
                 tag: None,
@@ -1359,12 +1941,17 @@ offset = [20, 20]
         };
         assert!((letters(&one) * 1.5 - letters(&big)).abs() <= 2.0);
 
-        // The line and the dot land on the same spots, scaled.
-        for ((x, y), what) in [((150, 60), "the line"), ((150, 100), "the dot")] {
-            let small = rgba(one.pixel(x, y).unwrap());
-            let large = rgba(big.pixel(x * 3 / 2, y * 3 / 2).unwrap());
-            assert_eq!(small.3, 255, "{what}");
-            assert_eq!(small, large, "{what}");
+        // The arrow stays at its anchor at either scale; no tail or target dot.
+        for (image, scale) in [(&one, 1.0), (&big, 1.5)] {
+            let at = |x: f32, y: f32| {
+                image
+                    .pixel((x * scale) as u32, (y * scale) as u32)
+                    .unwrap()
+                    .alpha()
+            };
+            assert!(at(150.0, 21.0) > 0);
+            assert_eq!(at(150.0, 60.0), 0);
+            assert_eq!(at(150.0, 100.0), 0);
         }
     }
 
@@ -1577,6 +2164,7 @@ offset = [20, 20]
             typed: 0,
             verb: 0,
             target: None,
+            object: None,
             kind,
         };
         let frame = Frame {
@@ -1590,7 +2178,7 @@ offset = [20, 20]
         };
         let red = bounds(&pixmap, is(style.text));
         let pixels = bounds(&pixmap, is(teal));
-        assert!(red[2] <= 100, "[style] letters only on the first: {red:?}");
+        assert!(red[2] <= 100, "[hints] letters only on the first: {red:?}");
         assert!(
             (120..200).contains(&pixels[0]) && pixels[2] <= 200,
             "teal letters only on the second: {pixels:?}"
@@ -1618,6 +2206,7 @@ offset = [20, 20]
                 typed: 2,
                 verb: 1,
                 target: None,
+                object: None,
                 kind: Kind::Plain,
             }],
             ..Frame::default()
@@ -1664,13 +2253,13 @@ offset = [20, 20]
     #[test]
     fn connection_follows_the_closest_edge_and_rounded_corner() {
         let rect = Rect::from_xywh(20.0, 30.0, 40.0, 20.0).unwrap();
-        for (dot, edge) in [
+        for (point, edge) in [
             ((5.0, 38.0), (20.0, 38.0)),
             ((75.0, 42.0), (60.0, 42.0)),
             ((35.0, 5.0), (35.0, 30.0)),
             ((45.0, 75.0), (45.0, 50.0)),
         ] {
-            assert_eq!(nearest_edge(rect, 4.0, dot), Some(edge));
+            assert_eq!(nearest_edge(rect, 4.0, point), Some(edge));
         }
         let corner = nearest_edge(rect, 4.0, (12.0, 22.0)).unwrap();
         let expected = 4.0 / 2.0_f32.sqrt();
@@ -1683,11 +2272,10 @@ offset = [20, 20]
     }
 
     #[test]
-    fn rendered_line_moves_between_edges_and_uses_the_clamped_tag_box() {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn tiny_arrows_follow_all_four_tag_edges_without_a_tail_or_dot() {
         let style = Style {
             padding: [8.0, 20.0],
-            text: Color::rgba(240, 20, 30, 255),
-            background: Color::rgba(30, 30, 30, 128),
             radius: 6.0,
             ..Style::default()
         };
@@ -1702,61 +2290,86 @@ offset = [20, 20]
                 text: "AA".into(),
                 typed: 0,
                 target: None,
+                object: None,
                 verb: 0,
                 kind: Kind::Plain,
             }],
-            dots: vec![Dot {
+            arrows: vec![ArrowTarget {
                 from: Point::new(100, 80),
                 at: Point::default(),
                 tag: Some(0),
             }],
             ..Frame::default()
         };
-        for (dot, (x, y)) in [
-            (Point::new(60, 90), (90, 90)),
-            (Point::new(110, 40), (110, 70)),
-            (Point::new(210, 90), (190, 90)),
-            (Point::new(110, 160), (110, 140)),
+        let rect = whole_px(
+            place(
+                frame.tags[0].at,
+                Position::TopLeft,
+                painter.tags.size("AA"),
+                (240.0, 200.0),
+            )
+            .unwrap(),
+        );
+        let middle = rect.center();
+        for (target, near, gap) in [
+            (
+                Point::new(60, middle.y),
+                Point::new(rect.x - 1, middle.y),
+                Point::new(80, middle.y),
+            ),
+            (
+                Point::new(middle.x, 40),
+                Point::new(middle.x, rect.y - 1),
+                Point::new(middle.x, 60),
+            ),
+            (
+                Point::new(220, middle.y),
+                Point::new(rect.right() + 1, middle.y),
+                Point::new(210, middle.y),
+            ),
+            (
+                Point::new(middle.x, 180),
+                Point::new(middle.x, rect.bottom() + 1),
+                Point::new(middle.x, 160),
+            ),
         ] {
-            frame.dots[0].at = dot;
+            frame.arrows[0].at = target;
             painter.paint(&mut pixmap, &frame);
-            let pixel = pixmap.pixel(x, y).unwrap();
-            assert_eq!(
-                (pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()),
-                (240, 20, 30, 255),
-                "dot at {dot:?}: the closest edge gives a straight connection"
+            assert!(
+                pixmap.pixel(near.x as u32, near.y as u32).unwrap().alpha() > 0,
+                "arrow toward {target:?}"
             );
+            for at in [gap, target] {
+                assert_eq!(
+                    pixmap.pixel(at.x as u32, at.y as u32).unwrap().alpha(),
+                    0,
+                    "no tail or dot at {at:?}"
+                );
+            }
         }
-
-        // The tag is clamped to x=2; its stored anchor stays offscreen.
+        // Clamping uses the drawn box, rather than its offscreen anchor.
         frame.tags[0].at = Point::new(-100, 80);
-        frame.dots[0].from = frame.tags[0].at;
-        frame.dots[0].at = Point::new(25, 160);
+        frame.arrows[0].at = Point::new(25, 180);
         painter.paint(&mut pixmap, &frame);
-        assert_eq!(pixmap.pixel(25, 140).unwrap().red(), 240);
-
-        // Space has no tag even if the pointer shares a tag's anchor.
-        frame.tags[0].at = Point::new(100, 80);
-        frame.dots[0] = Dot {
-            from: Point::new(100, 80),
-            at: Point::new(100, 160),
-            tag: None,
-        };
-        painter.paint(&mut pixmap, &frame);
-        assert_eq!(pixmap.pixel(100, 140).unwrap().red(), 240);
+        assert!(
+            pixmap
+                .pixel(25, (rect.bottom() + 1) as u32)
+                .unwrap()
+                .alpha()
+                > 0
+        );
     }
 
     #[test]
-    fn a_translucent_leader_shows_the_window_not_its_outline() {
+    fn a_translucent_arrow_shows_the_window_through_its_fill() {
         let mut style = Style::default();
-        style.leader.line = Some(Color::rgba(255, 0, 0, 128));
-        style.leader.dot = Some(Color::rgba(0, 255, 0, 128));
-        style.leader.outline = Some(Color::rgba(0, 0, 255, 255));
+        style.arrow.color = Some(Color::rgba(255, 0, 0, 128));
+        style.arrow.outline = Some(Color::rgba(0, 0, 255, 255));
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         let mut pixmap = Pixmap::new(200, 200).unwrap();
         let frame = Frame {
-            dots: vec![Dot {
+            arrows: vec![ArrowTarget {
                 from: Point::new(100, 20),
                 at: Point::new(100, 160),
                 tag: None,
@@ -1764,15 +2377,10 @@ offset = [20, 20]
             ..Frame::default()
         };
         painter.paint(&mut pixmap, &frame);
-        let rgba = |x, y| {
-            let p = pixmap.pixel(x, y).unwrap();
-            (p.red(), p.green(), p.blue(), p.alpha())
-        };
-        // Premultiplied: half of full red is 128 red at 128 alpha.
-        assert_eq!(rgba(100, 90), (128, 0, 0, 128), "the line");
-        assert_eq!(rgba(100, 160), (0, 128, 0, 128), "the dot");
-        assert_eq!(rgba(100, 158), (0, 128, 0, 128), "no line under the dot");
-        assert_eq!(rgba(101, 90).2, 255, "the outline beside the line");
+        let p = pixmap.pixel(100, 21).unwrap();
+        assert_eq!((p.red(), p.green(), p.blue(), p.alpha()), (128, 0, 0, 128));
+        assert_eq!(pixmap.pixel(100, 90).unwrap().alpha(), 0);
+        assert_eq!(pixmap.pixel(100, 160).unwrap().alpha(), 0);
     }
 
     #[test]
@@ -1812,23 +2420,14 @@ mod collision_tests {
         let style = Style::default();
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
-        painter.set_space(AREA, &[], vec![AREA], controls.to_vec());
+        painter.set_space(AREA, &[], vec![(AREA, AREA)], controls.to_vec());
         painter
     }
 
     /// Where `painter` puts an `Auto` tag reading `text` on `control`, and
-    /// whether it drew a dot for it.
+    /// whether placement added an arrow target.
     fn auto(painter: &mut Painter, control: BoxRect, text: &str) -> (BoxRect, bool) {
-        let tag = Tag {
-            at: Position::Auto.on(control),
-            position: Position::Auto,
-            control: Some(control),
-            text: text.into(),
-            typed: 0,
-            verb: 0,
-            target: Some(control.center()),
-            kind: Kind::Plain,
-        };
+        let tag = auto_tag(control, text);
         let frame = Frame {
             tags: vec![tag],
             ..Frame::default()
@@ -1837,7 +2436,67 @@ mod collision_tests {
         let placed = &arranged.tags[0];
         let wh = painter.tags.size(text);
         let rect = whole_px(place(placed.at, placed.position, wh, (400.0, 300.0)).unwrap());
-        (rect, !arranged.dots.is_empty())
+        (rect, !arranged.arrows.is_empty())
+    }
+
+    fn auto_tag(control: BoxRect, text: &str) -> Tag {
+        Tag {
+            at: Position::Auto.on(control),
+            position: Position::Auto,
+            control: Some(control),
+            text: text.into(),
+            typed: 0,
+            verb: 0,
+            target: Some(control.center()),
+            object: None,
+            kind: Kind::Plain,
+        }
+    }
+
+    #[test]
+    fn window_label_yields_to_controls_and_ordinary_tags_without_an_arrow() {
+        let area = BoxRect::new(0, 0, 400, 300);
+        let close = BoxRect::new(350, 5, 40, 25);
+        let regular = auto_tag(close, "A");
+        let window = Tag {
+            at: Point::new(390, 10),
+            position: Position::TopRight,
+            control: Some(area),
+            target: Some(Point::new(200, 150)),
+            kind: Kind::Window,
+            text: "W".into(),
+            ..regular.clone()
+        };
+        let mut painter = among(&[close]);
+        let frame = Frame {
+            tags: vec![window, regular.clone()],
+            ..Frame::default()
+        };
+        let placed = painter.arrange(&frame, (400.0, 300.0));
+        let rect = |tag: &Tag| {
+            whole_px(
+                place(
+                    tag.at,
+                    tag.position,
+                    painter.look(tag).size(&tag.text),
+                    (400.0, 300.0),
+                )
+                .unwrap(),
+            )
+        };
+        let (window_box, control_box) = (rect(&placed.tags[0]), rect(&placed.tags[1]));
+        assert!(!placement::touches(window_box, control_box));
+        assert!(!placement::touches(window_box, close));
+        assert_eq!(window_box.intersect(area.inset(2)), Some(window_box));
+        assert!(placed.arrows.iter().all(|a| a.tag != Some(0)));
+        let only = painter.arrange(
+            &Frame {
+                tags: vec![regular],
+                ..Frame::default()
+            },
+            (400.0, 300.0),
+        );
+        assert_eq!(placed.tags[1].at, only.tags[0].at);
     }
 
     /// The box `side` gives a tag reading `text` on `control`.
@@ -1848,18 +2507,19 @@ mod collision_tests {
     }
 
     #[test]
-    fn word_starts_are_underlined_or_boxed() {
+    fn first_characters_share_the_fill_for_underlines_boxes_and_dots() {
         let style = Style::default();
         let letter = BoxRect::new(20, 20, 10, 16);
-        let (red, blue) = (Color::rgba(255, 0, 0, 255), Color::rgba(0, 0, 255, 255));
-        for (mark, middle, bottom) in [
-            (StartMark::Off, None, None),
-            (StartMark::Underline, None, Some(red)),
-            (StartMark::Box, Some(blue), Some(blue)),
+        let blue = Color::rgba(0, 0, 255, 255);
+        for (mark, middle, bottom, below) in [
+            (StartMark::Off, None, None, None),
+            (StartMark::Underline, None, Some(blue), None),
+            (StartMark::Box, Some(blue), Some(blue), None),
+            (StartMark::Dot, None, None, Some(blue)),
         ] {
             let mut marks = Marks::new(&style);
             marks.starts.mark = mark;
-            marks.starts.line = red;
+            marks.starts.thickness = 6.0;
             marks.starts.look.background = blue;
             let mut painter = Painter::new(&style, &marks, &style, &Info::default(), 1.0).unwrap();
             let mut pixmap = Pixmap::new(60, 60).unwrap();
@@ -1874,37 +2534,534 @@ mod collision_tests {
             };
             assert_eq!(at(25, 26), middle, "{mark:?}: the letter's middle");
             assert_eq!(at(25, 35), bottom, "{mark:?}: its bottom row");
-            assert_eq!(at(25, 40), None, "{mark:?}: nothing under it");
+            assert_eq!(at(25, 40), below, "{mark:?}: centered below the character");
+            assert_eq!(at(21, 40), None, "{mark:?}: outside the dot diameter");
         }
     }
 
     #[test]
-    fn auto_tags_go_left_then_under_then_over_then_stay_at_the_start() {
-        let left = BoxRect::new(60, 100, 38, 20);
-        let below = BoxRect::new(100, 122, 60, 20);
-        let above = BoxRect::new(100, 78, 60, 20);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn word_gradients_span_the_monitor_at_every_scale_and_stay_inside_marks() {
+        for (table, mark, field) in [
+            ("words.matches", "", "background"),
+            ("words.matches.current", "", "background"),
+            ("words.first_character", "mark = 'box'", "color"),
+            (
+                "words.first_character",
+                "mark = 'dot'\nthickness = 6",
+                "color",
+            ),
+            (
+                "words.first_character",
+                "mark = 'underline'\nthickness = 6",
+                "color",
+            ),
+        ] {
+            for direction in ["right", "left"] {
+                for alpha in ["ff", "00"] {
+                    let direction_field = if field == "color" {
+                        "direction"
+                    } else {
+                        "background_direction"
+                    };
+                    let config = crate::config::Config::parse(
+                        &format!("[{table}]\n{mark}\n{field} = '#ff0000'\n{field}_end = '#0000ff{alpha}'\n{direction_field} = '{direction}'\nradius = 0\npadding = [0, 0]"),
+                        &crate::keys::Layout::named("us", ""),
+                    ).unwrap();
+                    let rects = [BoxRect::new(10, 20, 60, 20), BoxRect::new(130, 20, 60, 20)];
+                    let mut frame = Frame::default();
+                    if table == "words.first_character" {
+                        frame.starts = rects.to_vec();
+                    } else {
+                        frame.highlights = rects
+                            .iter()
+                            .map(|&rect| Highlight {
+                                rect,
+                                current: table.ends_with("current"),
+                            })
+                            .collect();
+                    }
+                    let mut previous: Option<[[u8; 4]; 2]> = None;
+                    for scale in [1.0, 1.5, 2.0] {
+                        let mut painter = Painter::new(
+                            &config.style,
+                            &config.marks,
+                            &config.input.style,
+                            &config.info,
+                            scale,
+                        )
+                        .unwrap();
+                        let mut map =
+                            Pixmap::new((200.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+                        painter.paint(&mut map, &frame);
+                        let sample = |x: f32, y: f32| {
+                            map.pixel((x * scale) as u32, (y * scale) as u32).unwrap()
+                        };
+                        let (xs, y) = match config.marks.starts.mark {
+                            StartMark::Dot => ([40.0, 160.0], 44.0),
+                            StartMark::Underline => ([30.0, 150.0], 37.0),
+                            _ => ([30.0, 150.0], 30.0),
+                        };
+                        let samples = xs.map(|x| sample(x, y));
+                        let (start, end) = if direction == "right" {
+                            (samples[0], samples[1])
+                        } else {
+                            (samples[1], samples[0])
+                        };
+                        assert!(
+                            start.red() > end.red(),
+                            "{table}, {direction}, {scale}: gradient spans both marks"
+                        );
+                        if alpha == "ff" {
+                            assert!(end.blue() > start.blue());
+                            assert_eq!((start.alpha(), end.alpha()), (255, 255));
+                        } else {
+                            assert!(
+                                start.alpha() > end.alpha(),
+                                "endpoint alpha is interpolated"
+                            );
+                        }
+                        for (x, y) in [(5.0, 30.0), (100.0, 30.0), (30.0, 45.0), (195.0, 30.0)] {
+                            assert_eq!(sample(x, y).alpha(), 0, "outside the marks");
+                        }
+                        let channels = samples.map(|p| [p.red(), p.green(), p.blue(), p.alpha()]);
+                        if let Some(previous) = previous {
+                            assert!(
+                                channels
+                                    .iter()
+                                    .zip(previous)
+                                    .all(|(a, b)| a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 2)),
+                                "same logical position across scales"
+                            );
+                        }
+                        previous = Some(channels);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auto_centers_along_the_control_edge_even_when_the_click_is_elsewhere() {
+        let mut painter = among(&[BUTTON]);
+        let mut tag = auto_tag(BUTTON, "EA");
+        tag.target = Some(Point::new(155, 115));
+        let frame = Frame {
+            tags: vec![tag],
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        let rect = whole_px(
+            place(
+                arranged.tags[0].at,
+                Position::TopLeft,
+                painter.tags.size("EA"),
+                (400.0, 300.0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(rect.right(), BUTTON.x - BESIDE);
+        assert_eq!(rect.center().y, BUTTON.center().y);
+        assert_eq!(arranged.tags[0].target, Some(Point::new(155, 115)));
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn auto_arrows_touch_all_four_target_edges_without_entering_the_controls() {
+        for (vertical, near) in [(true, true), (true, false), (false, true), (false, false)] {
+            let controls: Vec<_> = (0..3)
+                .map(|i| {
+                    if vertical {
+                        BoxRect::new(if near { 50 } else { 320 }, 60 + i * 60, 24, 20)
+                    } else {
+                        BoxRect::new(90 + i * 70, if near { 40 } else { 240 }, 24, 20)
+                    }
+                })
+                .collect();
+            let mut painter = among(&controls);
+            painter.tags.style.arrow.outline_width = 0.0;
+            let frame = Frame {
+                tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            let mut pixmap = Pixmap::new(400, 300).unwrap();
+            painter.paint(&mut pixmap, &frame);
+            for (tag, control) in arranged.tags.iter().zip(controls) {
+                let rect = whole_px(
+                    place(
+                        tag.at,
+                        tag.position,
+                        painter.tags.size(&tag.text),
+                        (400.0, 300.0),
+                    )
+                    .unwrap(),
+                );
+                assert!(
+                    rect.intersect(control).is_none(),
+                    "hint must sit outside its own control"
+                );
+                let middle = control.center();
+                let touch = match (vertical, near) {
+                    (true, true) => Point::new(control.x - 1, middle.y),
+                    (true, false) => Point::new(control.right(), middle.y),
+                    (false, true) => Point::new(middle.x, control.y - 1),
+                    (false, false) => Point::new(middle.x, control.bottom()),
+                };
+                assert!(
+                    pixmap
+                        .pixel(touch.x as u32, touch.y as u32)
+                        .unwrap()
+                        .alpha()
+                        > 0,
+                    "arrow touches {touch:?}"
+                );
+                assert_eq!(
+                    pixmap
+                        .pixel(middle.x as u32, middle.y as u32)
+                        .unwrap()
+                        .alpha(),
+                    0,
+                    "no arrow toward the target center"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_boxed_in_shared_row_stays_centered_inside_its_targets() {
+        let controls = [
+            BoxRect::new(60, 120, 24, 20),
+            BoxRect::new(180, 120, 24, 20),
+        ];
+        let mut painter = among(&controls);
+        // Other controls surround both centers, blocking every side.
+        painter.controls.extend(controls.iter().flat_map(|r| {
+            let p = r.center();
+            [
+                BoxRect::new(p.x - 45, p.y - 35, 44, 70),
+                BoxRect::new(p.x + 1, p.y - 35, 44, 70),
+                BoxRect::new(p.x - 45, p.y - 35, 90, 34),
+                BoxRect::new(p.x - 45, p.y + 1, 90, 34),
+            ]
+        }));
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        for (tag, control) in arranged.tags.iter().zip(controls) {
+            let rect = whole_px(
+                place(
+                    tag.at,
+                    Position::TopLeft,
+                    painter.tags.size("EA"),
+                    (400.0, 300.0),
+                )
+                .unwrap(),
+            );
+            assert_eq!(rect.center(), control.center());
+        }
+    }
+
+    #[test]
+    fn shared_side_survives_a_collision_and_filtering() {
+        let controls = [BoxRect::new(100, 80, 2, 12), BoxRect::new(100, 96, 2, 12)];
+        let mut painter = among(&controls);
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        for (tag, control) in arranged.tags.iter().zip(controls) {
+            assert_eq!(tag.at, on(Side::Left, control, "EA").origin());
+        }
+        let filtered = Frame {
+            tags: vec![frame.tags[1].clone()],
+            ..Frame::default()
+        };
+        assert_eq!(
+            painter.arrange(&filtered, (400.0, 300.0)).tags[0].at,
+            arranged.tags[1].at
+        );
+    }
+
+    #[test]
+    fn auto_tags_go_left_then_under_then_over_then_right_then_center() {
+        let left = BoxRect::new(80, 109, 1, 2);
+        let below = BoxRect::new(129, 133, 2, 1);
+        let above = BoxRect::new(129, 85, 2, 1);
         // A list round the button is no neighbour.
         let around = BoxRect::new(50, 50, 200, 200);
         for (others, side) in [
             (vec![around], Side::Left),
             (vec![left], Side::Below),
             (vec![left, below], Side::Above),
-            (vec![left, below, above], Side::Start),
+            (vec![left, below, above], Side::Right),
+            (
+                vec![left, below, above, BoxRect::new(177, 109, 1, 2)],
+                Side::Center,
+            ),
         ] {
             let mut painter = among(&[[BUTTON].as_slice(), &others].concat());
-            let (got, dot) = auto(&mut painter, BUTTON, "EA");
+            let (got, moved) = auto(&mut painter, BUTTON, "EA");
             assert_eq!(got, on(side, BUTTON, "EA"), "{side:?}");
-            assert!(!dot, "{side:?}: its own spot, no leader");
+            assert!(!moved, "{side:?}: its own spot, no arrow");
         }
         let (left, _) = auto(&mut among(&[BUTTON]), BUTTON, "EA");
-        assert_eq!(left.right(), BUTTON.x - BESIDE, "ends by the start");
+        assert_eq!(
+            left.right(),
+            BUTTON.x - BESIDE,
+            "ends outside the left edge"
+        );
         assert_eq!(left.center().y, BUTTON.center().y, "middles in line");
+    }
+
+    #[test]
+    fn auto_uses_right_when_left_bottom_and_top_are_blocked() {
+        let controls = [
+            BUTTON,
+            BoxRect::new(80, 109, 1, 2),
+            BoxRect::new(129, 133, 2, 1),
+            BoxRect::new(129, 85, 2, 1),
+        ];
+        let (got, moved) = auto(&mut among(&controls), BUTTON, "EA");
+        assert_eq!(got.x, BUTTON.right() + BESIDE);
+        assert_eq!(got.center().y, BUTTON.center().y);
+        assert!(!moved);
+    }
+
+    #[test]
+    fn auto_aligned_targets_share_the_side_toward_the_screen_edge() {
+        for (vertical, near) in [(true, true), (true, false), (false, true), (false, false)] {
+            let controls: Vec<_> = (0..3)
+                .map(|i| {
+                    if vertical {
+                        BoxRect::new(if near { 50 } else { 320 }, 60 + i * 60, 24, 20)
+                    } else {
+                        BoxRect::new(90 + i * 70, if near { 40 } else { 240 }, 24, 20)
+                    }
+                })
+                .collect();
+            let mut painter = among(&controls);
+            let frame = Frame {
+                tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            for (tag, control) in arranged.tags.iter().zip(&controls) {
+                let wh = painter.tags.size(&tag.text);
+                let rect = whole_px(place(tag.at, tag.position, wh, (400.0, 300.0)).unwrap());
+                match (vertical, near) {
+                    (true, true) => assert_eq!(rect.right(), control.x - BESIDE),
+                    (true, false) => assert_eq!(rect.x, control.right() + BESIDE),
+                    (false, true) => assert_eq!(rect.bottom(), control.y - BESIDE),
+                    (false, false) => assert_eq!(rect.y, control.bottom() + BESIDE),
+                }
+                assert_eq!(tag.target, Some(control.center()));
+            }
+        }
+    }
+
+    #[test]
+    fn auto_flips_a_line_only_when_two_members_are_blocked() {
+        let column = [
+            BoxRect::new(100, 60, 24, 20),
+            BoxRect::new(100, 120, 24, 20),
+            BoxRect::new(100, 180, 24, 20),
+        ];
+        let blockers = [BoxRect::new(65, 60, 34, 20), BoxRect::new(65, 120, 34, 20)];
+        for blocked in 0..=2 {
+            let mut painter = among(&[column.as_slice(), &blockers[..blocked]].concat());
+            let frame = Frame {
+                tags: column.iter().map(|&r| auto_tag(r, "EA")).collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            for (i, (tag, &control)) in arranged.tags.iter().zip(&column).enumerate() {
+                let side = if blocked == 2 {
+                    Side::Below
+                } else {
+                    Side::Left
+                };
+                assert_eq!(
+                    tag.at,
+                    on(side, control, "EA").origin(),
+                    "{blocked} blocked, member {i}"
+                );
+            }
+            let filtered = Frame {
+                tags: vec![frame.tags[2].clone()],
+                ..Frame::default()
+            };
+            assert_eq!(
+                painter.arrange(&filtered, (400.0, 300.0)).tags[0].at,
+                arranged.tags[2].at
+            );
+        }
+    }
+
+    #[test]
+    fn auto_lines_allow_varied_sizes_but_do_not_join_windows_or_scattered_targets() {
+        let column = [
+            BoxRect::new(300, 60, 24, 20),
+            BoxRect::new(302, 120, 40, 20),
+            BoxRect::new(301, 180, 60, 20),
+        ];
+        let scattered = [
+            BoxRect::new(280, 40, 24, 20),
+            BoxRect::new(330, 110, 24, 20),
+            BoxRect::new(250, 220, 24, 20),
+        ];
+        let windows = [BoxRect::new(90, 40, 24, 20), BoxRect::new(230, 40, 24, 20)];
+        for (controls, regions, side) in [
+            (column.as_slice(), vec![AREA], Side::Right),
+            (scattered.as_slice(), vec![AREA], Side::Left),
+            (
+                windows.as_slice(),
+                vec![BoxRect::new(0, 0, 200, 300), BoxRect::new(200, 0, 200, 300)],
+                Side::Left,
+            ),
+        ] {
+            let mut painter = among(controls);
+            painter.set_space(
+                AREA,
+                &[],
+                regions.into_iter().map(|r| (r, r)).collect(),
+                controls.to_vec(),
+            );
+            let frame = Frame {
+                tags: controls.iter().rev().map(|&r| auto_tag(r, "EA")).collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            for (tag, &control) in arranged.tags.iter().zip(controls.iter().rev()) {
+                let (at, position) = side.anchor(control);
+                let expected =
+                    whole_px(place(at, position, painter.tags.size("EA"), (400.0, 300.0)).unwrap());
+                assert_eq!(tag.at, expected.origin());
+            }
+        }
+    }
+
+    #[test]
+    fn auto_checks_clearance_after_applying_the_offset() {
+        let blocker = BoxRect::new(98, 108, 1, 4);
+        let mut painter = among(&[BUTTON, blocker]);
+        painter.tags.style.offset = [8, 0];
+        let (got, _) = auto(&mut painter, BUTTON, "EA");
+        assert_eq!(got.y, BUTTON.bottom() + BESIDE);
+        assert_eq!(got.x, on(Side::Below, BUTTON, "EA").x + 8);
+    }
+
+    #[test]
+    fn auto_top_bar_keeps_one_row_beside_the_surface() {
+        let style = Style {
+            size: 10.0,
+            padding: [0.0, 2.0],
+            ..Style::default()
+        };
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
+        let screen = BoxRect::new(0, 0, 2560, 1440);
+        let bar = BoxRect::new(0, 0, 2560, 38);
+        let controls = [
+            BoxRect::new(10, 4, 20, 30),
+            BoxRect::new(30, 4, 20, 30),
+            BoxRect::new(50, 4, 20, 30),
+        ];
+        painter.set_space(
+            screen,
+            &controls,
+            vec![label_region(
+                bar,
+                crate::desktop::Kind::Layer { level: 1 },
+                screen,
+            )],
+            controls.to_vec(),
+        );
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (2560.0, 1440.0));
+        let wh = painter.tags.size("EA");
+        for (tag, control) in arranged.tags.iter().zip(controls) {
+            let rect = whole_px(place(tag.at, tag.position, wh, (2560.0, 1440.0)).unwrap());
+            assert_eq!(
+                rect.y,
+                control.bottom() + BESIDE,
+                "top bar hints must share the clear row below"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_slightly_overlapping_hit_boxes_still_share_a_row() {
+        let controls = [
+            BoxRect::new(90, 240, 31, 30),
+            BoxRect::new(120, 240, 31, 30),
+            BoxRect::new(150, 240, 31, 30),
+        ];
+        let mut painter = among(&controls);
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        assert!(
+            arranged.tags.iter().all(|tag| tag.at.y == 273),
+            "one-pixel hit-box overlaps must not split the row"
+        );
+    }
+
+    #[test]
+    fn coincident_accessible_objects_keep_separate_placements_when_filtered() {
+        let config =
+            crate::config::Config::parse("", &crate::keys::Layout::named("us", "")).unwrap();
+        let targets: Vec<_> = ["/first", "/second"]
+            .into_iter()
+            .map(|path| crate::snapshot::Target {
+                object: Some(crate::desktop::tree::ObjectId {
+                    bus: ":1.2".into(),
+                    path: path.into(),
+                }),
+                window: 0,
+                rect: BUTTON,
+                visible: BUTTON,
+                hit: BUTTON.center(),
+                role: "section".into(),
+                name: String::new(),
+                editable: false,
+                clips: vec![],
+                opens: vec![],
+            })
+            .collect();
+        let frame = Frame {
+            tags: targets
+                .iter()
+                .zip(["EA", "ET"])
+                .map(|(t, text)| crate::pick::tag(t, text.into(), 0, &config))
+                .collect(),
+            ..Frame::default()
+        };
+        let mut painter = among(&[BUTTON]);
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        assert_ne!(arranged.tags[0].at, arranged.tags[1].at);
+        let filtered = Frame {
+            tags: vec![frame.tags[1].clone()],
+            ..Frame::default()
+        };
+        assert_eq!(
+            painter.arrange(&filtered, (400.0, 300.0)).tags[0].at,
+            arranged.tags[1].at
+        );
     }
 
     #[test]
     fn auto_tags_stay_in_their_window_and_keep_their_side() {
         // At the window's left edge: no room on the left.
-        let edge = BoxRect::new(3, 100, 60, 20);
+        let edge = BoxRect::new(3, 100, 34, 20);
         let (got, _) = auto(&mut among(&[edge]), edge, "EA");
         assert_eq!(got, on(Side::Below, edge, "EA"));
         // Room on the left for one letter, not two: the tag goes under, and
@@ -1959,6 +3116,7 @@ mod collision_tests {
             .map(|(at, hit, text)| Tag {
                 at,
                 target: Some(hit),
+                object: None,
                 position: Position::BottomRight,
                 control: None,
                 text: text.into(),
@@ -1980,8 +3138,8 @@ mod collision_tests {
             boxes[0].intersect(&boxes[1]).is_none(),
             "sidebar row and close must have readable labels"
         );
-        assert_eq!(arranged.dots.len(), 1);
-        assert_eq!(arranged.dots[0].at, Point::new(259, 193));
+        assert_eq!(arranged.arrows.len(), 1);
+        assert_eq!(arranged.arrows[0].at, Point::new(259, 193));
         let moved = BoxRect::new(
             boxes[1].x() as i32,
             boxes[1].y() as i32,
@@ -1999,7 +3157,7 @@ mod collision_tests {
             "typing must keep displaced labels stable"
         );
         // A verb typed in front of the letters: the displaced tag stays off
-        // the row it would cover, and keeps its leader; the other gets none.
+        // the row it would cover, and keeps its arrow; the other gets none.
         let with_verb = |tag: &Tag| Frame {
             tags: vec![Tag {
                 text: format!("r{}", tag.text),
@@ -2010,11 +3168,11 @@ mod collision_tests {
         };
         let moved = painter.arrange(&with_verb(&frame.tags[1]), (300.0, 600.0));
         assert_eq!(moved.tags[0].at.y, arranged.tags[1].at.y);
-        assert_eq!(moved.dots.len(), 1, "still pointing back at its target");
+        assert_eq!(moved.arrows.len(), 1, "still pointing back at its target");
         let kept = painter.arrange(&with_verb(&frame.tags[0]), (300.0, 600.0));
-        assert_eq!(kept.dots, [], "a tag never moved needs no leader");
+        assert_eq!(kept.arrows, [], "a tag never moved needs no arrow");
         let nudged = Frame {
-            dots: vec![Dot {
+            arrows: vec![ArrowTarget {
                 from: frame.tags[1].at,
                 at: Point::new(269, 203),
                 tag: Some(1),
@@ -2022,8 +3180,8 @@ mod collision_tests {
             ..frame.clone()
         };
         let nudged = painter.arrange(&nudged, (300.0, 600.0));
-        assert_eq!(nudged.dots.len(), 1);
-        assert_eq!(nudged.dots[0].at, Point::new(269, 203));
+        assert_eq!(nudged.arrows.len(), 1);
+        assert_eq!(nudged.arrows[0].at, Point::new(269, 203));
     }
 }
 
@@ -2097,16 +3255,21 @@ mod capture_replay {
         let snapshot = std::env::var("WAYHINT_LAYOUT_SNAPSHOT").unwrap();
         let output = std::env::var("WAYHINT_LAYOUT_OUTPUT").unwrap();
         let snapshot = crate::snapshot::Snapshot::load(Path::new(&snapshot)).unwrap();
-        assert_eq!(snapshot.windows.len(), 1);
+        assert!(!snapshot.windows.is_empty());
         let config = std::env::var("WAYHINT_STYLE_FILE")
             .ok()
             .map_or_else(String::new, |p| std::fs::read_to_string(p).unwrap());
         let config =
             crate::config::Config::parse(&config, &crate::keys::Layout::named("us", "")).unwrap();
         let window = &snapshot.windows[0].window;
-        let origin = window.rect.origin();
+        let viewport = std::env::var("WAYHINT_LAYOUT_MONITOR")
+            .ok()
+            .map_or(window.rect, |s| {
+                serde_json::from_str::<BoxRect>(&s).unwrap()
+            });
+        let origin = viewport.origin();
         let shift = Point::new(-origin.x, -origin.y);
-        let area = window.rect.offset(shift);
+        let area = viewport.offset(shift);
         let selector = crate::selection::Selector::new(
             snapshot.targets.len(),
             config.alphabet.len(),
@@ -2148,13 +3311,22 @@ mod capture_replay {
             .iter()
             .map(|t| t.shown().offset(shift))
             .collect();
-        painter.set_space(area, &obstacles, vec![area], controls);
+        painter.set_space(
+            area,
+            &obstacles,
+            snapshot
+                .windows
+                .iter()
+                .map(|w| label_region(w.window.rect.offset(shift), w.window.kind, area))
+                .collect(),
+            controls,
+        );
         let size = (area.w as f32, area.h as f32);
         let boxes = |p: &Painter, f: &Frame| {
             f.tags
                 .iter()
                 .map(|t| {
-                    let r = place(t.at, t.position, p.tags.size(&t.text), size).unwrap();
+                    let r = place(t.at, t.position, p.look(t).size(&t.text), size).unwrap();
                     BoxRect::new(
                         r.x() as i32,
                         r.y() as i32,
@@ -2169,6 +3341,25 @@ mod capture_replay {
         let placed = painter.arrange(&frame, size);
         let layout_ms = started.elapsed().as_secs_f64() * 1000.0;
         let after = boxes(&painter, &placed);
+        let filtered = Frame {
+            tags: frame.tags.iter().step_by(2).cloned().collect(),
+            ..Frame::default()
+        };
+        let filtered = painter.arrange(&filtered, size);
+        for (index, (kept, original)) in filtered
+            .tags
+            .iter()
+            .zip(placed.tags.iter().step_by(2))
+            .enumerate()
+        {
+            assert_eq!(
+                kept.at,
+                original.at,
+                "filtering moved hint {} with control {:?}",
+                index * 2,
+                kept.control
+            );
+        }
         let overlaps = |rs: &[BoxRect]| {
             rs.iter()
                 .enumerate()
@@ -2181,10 +3372,10 @@ mod capture_replay {
                 .sum::<usize>()
         };
         // A tag moved off its own spot, `auto`'s side or its position, has
-        // a dot.
-        let moved = placed.dots.len();
+        // an arrow target.
+        let moved = placed.arrows.len();
         let covered = placed
-            .dots
+            .arrows
             .iter()
             .filter_map(|d| d.tag)
             .filter(|&i| painter.space.as_ref().unwrap().ink(after[i]) != 0)
@@ -2192,7 +3383,24 @@ mod capture_replay {
         assert_eq!(covered, 0, "a moved label covers captured content");
         let mut pixmap = Pixmap::new(area.w as u32, area.h as u32).unwrap();
         painter.paint(&mut pixmap, &frame);
-        pixmap.save_png(&output).unwrap();
+        if let Ok(background) = std::env::var("WAYHINT_LAYOUT_BACKGROUND") {
+            let mut picture = Pixmap::load_png(background).unwrap();
+            assert_eq!(
+                (picture.width(), picture.height()),
+                (pixmap.width(), pixmap.height())
+            );
+            picture.draw_pixmap(
+                0,
+                0,
+                pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            picture.save_png(&output).unwrap();
+        } else {
+            pixmap.save_png(&output).unwrap();
+        }
         let data = serde_json::json!({"labels":after,"original":before,"targets":frame.tags.iter().map(|t|t.target).collect::<Vec<_>>(),
             "overlaps_before":overlaps(&before),"overlaps_after":overlaps(&after),"moved":moved,"moved_over_ink":covered,"layout_ms":layout_ms});
         std::fs::write(
