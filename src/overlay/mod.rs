@@ -414,8 +414,17 @@ impl Overlay {
             .iter()
             .map(|w| w.window.rect.offset(shift))
             .collect();
-        self.painter
-            .set_space(self.monitor.rect.offset(shift), &obstacles, regions);
+        let controls = snapshot
+            .targets
+            .iter()
+            .map(|t| t.shown().offset(shift))
+            .collect();
+        self.painter.set_space(
+            self.monitor.rect.offset(shift),
+            &obstacles,
+            regions,
+            controls,
+        );
     }
 
     /// Draws a new set of tags (`frame` in global coordinates) and starts
@@ -436,13 +445,15 @@ impl Overlay {
             feed.send(&frame.status);
         }
         let origin = self.monitor.rect.origin();
-        let to_local = |p: Point| Point::new(p.x - origin.x, p.y - origin.y);
+        let shift = Point::new(-origin.x, -origin.y);
+        let to_local = |p: Point| p.offset(shift);
         let local = Frame {
             tags: frame
                 .tags
                 .iter()
                 .map(|t| Tag {
                     at: to_local(t.at),
+                    control: t.control.map(|r| r.offset(shift)),
                     target: t.target.map(to_local),
                     ..t.clone()
                 })
@@ -460,10 +471,11 @@ impl Overlay {
                 .highlights
                 .iter()
                 .map(|h| Highlight {
-                    rect: h.rect.offset(Point::new(-origin.x, -origin.y)),
+                    rect: h.rect.offset(shift),
                     current: h.current,
                 })
                 .collect(),
+            starts: frame.starts.iter().map(|r| r.offset(shift)).collect(),
             status: frame.status.visible(self.visible.0, self.visible.1),
         };
         self.painter.paint(&mut self.pixmap, &local);

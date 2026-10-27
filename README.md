@@ -228,11 +228,18 @@ auto_accept = false    # true acts on a unique match after 3 characters
 Set `[hints] auto_accept = false` to confirm completed hints and match
 labels with `Enter`. This applies in either mode. Set `[text] hints = false` to show only text
 matches. Appearance is configured under `[style]`, `[text.matches]`,
-`[input]` and `[info]`; colours accept hex RGB or RGBA. Hints, match labels
+`[text.starts]`, `[input]` and `[info]`; colours accept hex RGB or RGBA. Hints, match labels
 and verbs each have their own colour: `[style] text` for hints, `[style.labels]`
 for match labels (mauve by default), and `verb` in `[style]` and `[input]` for
 an armed verb (peach by default). Invalid settings are reported before
 wayhint takes the keyboard.
+
+A hint goes beside the start of its control: to its left, or under it, or
+above it, whichever spot no other control or hint takes first. A control
+with no free spot keeps its hint at its own start. Set `[style] position`
+to a point such as `"bottom-right"` to put every hint there instead.
+`[text.starts] mark = "underline"` or `"box"` marks the first letter of each
+word that text mode can find, while nothing is typed.
 
 ## Limits and troubleshooting
 

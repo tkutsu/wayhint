@@ -72,7 +72,8 @@ pub fn resolve(labels: &[Label], space: &Space) -> Vec<Rect> {
 fn expand(r: Rect, by: i32) -> Rect {
     Rect::new(r.x - by, r.y - by, r.w + 2 * by, r.h + 2 * by)
 }
-fn touches(a: Rect, b: Rect) -> bool {
+/// Whether two labels are too close to read apart.
+pub fn touches(a: Rect, b: Rect) -> bool {
     expand(a, 2).intersect(b).is_some()
 }
 

@@ -31,7 +31,7 @@ use crate::{
     placement::{self, Label},
     space::Space,
     status::{Message, Status},
-    style::{Color, Info, Mark, Marks, Position, Style},
+    style::{Color, Info, Mark, Marks, Position, StartMark, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -51,6 +51,9 @@ pub struct Frame {
     pub dots: Vec<Dot>,
     /// Text mode's matches, under everything else.
     pub highlights: Vec<Highlight>,
+    /// The first letter of each word, in `[text.starts]`, under the
+    /// matches: what typing finds.
+    pub starts: Vec<BoxRect>,
     /// The input box: its first line, an armed verb, `drop`, the tag
     /// letters typed, text mode's query; and its second, a message,
     /// wrapped to fit. One with tabs, the key list, is shown whole, its
@@ -84,6 +87,8 @@ pub struct Tag {
     /// Which of the tag's own points sits on `at`: its bottom-right corner
     /// for `BottomRight`, so the tag lies up and left of it.
     pub position: Position,
+    /// Its target's box, for `Position::Auto`: the tag goes beside it.
+    pub control: Option<BoxRect>,
     pub text: String,
     /// How many leading letters are already typed (drawn dimmed).
     pub typed: usize,
@@ -144,10 +149,59 @@ pub struct Painter {
     scale: f32,
     space: Option<Space>,
     regions: Vec<BoxRect>,
+    /// Every target's box: what `Position::Auto` keeps its tags off.
+    controls: Vec<BoxRect>,
     /// How far each tag was moved off its own box, keyed by its anchor and
     /// click point: a verb typed in front of the letters changes the text
     /// and the box's size, never where the tag points.
     placed: HashMap<(Point, Point), Point>,
+    /// Which side of its control each `Auto` tag took, with the same key
+    /// and for the same reason: a shorter tag must not hop to the left.
+    sides: HashMap<(Point, Point), Side>,
+}
+
+/// Where a `Position::Auto` tag goes by its control, tried in this order:
+/// to its left, under it, over it, and boxed in, at its start inside.
+/// The tag lines up with the control's start, or its middle on the left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Left,
+    Below,
+    Above,
+    Start,
+}
+
+/// The gap between a tag beside its control and the control, in px.
+const BESIDE: i32 = 1;
+
+/// What an `Auto` tag must keep off: every control, the tags placed
+/// before it, and anything outside `bounds`, its window on the screen.
+struct Around<'a> {
+    controls: &'a [BoxRect],
+    tags: &'a [BoxRect],
+    bounds: BoxRect,
+}
+
+impl Side {
+    const ORDER: [Self; 4] = [Self::Left, Self::Below, Self::Above, Self::Start];
+
+    /// The point by `control` this side's tag sits on, and which of the
+    /// tag's own points goes there.
+    const fn anchor(self, control: BoxRect) -> (Point, Position) {
+        let middle = control.y + control.h / 2;
+        match self {
+            Self::Left => (Point::new(control.x - BESIDE, middle), Position::Right),
+            Self::Below => (
+                Point::new(control.x, control.bottom() + BESIDE),
+                Position::TopLeft,
+            ),
+            Self::Above => (
+                Point::new(control.x, control.y - BESIDE),
+                Position::BottomLeft,
+            ),
+            Self::Start => (Point::new(control.x, middle), Position::Left),
+        }
+    }
 }
 
 impl Painter {
@@ -176,7 +230,9 @@ impl Painter {
             scale,
             space: None,
             regions: Vec::new(),
+            controls: Vec::new(),
             placed: HashMap::new(),
+            sides: HashMap::new(),
         })
     }
 
@@ -191,40 +247,65 @@ impl Painter {
     }
 
     /// A fresh scan invalidates placement; typing keeps the same positions.
-    pub fn set_space(&mut self, area: BoxRect, obstacles: &[BoxRect], regions: Vec<BoxRect>) {
+    pub fn set_space(
+        &mut self,
+        area: BoxRect,
+        obstacles: &[BoxRect],
+        regions: Vec<BoxRect>,
+        controls: Vec<BoxRect>,
+    ) {
         self.space = Some(Space::rectangles(area, obstacles));
         self.regions = regions;
+        self.controls = controls;
         self.placed.clear();
+        self.sides.clear();
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     fn arrange(&mut self, frame: &Frame, area: (f32, f32)) -> Frame {
         let screen = BoxRect::new(0, 0, area.0 as i32, area.1 as i32).inset(2);
-        let originals: Vec<_> = frame
+        // Where each tag may go: its target's window, on the screen.
+        let bounds: Vec<_> = frame
             .tags
             .iter()
             .map(|tag| {
-                let rect =
-                    place(tag.at, tag.position, self.look(tag).size(&tag.text), area).unwrap();
-                BoxRect::new(
-                    rect.x() as i32,
-                    rect.y() as i32,
-                    rect.width() as i32,
-                    rect.height() as i32,
-                )
+                tag.target
+                    .and_then(|p| self.regions.iter().rev().find(|r| r.contains(p)))
+                    .and_then(|r| r.intersect(screen))
+                    .unwrap_or(screen)
             })
             .collect();
+        // Text mode's matches are controls too: a label goes beside its own.
+        let controls: Vec<_> = self
+            .controls
+            .iter()
+            .copied()
+            .chain(frame.highlights.iter().map(|h| h.rect))
+            .collect();
+        // Each tag's own spot, clear of the tags placed before it.
+        let mut originals = Vec::with_capacity(frame.tags.len());
+        for (tag, &bounds) in frame.tags.iter().zip(&bounds) {
+            let wh = self.look(tag).size(&tag.text);
+            let rect = match tag.control.filter(|_| tag.position == Position::Auto) {
+                Some(control) => {
+                    let around = Around {
+                        controls: &controls,
+                        tags: &originals,
+                        bounds,
+                    };
+                    self.beside(tag, control, wh, &around, area)
+                }
+                None => whole_px(place(tag.at, tag.position, wh, area).unwrap()),
+            };
+            originals.push(rect);
+        }
         let labels: Vec<_> = frame
             .tags
             .iter()
             .zip(&originals)
-            .map(|(tag, &rect)| {
+            .zip(bounds)
+            .map(|((tag, &rect), bounds)| {
                 let moved = tag.target.and_then(|hit| self.placed.get(&(tag.at, hit)));
-                let bounds = tag
-                    .target
-                    .and_then(|p| self.regions.iter().rev().find(|r| r.contains(p)))
-                    .and_then(|r| r.intersect(screen))
-                    .unwrap_or(screen);
                 Label {
                     rect: moved.map_or(rect, |&by| rect.offset(by)),
                     target: tag.target,
@@ -263,14 +344,58 @@ impl Painter {
         result
     }
 
+    /// An `Auto` tag of size `wh` by its `control`: on the first side of
+    /// `Side::ORDER` that stays in its bounds, off the control, and clear
+    /// of every other control and the tags placed so far, then moved by
+    /// the look's offset. A control around this one (a list round its item)
+    /// isn't in the way. Each tag keeps the side it took until the next
+    /// scan.
+    fn beside(
+        &mut self,
+        tag: &Tag,
+        control: BoxRect,
+        wh: (f32, f32),
+        around: &Around,
+        area: (f32, f32),
+    ) -> BoxRect {
+        let rect = |side: Side, by: Point| {
+            let (at, position) = side.anchor(control);
+            whole_px(place(at.offset(by), position, wh, area).unwrap())
+        };
+        let clear = |side: Side| {
+            let r = rect(side, Point::default());
+            side == Side::Start
+                || r.intersect(around.bounds) == Some(r)
+                    && r.intersect(control).is_none()
+                    && around.controls.iter().all(|&other| {
+                        other.intersect(control) == Some(control) || r.intersect(other).is_none()
+                    })
+                    && !around
+                        .tags
+                        .iter()
+                        .any(|&other| placement::touches(r, other))
+        };
+        let key = tag.target.map(|hit| (tag.at, hit));
+        let kept = key.and_then(|key| self.sides.get(&key)).copied();
+        let side = kept.unwrap_or_else(|| Side::ORDER.into_iter().find(|&s| clear(s)).unwrap());
+        if let Some(key) = key {
+            self.sides.insert(key, side);
+        }
+        let [x, y] = self.look(tag).style.offset;
+        rect(side, Point::new(x, y))
+    }
+
     /// Clears `pixmap` and draws `frame` on it, in overlay coordinates.
     ///
-    /// Highlights go first, under everything. Lines start at their tags'
-    /// nearest edges and go under the tags. Dots follow, then the input
-    /// box.
+    /// Words' first letters go first, then highlights, under everything
+    /// else. Lines start at their tags' nearest edges and go under the
+    /// tags. Dots follow, then the input box.
     pub fn paint(&mut self, pixmap: &mut Pixmap, frame: &Frame) {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let scaled = Transform::from_scale(self.scale, self.scale);
+        for &letter in &frame.starts {
+            self.paint_start(pixmap, letter, scaled);
+        }
         for highlight in &frame.highlights {
             self.paint_highlight(pixmap, *highlight, scaled);
         }
@@ -435,25 +560,53 @@ impl Painter {
 
     /// One line of a match: its box grown by the mark's padding, filled
     /// and bordered as a tag is, with no letters.
-    #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
     fn paint_highlight(&self, pixmap: &mut Pixmap, highlight: Highlight, scaled: Transform) {
         let mark = if highlight.current {
             self.marks.current
         } else {
             self.marks.all
         };
-        let [pad_y, pad_x] = mark.padding;
-        let r = highlight.rect;
-        let Some(rect) = Rect::from_xywh(
-            r.x as f32 - pad_x,
-            r.y as f32 - pad_y,
-            r.w as f32 + 2.0 * pad_x,
-            r.h as f32 + 2.0 * pad_y,
-        ) else {
-            return;
-        };
-        paint_box(pixmap, rect, &mark, scaled);
+        if let Some(rect) = padded(highlight.rect, mark.padding) {
+            paint_box(pixmap, rect, &mark, scaled);
+        }
     }
+
+    /// A word's first letter, at `letter`, as `[text.starts]` marks it: a
+    /// line along the bottom of its box, or a box over it.
+    #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
+    fn paint_start(&self, pixmap: &mut Pixmap, letter: BoxRect, scaled: Transform) {
+        let starts = self.marks.starts;
+        let (rect, mark) = match starts.mark {
+            StartMark::Off => return,
+            StartMark::Underline => {
+                let line = Mark {
+                    background: starts.line,
+                    border_width: 0.0,
+                    radius: starts.thickness / 2.0,
+                    ..starts.look
+                };
+                let (x, w) = (letter.x as f32, letter.w as f32);
+                let y = letter.bottom() as f32 - starts.thickness;
+                (Rect::from_xywh(x, y, w, starts.thickness), line)
+            }
+            StartMark::Box => (padded(letter, starts.look.padding), starts.look),
+        };
+        if let Some(rect) = rect {
+            paint_box(pixmap, rect, &mark, scaled);
+        }
+    }
+}
+
+/// `r` grown by `[vertical, horizontal]` px each side, as a mark pads its
+/// text.
+#[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
+fn padded(r: BoxRect, [pad_y, pad_x]: [f32; 2]) -> Option<Rect> {
+    Rect::from_xywh(
+        r.x as f32 - pad_x,
+        r.y as f32 - pad_y,
+        r.w as f32 + 2.0 * pad_x,
+        r.h as f32 + 2.0 * pad_y,
+    )
 }
 
 /// A font and glyph cache for one look; the tags and the input box have
@@ -747,6 +900,17 @@ fn place(
         .round()
         .clamp(EDGE, (area_h - h - EDGE).max(EDGE));
     Rect::from_xywh(x, y, w, h)
+}
+
+/// A drawn box in whole px, as placement counts.
+#[allow(clippy::cast_possible_truncation)] // logical sizes fit an i32
+fn whole_px(rect: Rect) -> BoxRect {
+    BoxRect::new(
+        rect.x() as i32,
+        rect.y() as i32,
+        rect.width() as i32,
+        rect.height() as i32,
+    )
 }
 
 /// A box filled and bordered in `look`'s colours: the fill, then the border
@@ -1150,6 +1314,7 @@ offset = [20, 20]
             tags: vec![Tag {
                 at: Point::new(20, 20),
                 position: Position::TopLeft,
+                control: None,
                 text: "AB".into(),
                 typed: 0,
                 target: None,
@@ -1414,6 +1579,7 @@ offset = [20, 20]
         let tag = |x, kind| Tag {
             at: Point::new(x, 20),
             position: Position::TopLeft,
+            control: None,
             text: "WW".into(),
             typed: 0,
             verb: 0,
@@ -1463,6 +1629,7 @@ offset = [20, 20]
             tags: vec![Tag {
                 at: Point::new(20, 20),
                 position: Position::TopLeft,
+                control: None,
                 text: ",WM".into(),
                 typed: 2,
                 verb: 1,
@@ -1547,6 +1714,7 @@ offset = [20, 20]
             tags: vec![Tag {
                 at: Point::new(100, 80),
                 position: Position::TopLeft,
+                control: None,
                 text: "AA".into(),
                 typed: 0,
                 target: None,
@@ -1558,8 +1726,7 @@ offset = [20, 20]
                 at: Point::default(),
                 tag: Some(0),
             }],
-            highlights: vec![],
-            status: Status::default(),
+            ..Frame::default()
         };
         for (dot, (x, y)) in [
             (Point::new(60, 90), (90, 90)),
@@ -1652,6 +1819,133 @@ offset = [20, 20]
 #[cfg(test)]
 mod collision_tests {
     use super::*;
+
+    const AREA: BoxRect = BoxRect::new(0, 0, 400, 300);
+    const BUTTON: BoxRect = BoxRect::new(100, 100, 60, 20);
+
+    /// A painter over `AREA`, one window, with these controls.
+    fn among(controls: &[BoxRect]) -> Painter {
+        let style = Style::default();
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
+        painter.set_space(AREA, &[], vec![AREA], controls.to_vec());
+        painter
+    }
+
+    /// Where `painter` puts an `Auto` tag reading `text` on `control`, and
+    /// whether it drew a dot for it.
+    fn auto(painter: &mut Painter, control: BoxRect, text: &str) -> (BoxRect, bool) {
+        let tag = Tag {
+            at: Position::Auto.on(control),
+            position: Position::Auto,
+            control: Some(control),
+            text: text.into(),
+            typed: 0,
+            verb: 0,
+            target: Some(control.center()),
+            kind: Kind::Plain,
+        };
+        let frame = Frame {
+            tags: vec![tag],
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        let placed = &arranged.tags[0];
+        let wh = painter.tags.size(text);
+        let rect = whole_px(place(placed.at, placed.position, wh, (400.0, 300.0)).unwrap());
+        (rect, !arranged.dots.is_empty())
+    }
+
+    /// The box `side` gives a tag reading `text` on `control`.
+    fn on(side: Side, control: BoxRect, text: &str) -> BoxRect {
+        let (at, position) = side.anchor(control);
+        let wh = among(&[]).tags.size(text);
+        whole_px(place(at, position, wh, (400.0, 300.0)).unwrap())
+    }
+
+    #[test]
+    fn word_starts_are_underlined_or_boxed() {
+        let style = Style::default();
+        let letter = BoxRect::new(20, 20, 10, 16);
+        let (red, blue) = (Color::rgba(255, 0, 0, 255), Color::rgba(0, 0, 255, 255));
+        for (mark, middle, bottom) in [
+            (StartMark::Off, None, None),
+            (StartMark::Underline, None, Some(red)),
+            (StartMark::Box, Some(blue), Some(blue)),
+        ] {
+            let mut marks = Marks::new(&style);
+            marks.starts.mark = mark;
+            marks.starts.line = red;
+            marks.starts.look.background = blue;
+            let mut painter = Painter::new(&style, &marks, &style, &Info::default(), 1.0).unwrap();
+            let mut pixmap = Pixmap::new(60, 60).unwrap();
+            let frame = Frame {
+                starts: vec![letter],
+                ..Frame::default()
+            };
+            painter.paint(&mut pixmap, &frame);
+            let at = |x, y| {
+                let p = pixmap.pixel(x, y).unwrap();
+                (p.alpha() > 0).then(|| Color::rgba(p.red(), p.green(), p.blue(), p.alpha()))
+            };
+            assert_eq!(at(25, 26), middle, "{mark:?}: the letter's middle");
+            assert_eq!(at(25, 35), bottom, "{mark:?}: its bottom row");
+            assert_eq!(at(25, 40), None, "{mark:?}: nothing under it");
+        }
+    }
+
+    #[test]
+    fn auto_tags_go_left_then_under_then_over_then_stay_at_the_start() {
+        let left = BoxRect::new(60, 100, 38, 20);
+        let below = BoxRect::new(100, 122, 60, 20);
+        let above = BoxRect::new(100, 78, 60, 20);
+        // A list round the button is no neighbour.
+        let around = BoxRect::new(50, 50, 200, 200);
+        for (others, side) in [
+            (vec![around], Side::Left),
+            (vec![left], Side::Below),
+            (vec![left, below], Side::Above),
+            (vec![left, below, above], Side::Start),
+        ] {
+            let mut painter = among(&[[BUTTON].as_slice(), &others].concat());
+            let (got, dot) = auto(&mut painter, BUTTON, "EA");
+            assert_eq!(got, on(side, BUTTON, "EA"), "{side:?}");
+            assert!(!dot, "{side:?}: its own spot, no leader");
+        }
+        let (left, _) = auto(&mut among(&[BUTTON]), BUTTON, "EA");
+        assert_eq!(left.right(), BUTTON.x - BESIDE, "ends by the start");
+        assert_eq!(left.center().y, BUTTON.center().y, "middles in line");
+    }
+
+    #[test]
+    fn auto_tags_stay_in_their_window_and_keep_their_side() {
+        // At the window's left edge: no room on the left.
+        let edge = BoxRect::new(3, 100, 60, 20);
+        let (got, _) = auto(&mut among(&[edge]), edge, "EA");
+        assert_eq!(got, on(Side::Below, edge, "EA"));
+        // Room on the left for one letter, not two: the tag goes under, and
+        // stays there as typing shortens it.
+        let one = among(&[]).tags.size("A").0;
+        let two = among(&[]).tags.size("EA").0;
+        #[allow(clippy::cast_possible_truncation)]
+        let gap = f32::midpoint(one, two) as i32 + BESIDE;
+        let neighbour = BoxRect::new(0, 100, BUTTON.x - gap, 20);
+        let mut painter = among(&[BUTTON, neighbour]);
+        assert_eq!(
+            auto(&mut painter, BUTTON, "EA").0,
+            on(Side::Below, BUTTON, "EA")
+        );
+        assert_eq!(
+            auto(&mut painter, BUTTON, "A").0,
+            on(Side::Below, BUTTON, "A")
+        );
+        assert_eq!(
+            auto(&mut among(&[BUTTON, neighbour]), BUTTON, "A").0,
+            on(Side::Left, BUTTON, "A"),
+            "fresh, one letter fits"
+        );
+    }
+
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn production_painter_separates_sidebar_row_and_close() {
@@ -1670,6 +1964,7 @@ mod collision_tests {
                 BoxRect::new(246, 180, 26, 26),
             ],
             vec![],
+            vec![],
         );
         let frame = Frame {
             tags: [
@@ -1681,15 +1976,14 @@ mod collision_tests {
                 at,
                 target: Some(hit),
                 position: Position::BottomRight,
+                control: None,
                 text: text.into(),
                 typed: 0,
                 verb: 0,
                 kind: Kind::Plain,
             })
             .collect(),
-            dots: vec![],
-            highlights: vec![],
-            status: Status::default(),
+            ..Frame::default()
         };
         painter.paint(&mut pixmap, &frame);
         let arranged = painter.arrange(&frame, (300.0, 600.0));
@@ -1838,26 +2132,18 @@ mod capture_replay {
             .targets
             .iter()
             .zip(selector.labels())
-            .map(|(target, label)| Tag {
-                at: config
-                    .style
-                    .position
-                    .on(target.shown())
-                    .offset(Point::new(config.style.offset[0], config.style.offset[1]))
-                    .offset(shift),
-                position: config.style.position,
-                target: Some(target.hit.offset(shift)),
-                typed: 0,
-                verb: 0,
-                kind: if target.in_pixels() {
-                    Kind::Pixels
-                } else {
-                    Kind::Plain
-                },
-                text: label
+            .map(|(target, label)| {
+                let text = label
                     .iter()
                     .map(|&i| config.style.case.of(config.alphabet.letters()[i].label))
-                    .collect(),
+                    .collect();
+                let tag = crate::pick::tag(target, text, 0, &config);
+                Tag {
+                    at: tag.at.offset(shift),
+                    control: tag.control.map(|r| r.offset(shift)),
+                    target: tag.target.map(|p| p.offset(shift)),
+                    ..tag
+                }
             })
             .collect();
         let frame = Frame {
@@ -1873,7 +2159,12 @@ mod capture_replay {
         )
         .unwrap();
         let obstacles: Vec<_> = snapshot.obstacles.iter().map(|r| r.offset(shift)).collect();
-        painter.set_space(area, &obstacles, vec![area]);
+        let controls = snapshot
+            .targets
+            .iter()
+            .map(|t| t.shown().offset(shift))
+            .collect();
+        painter.set_space(area, &obstacles, vec![area], controls);
         let size = (area.w as f32, area.h as f32);
         let boxes = |p: &Painter, f: &Frame| {
             f.tags
@@ -1905,11 +2196,14 @@ mod capture_replay {
                 })
                 .sum::<usize>()
         };
-        let moved = before.iter().zip(&after).filter(|(a, b)| a != b).count();
-        let covered = before
+        // A tag moved off its own spot, `auto`'s side or its position, has
+        // a dot.
+        let moved = placed.dots.len();
+        let covered = placed
+            .dots
             .iter()
-            .zip(&after)
-            .filter(|(a, b)| a != b && painter.space.as_ref().unwrap().ink(**b) != 0)
+            .filter_map(|d| d.tag)
+            .filter(|&i| painter.space.as_ref().unwrap().ink(after[i]) != 0)
             .count();
         assert_eq!(covered, 0, "a moved label covers captured content");
         let mut pixmap = Pixmap::new(area.w as u32, area.h as u32).unwrap();

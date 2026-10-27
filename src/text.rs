@@ -286,6 +286,8 @@ pub struct Search {
     located: HashMap<Span, Vec<Rect>>,
     matches: Vec<Match>,
     current: usize,
+    /// Where the first letter of each word shows, for `[text.starts]`.
+    starts: Vec<Rect>,
 }
 
 impl Search {
@@ -297,6 +299,7 @@ impl Search {
             located: HashMap::new(),
             matches: Vec::new(),
             current: 0,
+            starts: Vec::new(),
         }
     }
 
@@ -356,6 +359,47 @@ impl Search {
     /// What the app said about `spans`: for each, its boxes, a line each.
     pub fn located(&mut self, spans: &[Span], boxes: Vec<Vec<Rect>>) {
         self.located.extend(spans.iter().copied().zip(boxes));
+    }
+
+    /// The first character of every word: the spans a one-letter query
+    /// finds, so once located, typing that letter asks the app nothing.
+    pub fn word_starts(&self) -> Vec<Span> {
+        self.folded
+            .iter()
+            .zip(&self.texts)
+            .enumerate()
+            .flat_map(|(i, (text, read))| {
+                text.words.iter().map(move |&at| {
+                    let start = read.start + text.from[at];
+                    Span {
+                        text: i,
+                        start,
+                        end: start + 1,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Keeps where `spans`, located, show: what [`Search::starts`] gives.
+    /// Only a box the app gave counts, never a fallback to the text's own:
+    /// a mark must sit on its letter.
+    pub fn mark_starts(&mut self, spans: &[Span], shows: &dyn Fn(usize, Point) -> bool) {
+        self.starts = spans
+            .iter()
+            .filter_map(|span| {
+                let text = &self.texts[span.text];
+                let part = self.located.get(span)?.first()?.intersect(text.area)?;
+                (part.w >= MIN_SIZE && part.h >= MIN_SIZE && shows(text.window, part.center()))
+                    .then_some(part)
+            })
+            .collect();
+    }
+
+    /// Where each word's first letter shows, if [`Search::mark_starts`]
+    /// was asked.
+    pub fn starts(&self) -> &[Rect] {
+        &self.starts
     }
 
     /// The matches for the query as it is now, the first one current. A
@@ -561,6 +605,48 @@ mod tests {
 
     fn everywhere(_: usize, _: Point) -> bool {
         true
+    }
+
+    #[test]
+    fn word_starts_are_what_a_first_letter_finds_and_only_shown_ones_mark() {
+        let mut search = Search::new(vec![
+            text("Save as… can't", Rect::new(0, 0, 200, 10)),
+            text("é-x", Rect::new(0, 20, 200, 10)),
+        ]);
+        let spans = search.word_starts();
+        let at: Vec<_> = spans.iter().map(|s| (s.text, s.start, s.end)).collect();
+        assert_eq!(at, [(0, 0, 1), (0, 5, 6), (0, 9, 10), (1, 0, 1), (1, 2, 3)]);
+        search.push('a');
+        assert!(
+            search.wanted().iter().all(|s| spans.contains(s)),
+            "a first letter's matches are word starts"
+        );
+        let boxes = spans
+            .iter()
+            .map(|s| {
+                #[allow(clippy::cast_possible_wrap)]
+                let x = s.start as i32 * 10;
+                let y = search.texts[s.text].rect.y;
+                // The app can't say for the last one.
+                if s.text == 1 && s.start == 2 {
+                    vec![]
+                } else {
+                    vec![Rect::new(x, y, 10, 10)]
+                }
+            })
+            .collect();
+        search.located(&spans, boxes);
+        assert!(search.wanted().is_empty(), "typing `a` asks nothing more");
+        // The first text's window is covered past x = 80.
+        search.mark_starts(&spans, &|window, at| window == 1 || at.x < 80);
+        assert_eq!(
+            search.starts(),
+            [
+                Rect::new(0, 0, 10, 10),
+                Rect::new(50, 0, 10, 10),
+                Rect::new(0, 20, 10, 10)
+            ]
+        );
     }
 
     #[test]

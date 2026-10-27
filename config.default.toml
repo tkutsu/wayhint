@@ -86,7 +86,10 @@
 # border_width = 1
 # radius = 4
 # padding = [2, 5]          # vertical, horizontal
-# position = "bottom-right" # on the target: center, top, bottom, left, right, or a corner as top-left
+# position = "auto"         # on the target: auto, or center, top, bottom, left, right, or a corner as top-left
+# Auto puts a tag beside its control's start: to its left, else under it,
+# else over it, wherever no other control is; boxed in, at its start
+# inside. Any other position puts the tag at that point on the control.
 # offset = [0, 0]           # px from there, right and down
 # case = "upper"            # the tags' letters: upper or lower; the keys are the same
 
@@ -214,6 +217,21 @@
 # border_width = 0
 # radius = 4
 # padding = [2, 5]          # vertical, horizontal
+
+[text.starts]
+# The first letter of each word, what typing finds a match from, marked
+# while nothing is typed. Each letter's place is asked of its app as text
+# mode starts, which takes up to half a second more on a page of words;
+# names (a button's) have no letters to ask about and stay unmarked.
+# mark = "off"              # off, underline, or box
+# line = "#89b4faff"        # the underline
+# thickness = 2             # the underline's, in px
+# The box, as [text.matches] draws one:
+# background = "#89b4fa66"
+# border = "#89b4faff"
+# border_width = 0
+# radius = 2
+# padding = [0, 1]          # vertical, horizontal
 
 
 [pointer]
