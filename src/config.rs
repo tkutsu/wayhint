@@ -711,8 +711,8 @@ pub struct Verbs {
     close: (Key, String),
     /// Each bound verb, its key, and the key as `wayhint config` prints it.
     keys: Vec<(Action, Key, String)>,
-    /// Verbs left without a key because their default key is a tag key,
-    /// with that default, for `wayhint config`.
+    /// Verbs whose default key clashes or types a letter or digit on this
+    /// layout, with that default, for `wayhint config`.
     unbound: Vec<(Action, String)>,
     /// The repeat key and how it was written, if the file gives one. It
     /// lives with the verbs because it's checked against them: one key,
@@ -807,8 +807,8 @@ impl Verbs {
     /// of the alphabet. Then each command the file leaves out gets its
     /// default key, unless that's one of `tag_keys` (the alphabet's letters,
     /// yours or the home row, and aliases) or a key the file gave another
-    /// command: a default gives way, so `hover = "r"` leaves right without
-    /// its default `r` instead of failing.
+    /// command. Defaults that type letters or digits on this layout are
+    /// left unbound too, so every bound verb works in text mode.
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
         let text = file.close.as_deref().unwrap_or("Esc");
         let key = decode_key(text, layout).context("[keys] close")?;
@@ -829,6 +829,12 @@ impl Verbs {
                 Some("") => defaults.push(action),
                 Some(text) => {
                     let (key, label) = verbs.written(action.name(), text, layout)?;
+                    if !is_verb_key(&label) {
+                        bail!(
+                            "[keys] {} = {text:?}: use a symbol or a named key, not a letter or digit",
+                            action.name()
+                        );
+                    }
                     verbs.keys.push((action, key, label));
                 }
                 None => {}
@@ -851,7 +857,7 @@ impl Verbs {
                 continue;
             };
             let (key, label) = default_key(action.name(), code, layout)?;
-            if verbs.taken_by(code, tag_keys) {
+            if !is_verb_key(&label) || verbs.taken_by(code, tag_keys) {
                 verbs.unbound.push((action, label));
             } else {
                 verbs.keys.push((action, key, label));
@@ -976,6 +982,16 @@ fn decode_key(text: &str, layout: &Layout) -> Result<Key> {
         )
     })?;
     Ok(Key { code, shift: false })
+}
+
+/// Verbs reserve symbols and named keys, leaving letters and digits for text.
+fn is_verb_key(text: &str) -> bool {
+    let mut chars = text.chars();
+    keys::named(text).is_some()
+        || matches!(
+            (chars.next(), chars.next()),
+            (Some(ch), None) if !ch.is_alphanumeric() && !ch.is_whitespace() && !ch.is_control()
+        )
 }
 
 /// `command`'s default key, at `code`, and how it's printed: a named key by
@@ -1224,8 +1240,9 @@ impl Config {
         out.push_str(
             "# The verbs: type one before a tag's last letter, or before Space for\n\
              # the pointer, or twice for where the last command was; in text\n\
-             # mode, before the text, unless it types a letter or digit. \"\"\n\
-             # makes a verb what a bare tag does.\n",
+             # mode, symbols come before the text, named keys work any time.\n\
+             # Letters and digits cannot be verbs. \"\" makes a verb what a\n\
+             # bare tag does.\n",
         );
         for action in Action::ALL {
             let (name, about) = (action.name(), action.about());
@@ -1234,10 +1251,12 @@ impl Config {
             } else if let Some(label) = self.verbs.label(action) {
                 let _ = writeln!(out, "{name} = {}   # {about}", quote(label));
             } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
-                let _ = writeln!(
-                    out,
-                    "# {name} has no key: its default, {label:?}, is one of your tag letters or another command's key"
-                );
+                let why = if is_verb_key(label) {
+                    "is one of your tag letters or another command's key"
+                } else {
+                    "is not a symbol on this layout; choose a symbol or a named key"
+                };
+                let _ = writeln!(out, "# {name} has no key: its default, {label:?}, {why}");
             }
         }
         let repeat = self.verbs.repeat.as_ref().map_or("", |(_, label)| label);
@@ -1409,10 +1428,10 @@ mod tests {
     }
 
     #[test]
-    fn the_plans_bindings_load() {
+    fn symbol_and_named_verb_bindings_load() {
         let config = Config::parse(
             "[keys]\nalphabet = \"ehatincsulodypmgf\"\nright = \"\"\nleft = \".\"\n\
-             double = \"k\"\nmiddle = \"j\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
+             double = \"!\"\nmiddle = \"/\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
              [pointer]\nafter = \"leave\"",
             &us(),
         )
@@ -1427,10 +1446,10 @@ mod tests {
 
     #[test]
     fn a_written_verb_key_leaves_the_alphabet() {
-        // `X` is shifted x: Shift on a tag letter is kept for Shift-click,
-        // so the x position leaves the tags.
+        // `_` is shifted -: Shift on a tag letter is kept for Shift-click,
+        // so the - position leaves the tags.
         let config = Config::parse(
-            "[keys]\nalphabet = \"asdx\"\nhover = \"X\"\nright = \"q\"",
+            "[keys]\nalphabet = \"asd-\"\nhover = \"_\"\nright = \"!\"",
             &us(),
         )
         .unwrap();
@@ -1438,7 +1457,7 @@ mod tests {
         assert!(
             config
                 .render()
-                .contains("# left out of the alphabet: x (hover)")
+                .contains("# left out of the alphabet: - (hover)")
         );
     }
 
@@ -1462,18 +1481,36 @@ mod tests {
         assert!(err("[keys]\nright = \"\"").contains("only one verb can be the default"));
         assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
         assert!(err("[keys]\nhover = \"esc\"").contains("close and hover"));
-        assert!(err("[keys]\nright = \"x\"\nmiddle = \"x\"").contains("both"));
+        assert!(err("[keys]\nright = \",\"\nmiddle = \",\"").contains("both"));
         assert!(err("[keys]\nback = \"PageUpp\"").contains("the names are Up, Down"));
         assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));
         assert!(
-            err("[keys]\nalphabet = \"ab\"\nhover = \"a\"")
+            err("[keys]\nalphabet = \"a;\"\nhover = \":\"")
                 .contains("once command keys are left out")
         );
-        assert!(err("[keys]\nright = \"r\"\n[keys.aliases]\n\"r\" = \"a\"").contains("right's"));
-        assert!(err("[keys]\nright = \"x\"\nrepeat = \"x\"").contains("right and repeat"));
+        assert!(err("[keys]\nright = \",\"\n[keys.aliases]\n\",\" = \"a\"").contains("right's"));
+        assert!(err("[keys]\nright = \",\"\nrepeat = \",\"").contains("right and repeat"));
         assert!(err("[keys]\nrepeat = \"Enter\"").contains("built in"));
         assert!(err("[keys]\nback = \"Left\"").contains("and the arrows are built in"));
         assert!(err("[pointer]\nafter = \"stay\"").contains("unknown variant"));
+    }
+
+    #[test]
+    fn every_verb_rejects_letters_and_digits_but_repeat_still_accepts_them() {
+        for (name, variant, letters) in [("us", "", "aZ09"), ("fr", "", "éà"), ("gr", "", "αΩ")]
+        {
+            let layout = Layout::named(name, variant);
+            for action in Action::ALL {
+                for ch in letters.chars() {
+                    let text = format!("[keys]\n{} = \"{ch}\"", action.name());
+                    let err = format!("{:#}", Config::parse(&text, &layout).unwrap_err());
+                    assert!(err.contains("use a symbol or a named key"), "{text}: {err}");
+                    assert!(err.contains(action.name()), "{err}");
+                }
+            }
+        }
+        let config = Config::parse("[keys]\nrepeat = \"r\"", &us()).unwrap();
+        assert!(config.verbs.is_repeat(key(19, false)));
     }
 
     #[test]
@@ -1811,12 +1848,23 @@ offset = [-13, 17]
         ] {
             let layout = Layout::named(name, variant);
             let config = Config::parse("", &layout).unwrap();
+            assert!(
+                config
+                    .verbs
+                    .keys
+                    .iter()
+                    .all(|(_, _, label)| is_verb_key(label)),
+                "{name}({variant}): every default verb must be a symbol or a named key"
+            );
             let rendered = config.render();
             let again = Config::parse(&rendered, &layout)
                 .unwrap_or_else(|e| panic!("{name}({variant}): {e:#}\n{rendered}"));
             assert_eq!(again.alphabet, config.alphabet, "{name}({variant})");
             assert_eq!(again.verbs, config.verbs, "{name}({variant})");
         }
+        let config = Config::parse("", &Layout::named("fr", "")).unwrap();
+        assert_eq!(config.verbs.label(Action::Hold), None, "AZERTY types m");
+        assert!(config.render().contains("is not a symbol on this layout"));
     }
 
     #[test]

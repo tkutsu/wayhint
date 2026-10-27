@@ -1140,7 +1140,7 @@ mod tests {
         };
         let shown = |extra: &str, holding| {
             let config = Config::parse(
-                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\nright = \"r\"\n{extra}"),
+                &format!("[keys]\nalphabet = \"ab\"\nleft = \"\"\nright = \",\"\n{extra}"),
                 &crate::keys::Layout::named("us", ""),
             )
             .unwrap();
@@ -1160,7 +1160,7 @@ mod tests {
         let (tags, input) = shown("[input]\nhints = false", false);
         assert_eq!(
             tags,
-            [owned("rAA", 2), owned("rAB", 2)],
+            [owned(",AA", 2), owned(",AB", 2)],
             "the whole command, typed keys dimmed"
         );
         assert_eq!(input, Some(owned("right", 5)));
