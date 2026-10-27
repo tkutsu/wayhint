@@ -57,8 +57,8 @@
 
 # Built in, unless chosen as the close key: Backspace takes back the last
 # key, Space acts at the pointer, Enter confirms a completed tag or text
-# match, Tab works in text mode, and the arrows move where a click lands,
-# held for faster.
+# match, Tab works in text mode, and the arrows move the pointer before any
+# other key, then where a click lands, held for faster.
 
 # Other keys that type a tag letter, for a layer that sends a different
 # character from the same key: "key" = "letter".
@@ -163,7 +163,8 @@
 # Text mode is a run of its own, `wayhint --text`, on a compositor shortcut
 # beside plain `wayhint` for tags; launching one closes the other.
 # Typing finds text on screen from the start of a word, Enter acts on the
-# current match, Tab and the arrows move between matches. Targets with no
+# current match, Tab and the arrows move between matches (with nothing
+# typed, the arrows move the pointer). Targets with no
 # text to type keep a tag. A verb goes first, before the text, and
 # Backspace with nothing typed takes it back; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
@@ -192,7 +193,7 @@
 
 [pointer]
 # after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
-# nudge = 10                # px one arrow press moves a click; held, it goes on, faster
+# nudge = 10                # px one arrow press moves the pointer or a click; held, it goes on, faster
 # scroll = 5                # wheel notches one scroll_up or scroll_down turns
 # settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
 

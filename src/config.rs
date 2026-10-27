@@ -435,7 +435,8 @@ struct FilePointer {
     settle: Option<u16>,
 }
 
-/// How far one arrow press moves a command, in px, unless the file says.
+/// How far one arrow press moves the pointer or a command, in px, unless
+/// the file says.
 const NUDGE: u16 = 10;
 /// How many wheel notches a scroll turns, unless the file says: about half
 /// a page in most apps.
@@ -531,7 +532,7 @@ pub struct Config {
     /// `[text] hints`.
     pub text_hints: bool,
     pub after: After,
-    /// Px one arrow press moves a command: `[pointer] nudge`.
+    /// Px one arrow press moves the pointer or a command: `[pointer] nudge`.
     pub nudge: i32,
     /// Wheel notches one scroll turns: `[pointer] scroll`.
     pub scroll: u16,
@@ -777,7 +778,7 @@ impl Verbs {
         for (key, what) in [
             ("Space", "at the pointer"),
             ("Enter", "confirm a completed tag or text match"),
-            ("arrows", "move where the click lands"),
+            ("arrows", "move the pointer, or after a key the click"),
             ("Backspace", "take back a key"),
         ] {
             if keys::named(key) == Some(self.close.0.code) {
@@ -1165,7 +1166,7 @@ impl Config {
         };
         let _ = write!(
             out,
-            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves a click; held, it goes on, faster\n",
+            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves the pointer or a click; held, it goes on, faster\n",
             self.nudge
         );
         let _ = writeln!(

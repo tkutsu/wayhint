@@ -252,6 +252,10 @@ impl State {
                 let typed = typist.press(code, self.pressed, self.locks);
                 self.gate.forget(code);
                 self.events.push_back(Event::Typed(key, self.held, typed));
+                // Held, an arrow moves the pointer in text mode too.
+                if code.is_arrow() {
+                    self.holds.press(key, self.held, Instant::now());
+                }
             } else if code.is_arrow() {
                 self.gate.forget(code);
                 self.events.push_back(Event::Key(key, self.held));

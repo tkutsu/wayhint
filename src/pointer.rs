@@ -179,6 +179,13 @@ impl Pointer {
         Ok(())
     }
 
+    /// Moves the cursor to `to` at once, with a held button still down: an
+    /// arrow moving it.
+    pub fn go(&mut self, to: Point) -> Result<()> {
+        self.move_to(to)?;
+        self.handled()
+    }
+
     /// Moves the cursor to `to` after a pause, so the app sees the click
     /// end before the pointer leaves.
     pub fn put_back(&mut self, to: Point) -> Result<()> {

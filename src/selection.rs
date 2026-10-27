@@ -131,7 +131,8 @@ pub enum Input {
     Verb(Action, Mods),
     /// `Space`: act where the pointer already is, no tag.
     Here(Mods),
-    /// An arrow: move where this command lands, by this many px.
+    /// An arrow, by this many px: the pointer itself with nothing typed,
+    /// else where this command lands.
     Nudge(Point),
     /// The repeat key: the last command again, on the same target.
     Repeat,
@@ -148,6 +149,9 @@ pub enum Step {
     Picked { index: usize, act: Act },
     /// `Space`: do `act` where the pointer is.
     Here(Act),
+    /// An arrow with nothing typed: move the pointer itself by this many
+    /// px, a held button with it. The command stays blank.
+    Move(Point),
     /// A verb typed twice, no letter between: do `act` again where the
     /// last command was done. The run knows where that was.
     Again(Act),
@@ -168,7 +172,9 @@ pub enum Step {
 /// (the config takes verb keys out of the alphabet), and labels are
 /// prefix-free, so the last letter can act immediately. With autoaccept
 /// off, Enter confirms the completed tag. Arrows add up, and only
-/// this command lands where they moved it.
+/// this command lands where they moved it. Arrows before anything else
+/// move the pointer instead (`Step::Move`): `Space` or a verb twice then
+/// acts where they took it.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
@@ -222,6 +228,12 @@ impl Selector {
     /// that show where it lands.
     pub fn nudge(&self) -> Point {
         self.nudge
+    }
+
+    /// Whether nothing is typed, armed or nudged yet: an arrow moves the
+    /// pointer.
+    pub fn is_blank(&self) -> bool {
+        self.typed.is_empty() && self.armed.is_none() && self.nudge == Point::default()
     }
 
     /// What a pick would do now, with `held` on its last key.
@@ -374,6 +386,9 @@ impl Selector {
                 self.reset();
                 Step::Here(act)
             }
+            // Before anything else, the arrows move the pointer: after a
+            // hold, they drag. Then `Space` or a verb twice acts there.
+            Input::Nudge(by) if self.is_blank() => Step::Move(by),
             // Letters typed stay, so a tag half typed can still be moved.
             Input::Nudge(by) => {
                 self.nudge = self.nudge.offset(by);
@@ -729,12 +744,26 @@ mod tests {
     const UP: Input = Input::Nudge(Point::new(0, -14));
 
     #[test]
+    fn with_nothing_typed_an_arrow_moves_the_pointer() {
+        let mut s = five();
+        assert_eq!(s.press(RIGHT), Step::Move(Point::new(14, 0)));
+        assert!(s.is_blank(), "the command is still blank");
+        assert_eq!(
+            s.press(Input::Here(Mods::NONE)),
+            Step::Here(act(Action::Left, Mods::NONE)),
+            "Space acts where the pointer went, not nudged"
+        );
+        s.press(verb(Action::ScrollDown));
+        assert_eq!(s.press(RIGHT), Step::Typing, "after a verb: a nudge");
+    }
+
+    #[test]
     fn arrows_add_up_and_go_with_the_pick() {
         let mut s = five();
-        s.press(RIGHT);
         s.press(letter(0));
         s.press(RIGHT);
         s.press(UP);
+        s.press(RIGHT);
         assert_eq!(s.nudge(), Point::new(28, -14), "around a half-typed tag");
         let Step::Picked { index: 4, act } = s.press(letter(1)) else {
             panic!("as picks the fifth target");
@@ -748,10 +777,10 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_keeps_the_nudge_and_space_takes_it() {
+    fn space_takes_the_verb_and_its_nudge() {
         let mut s = five();
-        s.press(UP);
         s.press(verb(Action::Right));
+        s.press(UP);
         let Step::Here(act) = s.press(Input::Here(Mods::NONE)) else {
             panic!("Space acts");
         };
@@ -761,10 +790,11 @@ mod tests {
     #[test]
     fn backspace_keeps_the_nudge_and_esc_leaves() {
         let mut s = five();
-        s.press(RIGHT);
         s.press(verb(Action::Hover));
+        s.press(RIGHT);
         s.press(Input::Backspace);
         assert_eq!((s.armed(), s.nudge()), (None, Point::new(14, 0)));
+        assert_eq!(s.press(RIGHT), Step::Typing, "still a nudge, not a move");
         assert_eq!(s.press(Input::Escape), Step::Exit, "with a nudge");
     }
 
