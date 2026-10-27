@@ -850,7 +850,6 @@ impl Verbs {
         }
         for (key, what) in [
             ("tag", "a control with no text"),
-            ("Shift+label", "pick that match"),
             ("Tab", "the next match, the pointer with it"),
             ("arrows", "move the pointer from the match"),
             ("Enter", "where the pointer is, even with nothing typed"),
@@ -1224,7 +1223,7 @@ impl Config {
         out.push_str(&self.render_keys());
         let _ = writeln!(
             out,
-            "\n[hints]\nauto_accept = {}   # act on a completed tag or match label; false requires Enter, in either mode",
+            "\n[hints]\nauto_accept = {}   # act on a completed tag; false requires Enter, in either mode",
             self.hint_auto_accept
         );
         out.push('\n');

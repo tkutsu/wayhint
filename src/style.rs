@@ -179,8 +179,6 @@ pub struct Style {
     pub leader: Leader,
     /// How tags found in a window's pixels differ: `[style.pixels]`.
     pub pixels: Look,
-    /// How text mode's match labels differ: `[style.labels]`.
-    pub labels: Look,
 }
 
 /// Which case tags are drawn in: `[style] case`. The keys are the same
@@ -221,15 +219,10 @@ impl Case {
 /// them: teal.
 const PIXELS_TEXT: Color = Color::rgba(0x94, 0xe2, 0xd5, 0xff);
 
-/// The letters of text mode's match labels, unless `[style.labels] text`
-/// sets them: mauve.
-const LABELS_TEXT: Color = Color::rgba(0xcb, 0xa6, 0xf7, 0xff);
-
 /// A table that changes part of `[style]` for one kind of tag:
 /// `[style.pixels]` for tags found in a window's pixels, which are guesses
-/// and miss more often than tags from the accessibility tree, and
-/// `[style.labels]` for text mode's match labels. Unset fields are
-/// `[style]`'s, but for the letters, which have a colour of their own.
+/// and miss more often than tags from the accessibility tree. Unset fields
+/// are `[style]`'s, but for the letters, which have a colour of their own.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Look {
@@ -397,7 +390,6 @@ impl Default for Style {
             case: Case::default(),
             leader: Leader::default(),
             pixels: Look::default(),
-            labels: Look::default(),
         }
     }
 }
@@ -406,20 +398,13 @@ impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
         self.validate_table("style")?;
-        self.for_pixels().validate_table("style.pixels")?;
-        self.for_labels().validate_table("style.labels")
+        self.for_pixels().validate_table("style.pixels")
     }
 
     /// The look of tags found in pixels: this one, with `[style.pixels]`
     /// over it.
     pub fn for_pixels(&self) -> Self {
         self.with(&self.pixels, PIXELS_TEXT)
-    }
-
-    /// The look of text mode's match labels: this one, with
-    /// `[style.labels]` over it.
-    pub fn for_labels(&self) -> Self {
-        self.with(&self.labels, LABELS_TEXT)
     }
 
     /// This look with `p`'s fields over it, the letters in `text` unless
@@ -467,11 +452,11 @@ impl Style {
         self.leader.validate()
     }
 
-    /// The table as TOML, `[style.leader]`, `[style.pixels]` and
-    /// `[style.labels]` too, for `wayhint config`.
+    /// The table as TOML, `[style.leader]` and `[style.pixels]` too, for
+    /// `wayhint config`.
     pub fn render(&self) -> String {
         format!(
-            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}{}",
+            "{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
             self.render_table(
                 "style",
                 "on the target: auto (beside it, where no other control is), or "
@@ -481,10 +466,6 @@ impl Style {
             self.pixels.render(
                 "[style.pixels]   # tags found in a window's pixels: guesses; unset fields are [style]'s",
                 &self.for_pixels(),
-            ),
-            self.labels.render(
-                "[style.labels]   # text mode's match labels, typed with Shift; unset fields are [style]'s",
-                &self.for_labels(),
             ),
         )
     }
@@ -913,7 +894,6 @@ mod tests {
         assert_eq!((pixels.border.r, pixels.border_width), (0xff, 2.0));
         assert_eq!(pixels.size, 17.0);
         assert_eq!(pixels.text, PIXELS_TEXT, "still teal with the border set");
-        assert_eq!(bordered.for_labels().text, LABELS_TEXT, "labels in mauve");
     }
 
     #[test]
