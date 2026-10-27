@@ -448,13 +448,17 @@ const SETTLE: u16 = 150;
 const SETTLE_MAX: u16 = 2000;
 
 /// Where the cursor goes after a click: `[pointer] after`.
+///
+/// `Leave` by default: the arrows, a hover and a hold's drag all put the
+/// cursor somewhere on purpose, and putting it back would undo them.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum After {
-    /// Back where it was, so the mouse is where you left it.
-    #[default]
+    /// Back where it was before wayhint moved it, so the mouse is where
+    /// you left it.
     Restore,
-    /// On the target, for focus-follows-mouse setups.
+    /// Where wayhint put it: on the target, or where the arrows took it.
+    #[default]
     Leave,
 }
 
@@ -1141,10 +1145,10 @@ impl Config {
         out.push_str(&self.marks.render());
         let after = match self.after {
             After::Restore => {
-                "\"restore\"   # the cursor goes back; \"leave\" keeps it on the target"
+                "\"restore\"   # the cursor goes back; \"leave\" keeps it where wayhint put it"
             }
             After::Leave => {
-                "\"leave\"   # the cursor stays on the target; \"restore\" puts it back"
+                "\"leave\"   # the cursor stays where wayhint put it; \"restore\" puts it back"
             }
         };
         let _ = write!(
@@ -1405,7 +1409,7 @@ mod tests {
         assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Right));
         assert_eq!(config.verbs.action_of(key(51, true)), None, "< isn't ,");
         assert_eq!(labels(&config), "asdfghjkl", "nothing left out");
-        assert_eq!(config.after, After::Restore);
+        assert_eq!(config.after, After::Leave, "the arrows' moves stay");
     }
 
     #[test]

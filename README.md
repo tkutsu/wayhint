@@ -75,8 +75,7 @@ accessibility tree, or from kitty's own remote control.
 ### Safe clicks
 
 Before each click wayhint reads the target again and skips the click if
-the control moved, changed or got covered. The cursor goes back where it
-was. Keys come through an input-method grab, so an open menu stays open
+the control moved, changed or got covered. Keys come through an input-method grab, so an open menu stays open
 while you type its tag. No button or modifier is ever left held, even if
 wayhint panics. A typo in the config is reported before wayhint takes
 the keyboard.
