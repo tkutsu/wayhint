@@ -5,8 +5,8 @@
 //!
 //! - Accents go: `é` is `e` plus a combining accent (Unicode's canonical
 //!   decomposition), and the accent is dropped, so `α` finds `άλλο`.
-//! - Smart case: a query in lower case ignores case; one capital makes it
-//!   exact.
+//! - Case goes: a query finds text in any case. Shift is for verbs and
+//!   for picking a match by its label, never for the text.
 //! - Every run of white space is one space, so a space finds a line break.
 //!
 //! AT-SPI counts in characters, Rust strings in bytes, and folding changes
@@ -176,10 +176,6 @@ impl Match {
     }
 }
 
-/// Whether a query ignores case: it has no capital.
-pub fn ignores_case(query: &str) -> bool {
-    !query.chars().any(char::is_uppercase)
-}
 
 /// Whether `c` is part of a word: letters, numbers and `_`. Anything else
 /// (spaces, `-`, `/`, brackets) parts words, except an apostrophe inside
@@ -199,8 +195,8 @@ pub struct Folded {
 }
 
 impl Folded {
-    /// `text` folded; `ignore_case` lowercases it too.
-    pub fn new(text: &str, ignore_case: bool) -> Self {
+    /// `text` folded, lower case.
+    pub fn new(text: &str) -> Self {
         let mut folded = Self {
             text: String::with_capacity(text.len()),
             from: Vec::with_capacity(text.len()),
@@ -234,13 +230,9 @@ impl Folded {
                 if is_combining_mark(part) {
                     return;
                 }
-                if ignore_case {
-                    for lower in part.to_lowercase() {
-                        // A word-final sigma is the same letter.
-                        folded.push(if lower == 'ς' { 'σ' } else { lower }, at);
-                    }
-                } else {
-                    folded.push(part, at);
+                for lower in part.to_lowercase() {
+                    // A word-final sigma is the same letter.
+                    folded.push(if lower == 'ς' { 'σ' } else { lower }, at);
                 }
             });
         }
@@ -286,9 +278,8 @@ impl Folded {
 /// current one.
 pub struct Search {
     texts: Vec<Text>,
-    /// Each text folded, exact and ignoring case, in `texts`' order.
-    exact: Vec<Folded>,
-    lower: Vec<Folded>,
+    /// Each text folded, in `texts`' order.
+    folded: Vec<Folded>,
     query: String,
     /// Where each span asked about is, as the app said: global boxes, a line
     /// each, empty if it couldn't say. Kept for the whole text mode, so a
@@ -300,15 +291,8 @@ pub struct Search {
 
 impl Search {
     pub fn new(texts: Vec<Text>) -> Self {
-        let fold = |ignore| {
-            texts
-                .iter()
-                .map(|t| Folded::new(&t.content, ignore))
-                .collect()
-        };
         Self {
-            exact: fold(false),
-            lower: fold(true),
+            folded: texts.iter().map(|t| Folded::new(&t.content)).collect(),
             texts,
             query: String::new(),
             located: HashMap::new(),
@@ -336,21 +320,19 @@ impl Search {
     }
 
     /// Whether typing `typed` would find something: it starts a word of a
-    /// text, ignoring case. A tag's label that does can't be told apart
+    /// text. A tag's label that does can't be told apart
     /// from a query, so text mode never gives it to a tag.
     pub fn starts_a_word(&self, typed: &str) -> bool {
-        let typed = Folded::new(typed, true);
-        self.lower
+        let typed = Folded::new(typed);
+        self.folded
             .iter()
             .any(|text| text.find(typed.as_str()).next().is_some())
     }
 
     /// Every occurrence of the query in the texts, in no particular order.
     fn spans(&self) -> Vec<Span> {
-        let ignore = ignores_case(&self.query);
-        let query = Folded::new(&self.query, ignore);
-        let folded = if ignore { &self.lower } else { &self.exact };
-        folded
+        let query = Folded::new(&self.query);
+        self.folded
             .iter()
             .zip(&self.texts)
             .enumerate()
@@ -466,9 +448,8 @@ mod tests {
     /// Where `query` is in `text`, folded as a search would fold both: the
     /// character ranges as `(start, end)`.
     fn find(text: &str, query: &str) -> Vec<(u32, u32)> {
-        let ignore = ignores_case(query);
-        let folded = Folded::new(text, ignore);
-        let query = Folded::new(query, ignore);
+        let folded = Folded::new(text);
+        let query = Folded::new(query);
         folded
             .find(query.as_str())
             .map(|r| (r.start, r.end))
@@ -492,9 +473,9 @@ mod tests {
     }
 
     #[test]
-    fn case_is_smart() {
+    fn case_is_ignored() {
         assert_eq!(find("contact Control", "con"), [(0, 3), (8, 11)]);
-        assert_eq!(find("contact Control", "Con"), [(8, 11)]);
+        assert_eq!(find("contact Control", "Con"), [(0, 3), (8, 11)]);
         assert_eq!(find("ΑΛΛΟ", "αλλο"), [(0, 4)]);
         assert_eq!(find("λόγος", "λογοσ"), [(0, 5)], "a final sigma is a sigma");
         assert_eq!(find("İstanbul", "ist"), [(0, 3)], "a dotted capital I");
