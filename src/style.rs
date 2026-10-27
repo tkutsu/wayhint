@@ -544,6 +544,7 @@ pub struct Input {
     /// Whether typed tag letters show here, and leave the tags.
     pub hints: bool,
     pub prefix: String,
+    pub suffix: String,
     /// Shown, dimmed, while nothing is typed.
     pub placeholder: String,
     pub style: Style,
@@ -556,6 +557,7 @@ impl Input {
             visible: true,
             hints: true,
             prefix: String::new(),
+            suffix: String::new(),
             placeholder: "text".into(),
             style: Style {
                 position: Position::Bottom,
@@ -575,11 +577,13 @@ impl Input {
              visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
              hints = {}   # typed tag letters show here, and leave the tags\n\
              placeholder = {}   # shown while nothing is typed in text mode\n\
-             prefix = {}   # before the query, as \"find: \"\n{fields}",
+             prefix = {}   # before the query, as \"find: \"\n\
+             suffix = {}   # after the query, before the match count\n{fields}",
             self.visible,
             self.hints,
             quote(&self.placeholder),
             quote(&self.prefix),
+            quote(&self.suffix),
         )
     }
 }
