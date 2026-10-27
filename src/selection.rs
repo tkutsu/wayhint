@@ -183,8 +183,6 @@ pub struct Selector {
     /// The action a bare tag does: the config's `""` verb.
     default: Action,
     armed: Option<Action>,
-    /// The armed verb's key needed Shift (`_` is Shift and `-`).
-    armed_shifted: bool,
     /// How many letters were typed when the verb was, so Backspace takes
     /// back whichever came last.
     armed_at: usize,
@@ -199,7 +197,6 @@ impl Selector {
             auto_accept: true,
             default,
             armed: None,
-            armed_shifted: false,
             armed_at: 0,
             nudge: Point::default(),
         }
@@ -240,17 +237,10 @@ impl Selector {
     ///
     /// `Option::unwrap_or` takes the armed verb if there is one; `Copy`
     /// types like `Action` are copied out, so the selector keeps its own.
-    /// The modifiers are those on the last key, except a Shift that may be
-    /// left over from a shifted verb: typing `_` then a tag fast, Shift is
-    /// often still down on the tag, and that's no Shift-click. The cost: a
-    /// shifted verb can't Shift-click.
     pub fn act(&self, held: Mods) -> Act {
         Act {
             action: self.armed.unwrap_or(self.default),
-            mods: Mods {
-                shift: held.shift && !self.armed_shifted,
-                ..held
-            },
+            mods: held,
             nudge: self.nudge,
         }
     }
@@ -258,7 +248,6 @@ impl Selector {
     /// Drops the armed verb, if any.
     fn disarm(&mut self) {
         self.armed = None;
-        self.armed_shifted = false;
     }
 
     /// Starts the next command: nothing typed, armed or nudged.
@@ -268,8 +257,8 @@ impl Selector {
         self.nudge = Point::default();
     }
 
-    /// The same command on `count` new targets: the verb, its Shift and the
-    /// arrows stay, the letters go. A block's tag opens into its lines this
+    /// The same command on `count` new targets: the verb and the arrows
+    /// stay, the letters go. A block's tag opens into its lines this
     /// way (`pick::pick`), and what was typed before it goes on to them.
     pub fn reopen(&mut self, count: usize, alphabet_size: usize) {
         self.labels = labels(count, alphabet_size);
@@ -375,9 +364,8 @@ impl Selector {
             // Letters typed before a verb stay, as before an arrow: the verb
             // says what, the letters and the nudge where. Another verb
             // replaces the first, so a wrong one needs no Backspace.
-            Input::Verb(action, held) => {
+            Input::Verb(action, _) => {
                 self.armed = Some(action);
-                self.armed_shifted = held.shift;
                 self.armed_at = self.typed.len();
                 Step::Typing
             }
@@ -548,8 +536,8 @@ mod tests {
         Input::Verb(action, Mods::NONE)
     }
 
-    const SHIFT: Mods = Mods {
-        shift: true,
+    const ALT: Mods = Mods {
+        alt: true,
         ..Mods::NONE
     };
     const CTRL: Mods = Mods {
@@ -572,7 +560,7 @@ mod tests {
         assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored);
         assert_eq!(s.press(letter(0)), Step::Typing);
         assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored, "a prefix");
-        assert_eq!(s.press(Input::Letter(1, SHIFT)), Step::Typing);
+        assert_eq!(s.press(Input::Letter(1, ALT)), Step::Typing);
         assert_eq!(s.typed(), [0, 1]);
         assert_eq!(s.press(letter(2)), Step::Ignored, "no extra letters");
         s.press(verb(Action::Right));
@@ -802,57 +790,31 @@ mod tests {
     fn modifiers_on_the_last_letter_go_with_the_pick() {
         let mut s = five();
         s.press(Input::Letter(0, CTRL));
-        let step = s.press(Input::Letter(1, SHIFT));
+        let step = s.press(Input::Letter(1, ALT));
         assert_eq!(
             step,
             Step::Picked {
                 index: 4,
-                act: act(Action::Left, SHIFT)
+                act: act(Action::Left, ALT)
             },
             "only the last letter's count"
         );
     }
 
     #[test]
-    fn shift_left_over_from_a_shifted_verb_is_dropped() {
+    fn a_reopened_command_keeps_its_verb_and_arrows() {
+        // A verb and an arrow, then the block's letter: what `pick` keeps
+        // from before that letter and reopens on the block's lines.
         let mut s = five();
-        s.press(Input::Verb(Action::Double, SHIFT));
-        let both = Mods {
-            ctrl: true,
-            ..SHIFT
-        };
-        assert_eq!(
-            s.press(Input::Letter(1, both)),
-            Step::Picked {
-                index: 0,
-                act: act(Action::Double, CTRL)
-            }
-        );
-        assert_eq!(
-            s.press(Input::Letter(1, SHIFT)),
-            Step::Picked {
-                index: 0,
-                act: act(Action::Left, SHIFT)
-            },
-            "the next command starts clean"
-        );
-    }
-
-    #[test]
-    fn a_reopened_command_keeps_its_verb_shift_and_arrows() {
-        // A shifted verb and an arrow, then the block's letter: what `pick`
-        // keeps from before that letter and reopens on the block's lines.
-        let mut s = five();
-        s.press(Input::Verb(Action::Double, SHIFT));
+        s.press(verb(Action::Double));
         s.press(Input::Nudge(Point::new(14, 0)));
         s.reopen(3, 5);
         assert_eq!(s.typed(), [0usize; 0]);
         assert_eq!(s.labels().len(), 3);
-        let Step::Picked { index: 1, act } = s.press(Input::Letter(1, SHIFT)) else {
+        let Step::Picked { index: 1, act } = s.press(letter(1)) else {
             panic!("the second line's letter picks it");
         };
         assert_eq!(act.action, Action::Double);
-        assert!(!act.mods.shift, "the verb's Shift is still no Shift-click");
         assert_eq!(act.nudge, Point::new(14, 0));
     }
 

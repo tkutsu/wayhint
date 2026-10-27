@@ -11,7 +11,7 @@
 
 use xkbcommon::xkb::{self, compose};
 
-use crate::{action::Mods, keyboard::Locks, keys::KeyCode};
+use crate::{keyboard::Locks, keys::KeyCode};
 
 /// Caps Lock's bit in an xkb modifier mask.
 const CAPS_LOCK: u32 = 1 << 1;
@@ -86,8 +86,8 @@ impl Typist {
     /// Shift held at its press is known (Shift is bit 0 of an xkb mask).
     /// Typed while the text was being read, such keys are the query's
     /// first letters.
-    pub fn press_late(&mut self, code: KeyCode, held: Mods, locks: Locks) -> Option<char> {
-        self.press(code, u32::from(held.shift), locks)
+    pub fn press_late(&mut self, code: KeyCode, shift: bool, locks: Locks) -> Option<char> {
+        self.press(code, u32::from(shift), locks)
     }
 
     /// Forgets a dead key waiting for the next.

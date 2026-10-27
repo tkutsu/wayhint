@@ -712,7 +712,7 @@ pub struct Verbs {
     close: (Key, String),
     /// Each bound verb, its key, and the key as `wayhint config` prints it.
     keys: Vec<(Action, Key, String)>,
-    /// Verbs whose default key clashes or types a letter or digit on this
+    /// Verbs whose default key clashes or types a lower-case letter or digit on this
     /// layout, with that default, for `wayhint config`.
     unbound: Vec<(Action, String)>,
     /// The repeat key and how it was written, if the file gives one. It
@@ -832,7 +832,7 @@ impl Verbs {
                     let (key, label) = verbs.written(action.name(), text, layout)?;
                     if !is_verb_key(&label) {
                         bail!(
-                            "[keys] {} = {text:?}: use a symbol or a named key, not a letter or digit",
+                            "[keys] {} = {text:?}: use a capital, a symbol or a named key, not a lower-case letter or digit",
                             action.name()
                         );
                     }
@@ -864,9 +864,9 @@ impl Verbs {
                 verbs.keys.push((action, key, label));
             }
         }
-        // Help's default is Shift on its spot: `?` on US. A shifted key
-        // gives way to a tag on its base key, whose Shift is a Shift-click,
-        // and to a command on exactly that key.
+        // Help's default is Shift on its spot: `?` on US. It gives way to a
+        // command on exactly that key; a tag letter there keeps its own,
+        // unshifted.
         if file.help.is_none()
             && let Some(label) = layout.shifted_char_at(HELP_KEY)
         {
@@ -878,7 +878,7 @@ impl Verbs {
             let mut commands = commands
                 .chain(verbs.repeat.iter().map(|v| v.0))
                 .chain([verbs.close.0]);
-            if tag_keys.contains(&HELP_KEY) || commands.any(|k| k == key) {
+            if commands.any(|k| k == key) {
                 verbs.help_unbound = Some(label.into());
             } else {
                 verbs.help = Some((key, label.into()));
@@ -942,23 +942,25 @@ impl Verbs {
             (Some((_, label)), _) => {
                 format!("help = {}   # every key and what it does\n", quote(label))
             }
-            (None, Some(label)) => format!(
-                "# help has no key: its default, {label:?}, is on one of your tag letters or is another command's key\n"
-            ),
+            (None, Some(label)) => {
+                format!("# help has no key: its default, {label:?}, is another command's key\n")
+            }
             (None, None) => "help = \"\"   # no key legend\n".into(),
         }
     }
 
-    /// The bound keys' positions and their commands' names: these leave
-    /// the alphabet. A shifted key takes its base key too, because Shift on
-    /// a tag letter means Shift-click.
+    /// The bound unshifted keys' positions and their commands' names: these
+    /// leave the alphabet. A shifted key leaves its base letter there:
+    /// Shift is part of the key, never a click's, so `A` and `a` are two
+    /// keys, a verb and a tag letter.
     fn taken(&self) -> Vec<(KeyCode, &'static str)> {
-        self.keys
-            .iter()
-            .map(|v| (v.1.code, v.0.name()))
-            .chain(self.repeat.iter().map(|(key, _)| (key.code, "repeat")))
-            .chain(self.help.iter().map(|(key, _)| (key.code, "help")))
-            .chain([(self.close.0.code, "close")])
+        let verbs = self.keys.iter().map(|v| (v.1, v.0.name()));
+        verbs
+            .chain(self.repeat.iter().map(|(key, _)| (*key, "repeat")))
+            .chain(self.help.iter().map(|(key, _)| (*key, "help")))
+            .chain([(self.close.0, "close")])
+            .filter(|(key, _)| !key.shift)
+            .map(|(key, command)| (key.code, command))
             .collect()
     }
 }
@@ -985,13 +987,15 @@ fn decode_key(text: &str, layout: &Layout) -> Result<Key> {
     Ok(Key { code, shift: false })
 }
 
-/// Verbs reserve symbols and named keys, leaving letters and digits for text.
+/// Verbs reserve capitals, symbols and named keys, leaving lower-case
+/// letters and digits for text.
 fn is_verb_key(text: &str) -> bool {
     let mut chars = text.chars();
+    let symbol = |ch: char| !ch.is_alphanumeric() && !ch.is_whitespace() && !ch.is_control();
     keys::named(text).is_some()
         || matches!(
             (chars.next(), chars.next()),
-            (Some(ch), None) if !ch.is_alphanumeric() && !ch.is_whitespace() && !ch.is_control()
+            (Some(ch), None) if ch.is_uppercase() || symbol(ch)
         )
 }
 
@@ -1021,7 +1025,7 @@ fn single_char(text: &str, table: &str) -> Result<char> {
 }
 
 /// The unshifted key that types `ch`. Tags stay unshifted because Shift on
-/// a tag's last letter will mean Shift-click.
+/// a letter types a capital, which may be a verb's.
 fn decode_unshifted(ch: char, layout: &Layout) -> Result<KeyCode> {
     match layout.decode(ch) {
         Some(key) if !key.shift => Ok(key.code),
@@ -1242,8 +1246,8 @@ impl Config {
             "# The verbs: type one before a tag's last letter, or before Space for\n\
              # the pointer, or twice for where the last command was; in text\n\
              # mode, symbols come before the text, named keys work any time.\n\
-             # Letters and digits cannot be verbs. \"\" makes a verb what a\n\
-             # bare tag does.\n",
+             # Capitals, symbols and named keys can be verbs; lower-case letters\n\
+             # and digits cannot. \"\" makes a verb what a bare tag does.\n",
         );
         for action in Action::ALL {
             let (name, about) = (action.name(), action.about());
@@ -1255,7 +1259,7 @@ impl Config {
                 let why = if is_verb_key(label) {
                     "is one of your tag letters or another command's key"
                 } else {
-                    "is not a symbol on this layout; choose a symbol or a named key"
+                    "is not a symbol on this layout; choose a capital, a symbol or a named key"
                 };
                 let _ = writeln!(out, "# {name} has no key: its default, {label:?}, {why}");
             }
@@ -1447,10 +1451,8 @@ mod tests {
 
     #[test]
     fn a_written_verb_key_leaves_the_alphabet() {
-        // `_` is shifted -: Shift on a tag letter is kept for Shift-click,
-        // so the - position leaves the tags.
         let config = Config::parse(
-            "[keys]\nalphabet = \"asd-\"\nhover = \"_\"\nright = \"!\"",
+            "[keys]\nalphabet = \"asd-\"\nright = \"-\"\nhover = \"_\"",
             &us(),
         )
         .unwrap();
@@ -1458,8 +1460,20 @@ mod tests {
         assert!(
             config
                 .render()
-                .contains("# left out of the alphabet: - (hover)")
+                .contains("# left out of the alphabet: - (right)")
         );
+        assert_eq!(config.verbs.action_of(key(12, true)), Some(Action::Hover));
+    }
+
+    #[test]
+    fn a_capital_verb_leaves_its_letter_a_tag() {
+        // Shift is part of the key: `A` is the verb, `a` still a tag letter.
+        let config = Config::parse("[keys]\nhover = \"A\"\nalphabet = \"asdf\"", &us()).unwrap();
+        assert_eq!(labels(&config), "asdf");
+        assert_eq!(config.verbs.action_of(key(30, true)), Some(Action::Hover));
+        assert_eq!(config.verbs.action_of(key(30, false)), None);
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.verbs, config.verbs);
     }
 
     #[test]
@@ -1486,7 +1500,7 @@ mod tests {
         assert!(err("[keys]\nback = \"PageUpp\"").contains("the names are Up, Down"));
         assert!(err("[keys]\nhover = \"é\"").contains("isn't a key"));
         assert!(
-            err("[keys]\nalphabet = \"a;\"\nhover = \":\"")
+            err("[keys]\nalphabet = \"a;\"\nhover = \";\"")
                 .contains("once command keys are left out")
         );
         assert!(err("[keys]\nright = \",\"\n[keys.aliases]\n\",\" = \"a\"").contains("right's"));
@@ -1497,15 +1511,18 @@ mod tests {
     }
 
     #[test]
-    fn every_verb_rejects_letters_and_digits_but_repeat_still_accepts_them() {
-        for (name, variant, letters) in [("us", "", "aZ09"), ("fr", "", "éà"), ("gr", "", "αΩ")]
+    fn every_verb_rejects_lower_case_letters_and_digits_but_repeat_still_accepts_them() {
+        for (name, variant, letters) in [("us", "", "az09"), ("fr", "", "éà"), ("gr", "", "αω")]
         {
             let layout = Layout::named(name, variant);
             for action in Action::ALL {
                 for ch in letters.chars() {
                     let text = format!("[keys]\n{} = \"{ch}\"", action.name());
                     let err = format!("{:#}", Config::parse(&text, &layout).unwrap_err());
-                    assert!(err.contains("use a symbol or a named key"), "{text}: {err}");
+                    assert!(
+                        err.contains("use a capital, a symbol or a named key"),
+                        "{text}: {err}"
+                    );
                     assert!(err.contains(action.name()), "{err}");
                 }
             }
@@ -2126,12 +2143,20 @@ offset = [-13, 17]
         assert_eq!(written.verbs.action_of(key(53, false)), middle);
         let none = Config::parse("[keys]\nhelp = \"\"", &us()).unwrap();
         assert!(!none.verbs.is_help(key(53, true)));
-        // `/` as a tag letter: its Shift is a Shift-click, so no help.
+        // `/` as a tag letter keeps it, unshifted, and help its `?`.
         let letter = Config::parse("[keys]\nalphabet = \"asdf/\"", &us()).unwrap();
-        assert!(!letter.verbs.is_help(key(53, true)));
-        let rendered = letter.render();
+        assert!(letter.verbs.is_help(key(53, true)));
+        assert_eq!(labels(&letter), "asdf/");
+        assert_eq!(
+            Config::parse(&letter.render(), &us()).unwrap().verbs,
+            letter.verbs
+        );
+        // A command on exactly `?` takes it.
+        let taken = Config::parse("[keys]\nhover = \"?\"", &us()).unwrap();
+        assert!(!taken.verbs.is_help(key(53, true)));
+        let rendered = taken.render();
         assert!(rendered.contains("# help has no key"), "{rendered}");
-        assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, letter.verbs);
+        assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, taken.verbs);
         let legend = config.verbs.legend();
         assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
         assert!(legend.contains(", tag\tright click"), "{legend}");

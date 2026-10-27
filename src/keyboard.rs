@@ -92,10 +92,15 @@ const MOD1: u32 = 1 << 3;
 /// `AltGr`, which sets Mod5 on layouts that have it, isn't Alt.
 pub const fn held(mask: u32) -> Mods {
     Mods {
-        shift: mask & SHIFT != 0,
         ctrl: mask & CONTROL != 0,
         alt: mask & MOD1 != 0,
     }
+}
+
+/// Whether the same mask holds Shift, which is part of a key (`_` isn't
+/// `-`), never a click's.
+pub const fn shifted(mask: u32) -> bool {
+    mask & SHIFT != 0
 }
 
 pub struct Keyboard {
@@ -142,7 +147,6 @@ impl Keyboard {
     pub fn hold(&mut self, mods: Mods, locks: Locks) -> Result<()> {
         let mut depressed = 0;
         for (wanted, key, mask) in [
-            (mods.shift, KeyCode::LEFT_SHIFT, SHIFT),
             (mods.ctrl, KeyCode::LEFT_CTRL, CONTROL),
             (mods.alt, KeyCode::LEFT_ALT, MOD1),
         ] {
@@ -307,7 +311,7 @@ mod tests {
             "Ctrl made a Caps"
         );
         assert_eq!(held_by("us", "", 58), Mods::NONE, "Caps Lock isn't Shift");
-        assert!(held_by("us", "", 54).shift, "right Shift");
+        assert_eq!(held_by("us", "", 54), Mods::NONE, "Shift is no click's");
         assert!(held_by("us", "", 56).alt, "left Alt");
         assert_eq!(held_by("de", "", 100), Mods::NONE, "AltGr isn't Alt");
     }

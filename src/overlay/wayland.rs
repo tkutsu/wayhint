@@ -51,7 +51,7 @@ use tiny_skia::Pixmap;
 use crate::{
     action::Mods,
     desktop,
-    keyboard::{Keyboard, Locks, held, read_keymap},
+    keyboard::{Keyboard, Locks, held, read_keymap, shifted},
     keys::{Key, KeyCode},
     overlay::{
         Event, draw,
@@ -139,6 +139,7 @@ impl State {
         // across the click included (Hyprland sends `modifiers` with the
         // keymap). Until then none, so one let go meanwhile can't stick.
         self.held = Mods::NONE;
+        self.pressed = 0;
         self.seen = Seen::default();
         if let (Some(manager), Some(seat)) = (&self.input_methods, self.seat()) {
             let method = manager.get_input_method(&seat, qh, ImeEvents);
@@ -241,7 +242,7 @@ impl State {
             self.seen.press(code);
             let key = Key {
                 code,
-                shift: self.held.shift,
+                shift: shifted(self.pressed),
             };
             if !self.gate.press(key, self.held) {
                 return;
@@ -275,9 +276,11 @@ impl State {
         // the gate at its press), and is read as text now.
         for (key, mods) in self.gate.release(code) {
             let event = match &mut self.typist {
-                Some(typist) if key.code != KeyCode::ENTER => {
-                    Event::Typed(key, mods, typist.press_late(key.code, mods, self.locks))
-                }
+                Some(typist) if key.code != KeyCode::ENTER => Event::Typed(
+                    key,
+                    mods,
+                    typist.press_late(key.code, key.shift, self.locks),
+                ),
                 _ => Event::Key(key, mods),
             };
             self.events.push_back(event);
