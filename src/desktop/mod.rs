@@ -644,13 +644,18 @@ impl Desktop {
     }
 
     /// The text of every object in `snapshot.texts` that shows some, and
-    /// why the reading stopped early, if it did.
+    /// why the reading stopped early, if it did. A menu's items were read
+    /// by the scan; the rest are asked now.
     fn read_objects(&self, snapshot: &Snapshot) -> (Vec<Text>, Option<String>) {
         let origin = |window: usize| snapshot.windows[window].window.rect.origin();
-        let objects: Vec<(&ObjectId, Rect, bool)> = snapshot
+        let (items, asked): (Vec<_>, Vec<_>) = snapshot
             .texts
             .iter()
-            .map(|source| {
+            .enumerate()
+            .partition(|(_, source)| source.menu.is_some());
+        let objects: Vec<(&ObjectId, Rect, bool)> = asked
+            .iter()
+            .map(|(_, source)| {
                 let at = origin(source.window);
                 let area = source.area.offset(Point::new(-at.x, -at.y));
                 (&source.object, area, source.named)
@@ -658,10 +663,10 @@ impl Desktop {
             .collect();
         let read = self.scanner.read_texts(&objects, TEXT_TIMEOUT);
         let (reads, incomplete) = self.runtime.block_on(read);
-        let texts = reads
+        let mut texts: Vec<Text> = reads
             .into_iter()
-            .zip(snapshot.texts.iter().enumerate())
-            .filter_map(|(read, (index, source))| {
+            .zip(&asked)
+            .filter_map(|(read, &(index, source))| {
                 let read = read?;
                 Some(Text {
                     place: Place::Object(index),
@@ -674,6 +679,19 @@ impl Desktop {
                 })
             })
             .collect();
+        texts.extend(items.into_iter().filter_map(|(index, source)| {
+            let item = source.menu.as_ref()?;
+            item.rect.intersect(source.area)?;
+            Some(Text {
+                place: Place::Object(index),
+                window: source.window,
+                name: item.name.clone(),
+                rect: item.rect,
+                area: source.area,
+                start: 0,
+                content: item.name.clone(),
+            })
+        }));
         (texts, incomplete)
     }
 
@@ -1378,6 +1396,7 @@ mod tests {
             clips: Vec::new(),
             owner: None,
             button: None,
+            menu: None,
         });
         let name = format!("{} contact us", "read more about it ".repeat(6));
         assert!(name.chars().count() > 100, "longer than a label");

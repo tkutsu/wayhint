@@ -989,6 +989,7 @@ mod tests {
             clips: vec![object.clone()],
             owner: None,
             button: None,
+            menu: None,
         });
         let mut found = Search::new(vec![Text {
             place: Place::Object(0),
@@ -1088,6 +1089,7 @@ mod tests {
             clips: Vec::new(),
             owner: Some(object("/save")),
             button: None,
+            menu: None,
         });
         let found = Search::new(vec![Text {
             place: Place::Object(0),

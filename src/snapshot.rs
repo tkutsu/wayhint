@@ -8,7 +8,7 @@
 //! every part can run alone from a saved file.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -73,6 +73,18 @@ pub struct TextSource {
     /// it only where its picture shows letters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub button: Option<Button>,
+    /// A menu item's name and global box, as the scan read them: its text
+    /// as it is. Asked again, its app gives the box in its window's
+    /// coordinates, not the menu's (Firefox), so text mode never asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<MenuItem>,
+}
+
+/// What a scan read of a menu item: see [`TextSource::menu`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuItem {
+    pub name: String,
+    pub rect: Rect,
 }
 
 /// What `Desktop::layout` checks a button's picture by.
@@ -253,34 +265,7 @@ impl Snapshot {
                     opens: Vec::new(),
                 }
             }));
-            // A menu's items are read again in the app's own coordinates,
-            // which aren't the menu's (Firefox): text mode leaves them out.
-            let sources = match tree.window.kind {
-                Kind::Menu => Vec::new(),
-                _ => filter::text_sources(tree),
-            };
-            let tagged: HashSet<usize> = filtered.kept.iter().map(|kept| kept.node).collect();
-            texts.extend(sources.into_iter().map(|(node, area)| {
-                let read = &tree.nodes[node];
-                let owner = std::iter::once(node)
-                    .chain(tree.ancestors(node))
-                    .find(|i| tagged.contains(i));
-                TextSource {
-                    owner: owner.map(|i| tree.nodes[i].object.clone()),
-                    object: read.object.clone(),
-                    window,
-                    role: read.role.clone(),
-                    editable: read.states.editable,
-                    named: !read.text,
-                    area: area.offset(origin),
-                    clips: tree
-                        .ancestors(node)
-                        .filter(|a| scrollers.contains(a))
-                        .map(|a| tree.nodes[a].object.clone())
-                        .collect(),
-                    button: Button::of(read, origin),
-                }
-            }));
+            texts.extend(text_sources(tree, filtered, window, &scrollers));
             windows.push(Scanned {
                 window: tree.window.clone(),
                 stats: stats.clone(),
@@ -428,6 +413,62 @@ impl Snapshot {
         serde_json::from_str(&text)
             .with_context(|| format!("{} isn't a wayhint snapshot", path.display()))
     }
+}
+
+/// The objects with text in window `window`, `tree`, for text mode, each
+/// with the target its text is on, among those `filtered` kept.
+fn text_sources(
+    tree: &Tree,
+    filtered: &Filtered,
+    window: usize,
+    scrollers: &BTreeSet<usize>,
+) -> Vec<TextSource> {
+    let origin = tree.window.rect.origin();
+    let menu = tree.window.kind == Kind::Menu;
+    let tagged: HashSet<usize> = filtered.kept.iter().map(|kept| kept.node).collect();
+    let sources = filter::text_sources(tree).into_iter();
+    sources
+        .filter_map(|(node, area)| {
+            let read = &tree.nodes[node];
+            let item = if menu {
+                Some(menu_item(read, origin)?)
+            } else {
+                None
+            };
+            let owner = std::iter::once(node)
+                .chain(tree.ancestors(node))
+                .find(|i| tagged.contains(i));
+            Some(TextSource {
+                owner: owner.map(|i| tree.nodes[i].object.clone()),
+                object: read.object.clone(),
+                window,
+                role: read.role.clone(),
+                editable: read.states.editable,
+                named: !read.text || menu,
+                area: area.offset(origin),
+                clips: tree
+                    .ancestors(node)
+                    .filter(|a| scrollers.contains(a))
+                    .map(|a| tree.nodes[a].object.clone())
+                    .collect(),
+                button: if menu { None } else { Button::of(read, origin) },
+                menu: item,
+            })
+        })
+        .collect()
+}
+
+/// A menu's item, searched by its name where the scan found it (see
+/// [`TextSource::menu`]). One with no name or box has nothing to search.
+fn menu_item(node: &Node, origin: Point) -> Option<MenuItem> {
+    let details = node.details.as_ref();
+    let name = details
+        .map(|d| d.name.clone())
+        .filter(|n| !n.trim().is_empty())?;
+    Some(MenuItem {
+        name,
+        rect: node.bounds?.offset(origin),
+    })
 }
 
 /// The targets of a window read from its pixels. The boxes are in the
@@ -687,5 +728,59 @@ mod tests {
                       "hit":{"x":4,"y":4},"role":"button","name":"OK","editable":false}"#;
         let target: Target = serde_json::from_str(old).unwrap();
         assert!(target.object.is_some() && target.opens.is_empty());
+    }
+
+    #[test]
+    fn a_menus_items_are_searched_by_name_where_the_scan_found_them() {
+        use crate::desktop::tree::{Details, States};
+
+        let node = |parent, role: &str, name: &str, bounds| Node {
+            object: ObjectId {
+                bus: ":1.1".into(),
+                path: format!("/{name}"),
+            },
+            parent,
+            role: role.into(),
+            states: States {
+                showing: true,
+                visible: true,
+                enabled: true,
+                sensitive: true,
+                ..States::default()
+            },
+            action: role == "menu item",
+            component: true,
+            text: false,
+            bounds: Some(bounds),
+            details: Some(Details {
+                name: name.into(),
+                actions: vec!["click".into()],
+            }),
+        };
+        let nodes = vec![
+            node(None, "menu", "menu", Rect::new(0, 0, 200, 100)),
+            node(Some(0), "menu item", "Copy", Rect::new(0, 10, 200, 20)),
+            node(Some(0), "menu item", " ", Rect::new(0, 40, 200, 20)),
+        ];
+        let texts = |kind| {
+            let tree = Tree {
+                window: Window { kind, ..window() },
+                nodes: nodes.clone(),
+            };
+            let filtered = filter::filter(&tree);
+            let stats = Stats::default();
+            let read = Read::Tree(&tree, &filtered, &stats);
+            Snapshot::build(1, 0, [read]).texts
+        };
+        let menu = texts(Kind::Menu);
+        assert_eq!(menu.len(), 1, "a nameless item has nothing to search");
+        let item = MenuItem {
+            name: "Copy".into(),
+            rect: Rect::new(100, 60, 200, 20),
+        };
+        assert_eq!(menu[0].menu, Some(item));
+        assert!(menu[0].named && menu[0].button.is_none());
+        let client = texts(Kind::Client);
+        assert!(client.iter().all(|t| t.menu.is_none()), "asked as ever");
     }
 }
