@@ -276,23 +276,19 @@ fn a_scaled_frame_is_read_at_logical_size() {
 }
 
 #[test]
-fn terminal_nvim_gets_one_focus_hint_on_clear_lower_pixels() {
+fn terminal_nvim_gets_one_fixed_bottom_left_focus_hint() {
     let frame = load(Path::new("tests/fixtures/terminal-nvim.png"));
     for detector in [Detector::Fast, Detector::Full] {
         let found = find(&frame, detector, true);
         assert!(found.direct.is_empty() && found.blocks.is_empty() && found.media.is_empty());
         assert_eq!(found.bodies.len(), 1);
-        let [x, y, r, b] = found.bodies[0];
-        assert!(y > frame.height as i32 / 2);
-        assert_eq!(
-            crate::space::Space::pixels(&frame).ink(crate::geometry::Rect::new(x, y, r - x, b - y)),
-            0
-        );
+        assert_eq!(found.bodies[0][0], 10);
+        assert_eq!(found.bodies[0][3], frame.height as i32 - 10);
     }
 }
 
 #[test]
-fn terminal_focus_is_at_the_bottom_right_and_always_one_hint() {
+fn terminal_focus_is_at_the_bottom_left_and_always_one_hint() {
     for (width, height) in [(900, 650), (80, 40), (8, 8)] {
         let frame = frame(width, height, |_, _| [20; 3]);
         let found = find(&frame, Detector::Fast, true);
@@ -301,14 +297,14 @@ fn terminal_focus_is_at_the_bottom_right_and_always_one_hint() {
         let [x, y, r, b] = found.bodies[0];
         assert!(x >= 0 && y >= 0 && r <= width as i32 && b <= height as i32);
         if width > 80 {
-            assert_eq!(width as i32 - r, 10);
+            assert_eq!(x, 10);
             assert_eq!(height as i32 - b, 10);
         }
     }
 }
 
 #[test]
-fn terminal_focus_moves_off_occupied_bottom_right_pixels() {
+fn terminal_focus_stays_fixed_on_occupied_bottom_left_pixels() {
     let preferred = terminal_patch(900, 650);
     let frame = frame(900, 650, |x, y| {
         if preferred.contains(crate::geometry::Point::new(x as i32, y as i32)) {
@@ -323,9 +319,7 @@ fn terminal_focus_moves_off_occupied_bottom_right_pixels() {
         let found = find(&frame, detector, true);
         let [x, y, r, b] = found.bodies[0];
         let patch = crate::geometry::Rect::new(x, y, r - x, b - y);
-        assert_ne!(patch, preferred);
-        assert_eq!(space.ink(patch), 0);
-        assert!(x > 800 && y > 550, "stay near the bottom-right corner");
+        assert_eq!(patch, preferred);
     }
 }
 

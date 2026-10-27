@@ -117,9 +117,13 @@ its config does not create the socket. Each Kitty process gets its own
 socket; programs it starts inherit the address in `KITTY_LISTEN_ON`.
 
 Run `wayhint doctor` again to check the connection. Remote control enables
-text searches and a hint at the active pane's cursor. Without a usable
-connection, Kitty has no cursor hint or searchable text. Its quick-access
-panel is a layer surface and is not searched.
+text searches and, with `[pixels] terminal_hint = true`, a hint at the
+active pane's cursor. Without a usable
+connection, or when the cursor is hidden, the focus hint sits 10 px from
+the window's left and bottom edges. This fallback uses the pixel hint
+color; a reported cursor uses the normal hint color. Remote control is
+still required for searchable text. Its quick-access panel is a layer
+surface and is not searched.
 
 `socket-only` accepts control through the socket and rejects requests
 through the terminal. Programs able to connect to that socket can read
@@ -153,7 +157,7 @@ skips the action if it changed.
 Hints use letters that no searchable word starts with. Typing therefore
 narrows both text and hints until one identifies a target. By default,
 hints act as soon as they are complete, and text matches
-wait for `Enter`. `[hints] auto_accept` and `[text] auto_accept` change
+wait for `Enter`. `[hints] auto_accept` and `[words] auto_accept` change
 each.
 
 ### Verbs
@@ -177,11 +181,13 @@ letters.
 | `.` | Double click. |
 | `'` | Hover, leaving the pointer there. |
 | `Home`, `End` | Mouse back, forward. |
-| `PageUp`, `PageDown` | Scroll up, down by five notches. |
+| `PageUp`, `PageDown` | Immediately scroll the focused window up, down by five notches. |
 | `;` | Hold the left button; the next target releases it there to drag. |
 
-Type a verb twice to act again at the last command's position, or where
-the pointer was moved since. The close key releases a hold in place.
+Scroll keys act immediately in either mode, without a hint or `Enter`.
+`Ctrl` and `Alt` apply to the scroll. Other verbs typed twice act again at
+the last command's position, or where the pointer was moved since. The
+close key releases a hold in place.
 These defaults describe a US layout. Keys are matched by position using
 your first keyboard layout; a default that produces a letter or digit on
 that layout stays unbound. `wayhint config` shows the actual bindings.
@@ -213,28 +219,108 @@ hold = "_"
 repeat = "r"
 
 [hints]
-auto_accept = true
+size = 10
+auto_accept = false
 
-[text]
-hints = true
-cursor = "start"       # start, center (default), or end of the match
-auto_accept = false    # true acts on a unique match after 3 characters
+[words]
+cursor = "start"
+auto_accept = true     # act on a unique match after 3 characters
+
+[pointer]
+scroll_steps = 2
 ```
 
-Set `[hints] auto_accept = false` to confirm completed hints with
-`Enter`. This applies in either mode. Set `[text] hints = false` to show only text
-matches. Appearance is configured under `[style]`, `[text.matches]`,
-`[text.starts]`, `[input]` and `[info]`; colours accept hex RGB or RGBA. Hints and verbs
-each have their own colour: `[style] text` for hints, and `verb` in `[style]`
-and `[input]` for an armed verb (peach by default). Invalid settings are reported before
-wayhint takes the keyboard.
+Each window has a hint near its top right, moved clear of other hints and
+small controls where space permits. It focuses the window without clicking
+and has no arrow. It is hidden whenever a verb is armed or a drag is active.
+Set `[hints] window_hint = false` to disable it. Terminal cursor hints are off
+by default; enable `[pixels] terminal_hint = true` to show them as well
+(with a bottom-left fallback when the cursor cannot be read).
 
-A hint goes beside the start of its control: to its left, or under it, or
-above it, whichever spot no other control or hint takes first. A control
-with no free spot keeps its hint at its own start. Set `[style] position`
-to a point such as `"bottom-right"` to put every hint there instead.
-`[text.starts] mark = "underline"` or `"box"` marks the first letter of each
-word that text mode can find, while nothing is typed.
+Keep only your overrides. Omitted settings use defaults; input appearance
+inherits from `[hints]`, with its own screen position. Match boxes inherit
+the hints' radius and padding. `[words.matches.current]` inherits the other
+match settings, with an orange starting color. An explicit `background` makes
+the current match solid unless `background_end` is also set.
+
+Under `[keys]`, `default_action = "left"` chooses what a bare tag or Space
+does. Set a shortcut to a key, or `false` to disable it; empty strings are
+rejected. For example, `default_action = "right"` makes a bare tag right-click,
+and `left = "."` gives left-click a shortcut. The close key must stay bound.
+
+Set `[hints] auto_accept = false` to confirm completed hints with
+`Enter`, in either mode. Set `[words] fallback_hints = false` to show only text
+matches. `[input] show_typed_hints` controls whether typed tag letters move
+into the input box. `[messages]` controls the status messages below it;
+their visibility is independent of `[input] visible`. Durations use `_ms`,
+and pointer distances and merge distance use `_px`.
+
+Appearance is configured under `[hints]`, `[words.matches]`,
+`[words.first_character]`, `[input]` and `[messages]`; colors accept hex RGB or RGBA.
+`text` colors hint letters; `verb` colors the armed verb in hints and the input.
+Invalid settings are reported before wayhint takes the keyboard.
+
+Hint backgrounds and letters can each use a gradient across the whole monitor,
+visible only inside the tags or letters. Add a second colour and a direction
+under `[hints]`:
+
+```toml
+[hints]
+background = "#1e1e2ef0"
+background_end = "#45475af0"
+background_direction = "right"
+text = "#ffffffff"
+text_end = "#94e2d5ff"
+text_direction = "bottom-right"
+```
+
+Directions point toward the second colour: `left`, `right`, `top`, `bottom`,
+`top-left`, `top-right`, `bottom-left` or `bottom-right`. The default is `right`.
+Omit either `_end` field to keep that colour solid. Each monitor has its own
+gradient, shared by all its hints. An explicit `text` or `background` in
+`[hints.pixels]` makes that part of pixel hints solid instead. Typed letters,
+armed verbs and the input box keep their existing colours.
+
+Word match boxes use the same monitor-wide gradients under `[words.matches]`
+and `[words.matches.current]`: set `background_end` and `background_direction`.
+First-character markers share `color`, `color_end` and `direction` under
+`[words.first_character]`, whether the shape is an underline, box or dot:
+
+```toml
+[words.matches]
+background = "#1e1e2ec8"
+background_end = "#45475ac8"
+background_direction = "bottom-right"
+
+[words.first_character]
+mark = "underline"
+color = "#89b4faff"
+color_end = "#94e2d5ff"
+direction = "right"
+```
+
+The `[words]` tables control searchable words; the `text` color fields under
+`[hints]` and `[input]` control rendered letters.
+
+A hint tries just outside its target: left, below, above, then right,
+centered along the chosen edge and avoiding other controls and hints.
+Aligned columns share the left or right side nearest the screen edge;
+aligned rows share top or bottom.
+One blocked hint keeps the group's side. Two or more blocked hints make
+the whole group try another side. Shared placements stay anchored,
+including while typing. If every side is blocked, the group centers its
+hints inside the controls. A tiny arrow touches the nearest target edge.
+Configure its `color`, `outline`, `length` and `outline_width` under
+`[hints.arrow]`. Set `length = 0` to hide arrows. Centered fallbacks have no arrow.
+Set `[hints] position` to a point such as `"bottom-right"` to put every
+hint there instead.
+Hints for layer surfaces, including bars, can use space outside the surface
+while staying on the monitor.
+`[words.first_character] mark = "underline"`, `"box"` or `"dot"` marks the first
+character of each word that text mode can find, while nothing is typed.
+`thickness` sets the underline height or dot diameter. Dots sit centered one
+logical pixel below the character. Box borders, radius and padding keep their
+own settings; use alpha in `color` to make the fill translucent.
 
 ## Limits and troubleshooting
 

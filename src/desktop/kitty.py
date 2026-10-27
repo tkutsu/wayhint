@@ -80,6 +80,8 @@ def pane(window, cell_height):
 def cursor(window, size):
     """The active cursor cell's origin in physical window pixels."""
     screen = window.screen
+    if not screen.cursor_visible:
+        return None
     # Pending line wrap can leave x one cell beyond the last column.
     x = min(screen.cursor.x, screen.columns - 1)
     return [

@@ -1,242 +1,163 @@
-# wayhint's default config.
-#
-# Every setting below is shown at its default, commented out. Copy this file
-# to ~/.config/wayhint/config.toml and uncomment only what you change:
-#
-#     wayhint config --default > ~/.config/wayhint/config.toml
-#
-# `wayhint config` prints the settings in effect: your file merged with
-# these defaults. It also checks your file: a misspelt setting or a bad
-# value is an error that names it, and wayhint itself stops on it before
-# taking the keyboard, so a typo can never leave you stuck. `wayhint doctor`
-# checks the rest of the setup.
-#
-# Colours are "#RGB", "#RGBA", "#RRGGBB" or "#RRGGBBAA"; A is opacity.
-# Sizes and distances are logical px.
-
+# Wayhint defaults. Uncomment only the settings you want to change.
+# `wayhint config` validates your file and prints the effective settings.
+# Colors accept #RGB, #RGBA, #RRGGBB or #RRGGBBAA. Alpha controls opacity.
+# Sizes and distances are logical pixels; settings ending in _ms use milliseconds.
 
 [keys]
-# Keys are matched by position, read with your keyboard's first layout, and
-# written here as that layout prints them. The defaults below are what a US
-# layout prints; on another layout they are the same positions.
-
-# Tag letters, easiest to press first. Easy letters carry repeated prefixes;
-# short tags come first. The default is your home row.
+# Keys use their positions in your keyboard's first layout.
+# The alphabet is ordered from easiest to press to hardest.
 # alphabet = "asdfghjkl"
+# default_action = "left"   # action for a bare tag or Space
+# Shortcut values are a key or false (disabled). Omit to use the default.
+# Verbs accept capitals, symbols or named keys. Shift belongs to the key.
+# left = false
+# right = ","
+# middle = "/"
+# double = "."
+# hover = "'"
+# back = "Home"
+# forward = "End"
+# scroll_up = "PageUp"
+# scroll_down = "PageDown"
+# hold = ";"               # the next tag or Space releases on that target
+# repeat = false           # repeat the last command on its target
+# help = "?"
+# close = "Esc"            # cannot be disabled; can override a built-in key
 
-# The verbs. Type one anywhere before a tag's last letter to do it there
-# instead of a left click, before Space to do it at the pointer, or twice to
-# do it again where the last command was (PageDown PageDown scrolls the same
-# pane again). In text mode, type it before any text; a named key works
-# there any time. A verb key is a capital ("A"), a symbol, Shift included
-# ("_"), or a name: PageUp, PageDown, Home, End, Delete. Lower-case letters
-# and digits are rejected. "" makes a verb what a bare tag does; exactly
-# one verb is "". Shift is part of the key and never held through a click.
-# An unshifted key a verb takes leaves the alphabet; a capital leaves its
-# letter a tag letter. A default key that is one of your
-# tag letters, that you gave another command, or that types a letter or
-# digit on your layout is simply left unbound.
-# left = ""                 # left click: a bare tag does this
-# right = ","               # right click
-# middle = "/"              # middle click
-# double = "."              # double click
-# hover = "'"               # move there and stay, for tooltips
-# back = "Home"             # the mouse's back button
-# forward = "End"           # the mouse's forward button
-# scroll_up = "PageUp"      # the wheel up, [pointer] scroll notches
-# scroll_down = "PageDown"  # the wheel down, [pointer] scroll notches
-# hold = ";"                # press and keep down; the next tag or Space lets go there (a drag), the close key lets go in place
-
-# Commands of their own.
-# repeat = ""               # the last command again, on the same target; "" for none
-# help = "?"                # every key and what it does, in the info box; "" for none
-# close = "Esc"             # leave wayhint, from tags or text mode; while holding, release in place first
-# The close key takes its letter out of the alphabet. It can be a character
-# ("q", "?") or a name ("Esc", "F1" through "F24", "Space", "Home"). It
-# overrides a built-in key and also closes text mode, so its character
-# cannot be searched there. Launching wayhint again in the same mode closes
-# it too; the other mode's launch closes it and starts that mode.
-
-# Built in, unless chosen as the close key: Backspace takes back the last
-# key, Space acts at the pointer, Enter confirms a completed tag or text
-# match, Tab works in text mode, and the arrows move the pointer, held for
-# faster: Space or a verb typed twice acts where it is.
-
-# Other keys that type a tag letter, for a layer that sends a different
-# character from the same key: "key" = "letter".
+# Optional alternate keys for tag letters: "key" = "letter".
 # [keys.aliases]
 # ";" = "c"
 
-
 [hints]
-# Completed tags, in tag mode and on text mode's targets with no text.
-# auto_accept = true        # false waits for Enter after the whole tag; modifiers on Enter apply to the action
-
-
-[style]
-# How a tag looks.
-# font = "sans-serif:bold"  # a fontconfig pattern, as fc-match takes it
+# auto_accept = true       # false waits for Enter after a completed tag
+# window_hint = true       # focus each window; top-right label, no arrow, hidden with any verb
+# font = "sans-serif:bold" # fontconfig pattern
 # size = 13
 # text = "#ffffffff"
-# dimmed = "#ffffff66"      # typed letters, a placeholder
-# verb = "#fab387ff"        # an armed verb's key in front of the letters (peach)
+# text_end = "#ffffffff"   # omit for solid text
+# text_direction = "right"
+# dimmed = "#ffffff66"     # typed letters
+# verb = "#fab387ff"
 # background = "#1e1e2ef0"
+# background_end = "#1e1e2ef0" # omit for a solid background
+# background_direction = "right"
+# Gradients span each monitor. Directions: left, right, top, bottom, or a corner.
 # border = "#d0d0d0ff"
 # border_width = 1
 # radius = 4
-# padding = [2, 5]          # vertical, horizontal
-# position = "auto"         # on the target: auto, or center, top, bottom, left, right, or a corner as top-left
-# Auto puts a tag beside its control's start: to its left, else under it,
-# else over it, wherever no other control is; boxed in, at its start
-# inside. Any other position puts the tag at that point on the control.
-# offset = [0, 0]           # px from there, right and down
-# case = "upper"            # the tags' letters: upper or lower; the keys are the same
+# padding = [2, 5]         # vertical, horizontal
+# position = "auto"        # beside the target, avoiding other controls
+# Other positions: center, top, bottom, left, right, or a corner such as top-left.
+# offset = [0, 0]          # right, down
+# case = "upper"           # upper or lower; does not change the keys
 
-[style.leader]
-# The line from a tag to the dot where it clicks: shown when a tag had to
-# move off its target to stay readable. Each
-# is drawn inside an outline, so it shows on light and dark windows alike.
-# Unset colours follow the tags: the line and dot take [style] text, the
-# outline takes [style] background.
-# line = "#ffffffff"
-# dot = "#ffffffff"
-# outline = "#1e1e2ef0"
-# width = 1                 # the line's, in px
-# radius = 3                # the dot's, in px
-# outline_width = 2         # px, around the dot and across the line; 0 for none
+[hints.arrow]
+# color = "#ffffffff"      # follows hints.text
+# outline = "#1e1e2ef0"    # follows hints.background
+# length = 3              # 0 hides arrows
+# outline_width = 2        # 0 removes the outline
 
-[style.pixels]
-# Tags found in a window's pixels ([pixels] detector) are guesses and miss
-# more often than tags from the accessibility tree; this look tells them
-# apart. Unset fields follow [style]; by default only the letters differ.
+[hints.pixels]
+# Pixel hints inherit [hints], with teal text unless a shared text gradient is set.
 # font = "sans-serif:bold"
 # size = 13
-# text = "#94e2d5ff"        # teal
+# text = "#94e2d5ff"       # an explicit color replaces the shared text gradient
 # dimmed = "#ffffff66"
+# verb = "#fab387ff"
+# background = "#1e1e2ef0" # an explicit color replaces the shared background gradient
+# border = "#d0d0d0ff"
+# border_width = 1
+# radius = 4
+# padding = [2, 5]
+
+[words]
+# cursor = "center"        # start, center or end of the selected match
+# auto_accept = false      # true acts on a unique match after 3 typed characters
+# fallback_hints = true    # tags for targets without searchable text
+
+[words.matches]
+# Match boxes inherit radius and padding from [hints].
+# background = "#ffff0080"
+# background_end = "#ffff0080" # omit for a solid background
+# background_direction = "right"
+# border = "#d0d0d0ff"
+# border_width = 0
+# radius = 4
+# padding = [2, 5]
+
+[words.matches.current]
+# Inherits [words.matches], with an orange starting color.
+# An explicit background replaces the inherited gradient unless background_end is set.
+# background = "#ff963280"
+# background_end = "#ff963280"
+# background_direction = "right"
+# border = "#d0d0d0ff"
+# border_width = 0
+# radius = 4
+# padding = [2, 5]
+
+[words.first_character]
+# First letters are marked while no query is typed.
+# mark = "off"             # off, underline, box or dot
+# color = "#89b4faff"       # fill for every shape; use alpha for a translucent box
+# color_end = "#89b4faff"   # omit for a solid fill
+# direction = "right"      # gradient direction across each monitor
+# thickness = 2            # underline height or dot diameter; dot sits 1 px below
+# These fields apply only to boxes:
+# border = "#89b4faff"
+# border_width = 0
+# radius = 2
+# padding = [0, 1]
+
+[input]
+# The input box inherits its appearance from [hints], with its own screen position.
+# visible = true           # false hides it; a listening bar still receives updates
+# show_typed_hints = true  # show typed tag letters here and remove them from tags
+# placeholder = "text"
+# prefix = ""
+# suffix = ""
+# font = "sans-serif:bold"
+# size = 13
+# text = "#ffffffff"
+# dimmed = "#ffffff66"     # placeholder color
 # verb = "#fab387ff"
 # background = "#1e1e2ef0"
 # border = "#d0d0d0ff"
 # border_width = 1
 # radius = 4
-# padding = [2, 5]          # vertical, horizontal
+# padding = [2, 5]
+# position = "bottom"      # screen position; same choices as hints, except auto
+# offset = [0, -48]
 
-
-[input]
-# The box for what you type: an armed verb's name, "drop" while a hold is
-# down, the tag letters typed so far, and text mode's query. [info]'s
-# messages are its second line. Once called [text.input], which a file may
-# still say. Unset look fields follow [style]; position and offset are on
-# the screen here.
-# visible = true            # false hides the first line; a listening bar still gets it (README: "The input box in a bar")
-# hints = true              # typed tag letters show here, and leave the tags; false dims them on the tags
-# placeholder = "text"      # shown, dimmed, while nothing is typed in text mode
-# prefix = ""               # before the query, as "find: "
-# suffix = ""               # after the query, before the match count
-# font = "sans-serif:bold"
-# size = 13
-# text = "#ffffffff"
-# dimmed = "#ffffff66"      # the placeholder
-# verb = "#fab387ff"        # the armed verb's name, and drop
-# background = "#1e1e2ef0"
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-# position = "bottom"       # on the screen: center, top, bottom, left, right, or a corner as top-left
-# offset = [0, -48]         # px from there, right and down
-
-
-[info]
-# What wayhint has to say, as the input box's second line: an icon and a
-# few words in the message's colour, at most two lines. Each kind of
-# message can be turned off.
-# visible = true            # false hides the messages; a listening bar still gets them
-# scanning = true           # "scanning" once a scan takes over half a second
-# no_targets = true         # "no targets" while nothing on the monitor has a tag
-# no_match = true           # named here: a key that matches no tag (dropped), or text nothing matches
-# duration = 2000           # ms a message stays
-# icon_font = "Symbols Nerd Font"  # a fontconfig pattern; icons it lacks are left out
-# Each message's icon, one glyph or "" for none, and its colour.
-# scanning_icon = "\uF002"   # nf-fa-search
+[messages]
+# Status messages appear below the input. Visibility is independent of [input].
+# visible = true           # false hides them; a listening bar still receives updates
+# scanning = true
+# no_targets = true
+# no_match = true
+# duration_ms = 2000
+# icon_font = "Symbols Nerd Font"
+# scanning_icon = "\uF002" # use "" for no icon
 # scanning_color = "#89b4faff"
-# no_targets_icon = "\uF05E" # nf-fa-ban
+# no_targets_icon = "\uF05E"
 # no_targets_color = "#f9e2afff"
-# no_match_icon = "\uF057"   # nf-fa-times_circle
+# no_match_icon = "\uF057"
 # no_match_color = "#f38ba8ff"
-# help_icon = "\uF11C"       # nf-fa-keyboard: the key list
+# help_icon = "\uF11C"
 # help_color = "#b4befeff"
 
-
-[text]
-# Text mode is what `wayhint` runs; `wayhint --hints` runs tags alone, on a
-# compositor shortcut of its own, and launching one closes the other.
-# Typing finds text on screen from the start of a word, in any case. Enter
-# acts on the current match, and Tab and Shift+Tab move between matches.
-# The pointer goes
-# to the current match, the arrows move it from there, and Enter clicks
-# where it is; another match takes it again. Targets with no
-# text to type keep a tag. A verb goes first, before the text, and
-# Backspace with nothing typed takes it back. With nothing typed, Enter
-# acts at the pointer and the help key lists the keys. The close key
-# leaves wayhint.
-# cursor = "center"         # start, center or end of the selected match
-# Start uses the first visible line's left edge; end uses the last visible
-# line's rightmost pixel. Center uses the middle of the first visible line.
-# auto_accept = false       # act on the only match left, once 3 characters are typed; false requires Enter
-# The former name, pick_unique, still works. Tags here use [hints] auto_accept.
-# hints = true              # tags on the targets with no text to type, in letters no word on screen starts with
-
-[text.matches]
-# The box over every match. Unset radius and padding follow [style].
-# background = "#ffff0080"
-# border = "#d0d0d0ff"
-# border_width = 0
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-
-[text.matches.current]
-# The box over the selected match. Unset fields follow [text.matches], in orange.
-# background = "#ff963280"
-# border = "#d0d0d0ff"
-# border_width = 0
-# radius = 4
-# padding = [2, 5]          # vertical, horizontal
-
-[text.starts]
-# The first letter of each word, what typing finds a match from, marked
-# while nothing is typed. Each letter's place is asked of its app as text
-# mode starts, which takes up to half a second more on a page of words;
-# names (a button's) have no letters to ask about and stay unmarked.
-# mark = "off"              # off, underline, or box
-# line = "#89b4faff"        # the underline
-# thickness = 2             # the underline's, in px
-# The box, as [text.matches] draws one:
-# background = "#89b4fa66"
-# border = "#89b4faff"
-# border_width = 0
-# radius = 2
-# padding = [0, 1]          # vertical, horizontal
-
-
 [pointer]
-# after = "leave"           # the cursor stays where wayhint put it; "restore" puts it back after a click, undoing the arrows
-# nudge = 10                # px one arrow press moves the pointer; held, it goes on, faster
-# scroll = 5                # wheel notches one scroll_up or scroll_down turns
-# settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
-
+# after = "leave"          # restore returns the pointer after a click
+# nudge_px = 10            # distance per arrow press; holding accelerates
+# scroll_steps = 5         # wheel notches per scroll action
+# settle_ms = 150          # wait after acting before reading windows again
 
 [pixels]
-# Windows with no accessibility tree get tags found in their pixels.
-# detector = "full"         # "full", "fast" for slower CPUs, or "off"
-# One focus tag per terminal, independent of detector, including when it is off.
-# Kitty uses its active text cursor through remote control; other terminals
-# use a patch near the bottom-right corner.
-# terminal_hint = true
-# Programs read as terminals (input areas, not buttons). Setting it replaces
-# the whole list; [] turns terminal detection off.
+# detector = "full"        # full, fast (for slower CPUs), or off
+# terminal_hint = false    # terminal cursor/fallback tag, independent of window hints and detector
 # terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]
-
+# Setting terminal_processes replaces the list; [] disables terminal detection.
 
 [scan]
-# refresh = 500             # ms the tags stay up before the windows are scanned again, doubling up to 2 s while nothing changes; 0 for only after a click
-# merge_distance = 0        # px between hint centres that share one tag; 0 keeps every hint
+# refresh_ms = 500         # doubles up to 2 s when idle; 0 scans only after actions
+# merge_distance_px = 0    # 0 keeps every hint; otherwise merge nearby centers

@@ -15,7 +15,7 @@ pub fn load(pattern: &str, size: f32) -> Result<fontdue::Font> {
     let output = Command::new("fc-match")
         .args(["--format", "%{file}\n%{index}", pattern])
         .output()
-        .context("running fc-match (fontconfig) to find the [style] font")?;
+        .context("running fc-match (fontconfig) to find the [hints] font")?;
     if !output.status.success() {
         bail!(
             "fc-match {pattern:?} failed: {}",

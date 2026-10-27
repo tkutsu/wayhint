@@ -25,6 +25,9 @@ mod hold;
 mod typing;
 mod wayland;
 
+#[cfg(test)]
+mod tests;
+
 use std::{
     collections::VecDeque,
     io::{ErrorKind, Read as _},
@@ -65,7 +68,7 @@ use self::{
     wayland::{Answered, Grab, NoEvents, State, Synced},
 };
 pub use self::{
-    draw::{Dot, Frame, Highlight, Kind, Tag},
+    draw::{ArrowTarget, Frame, Highlight, Kind, Tag},
     font::load as load_font,
 };
 use crate::{
@@ -130,9 +133,11 @@ pub struct Overlay {
     monitor: Monitor,
     /// Where the input box goes besides the screen, once the run asks.
     feed: Option<Feed>,
-    /// `[input] visible` and `[info] visible`: which of the input box's
+    /// `[input] visible` and `[messages] visible`: which of the input box's
     /// lines the overlay draws.
     visible: (bool, bool),
+    /// Only while taking keys: keyboard-driven motion must stay visible.
+    cursor_visibility: Option<desktop::CursorVisibility>,
 }
 
 impl Overlay {
@@ -140,6 +145,7 @@ impl Overlay {
     /// before anything starts other threads: it blocks SIGINT and SIGTERM
     /// so they arrive as [`Event::Interrupted`], and threads started later
     /// inherit that.
+    #[allow(clippy::too_many_lines)] // ordered Wayland setup, ending in the keyboard grab
     pub fn new(
         conn: &Connection,
         style: &Style,
@@ -153,7 +159,7 @@ impl Overlay {
         let qh = queue.handle();
         let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, NoEvents).ok();
         let scale = wayland::drawn_scale(monitor.scale, viewporter.is_some());
-        // The fonts first: a bad `[style] font` fails before any grab.
+        // The fonts first: a bad `[hints] font` fails before any grab.
         #[allow(clippy::cast_possible_truncation)] // a monitor's scale fits an f32
         let painter = Painter::new(style, marks, &input.style, info, scale as f32)?;
         let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor")?;
@@ -255,6 +261,7 @@ impl Overlay {
             monitor: monitor.clone(),
             feed: None,
             visible: (input.visible, info.visible),
+            cursor_visibility: None,
         };
         overlay.clear()?;
         overlay.grab_keyboard()?;
@@ -412,11 +419,18 @@ impl Overlay {
         let regions: Vec<_> = snapshot
             .windows
             .iter()
-            .map(|w| w.window.rect.offset(shift))
+            .map(|w| {
+                draw::label_region(
+                    w.window.rect.offset(shift),
+                    w.window.kind,
+                    self.monitor.rect.offset(shift),
+                )
+            })
             .collect();
         let controls = snapshot
             .targets
             .iter()
+            .filter(|t| t.role != "window")
             .map(|t| t.shown().offset(shift))
             .collect();
         self.painter.set_space(
@@ -458,10 +472,10 @@ impl Overlay {
                     ..t.clone()
                 })
                 .collect(),
-            dots: frame
-                .dots
+            arrows: frame
+                .arrows
                 .iter()
-                .map(|d| Dot {
+                .map(|d| ArrowTarget {
                     from: to_local(d.from),
                     at: to_local(d.at),
                     tag: d.tag,
@@ -542,7 +556,9 @@ impl Overlay {
     /// so a click right after lands with the app's keyboard back.
     pub fn release_keyboard(&mut self) -> Result<()> {
         self.state.release_keys();
-        self.roundtrip()
+        let result = self.roundtrip();
+        self.cursor_visibility = None;
+        result
     }
 
     pub fn grab_keyboard(&mut self) -> Result<()> {
@@ -556,11 +572,21 @@ impl Overlay {
                 )),
             }
         }
+        // A repeated grab must keep the original preference, rather than
+        // remembering our own temporary `false` as the user's setting.
+        let visibility = if self.cursor_visibility.is_none() {
+            Some(desktop::CursorVisibility::new()?)
+        } else {
+            None
+        };
         self.state.take_keys(&self.qh);
         // Let the grab's `unavailable`, if it comes, arrive before any key.
         self.roundtrip()?;
         if matches!(self.state.grab, Grab::Released) {
             bail!("couldn't take the keyboard");
+        }
+        if let Some(visibility) = visibility {
+            self.cursor_visibility = Some(visibility);
         }
         Ok(())
     }
@@ -634,5 +660,6 @@ impl Drop for Overlay {
         self.state.popup = None;
         self.state.layer = None;
         let _ = self.conn.flush();
+        self.cursor_visibility = None;
     }
 }

@@ -46,8 +46,8 @@ use self::{
 pub use self::{
     atspi::Stats,
     hyprland::{
-        Kind, Monitor, Window, changes_workspace, cursor, events, focused_window, monitors,
-        window_by_address,
+        CursorVisibility, Kind, Monitor, Window, changes_workspace, cursor, events, focus_window,
+        focused_window, monitors, window_by_address,
     },
     kitty::{is_kitty, listen_on},
     notify::{log, warn},
@@ -138,6 +138,7 @@ impl Picture {
 /// One window as the scan saw it, until the snapshot is built from it.
 enum Seen {
     Tree(tree::Tree, filter::Filtered, Stats),
+    Terminal(Window, Option<Rect>, Stats),
     /// With its picture, shrunk, and the picture's pixels per logical
     /// pixel: `layout` reads the same one. A terminal cursor needs no picture.
     Pixels(Window, Found, Option<(Frame, f64)>, Stats),
@@ -148,13 +149,20 @@ impl Seen {
     fn address(&self) -> &str {
         match self {
             Self::Tree(tree, ..) => &tree.window.address,
-            Self::Pixels(window, ..) | Self::Untagged(window) => &window.address,
+            Self::Terminal(window, ..) | Self::Pixels(window, ..) | Self::Untagged(window) => {
+                &window.address
+            }
         }
     }
 
     fn read(&self) -> Read<'_> {
         match self {
             Self::Tree(tree, filtered, stats) => Read::Tree(tree, filtered, stats),
+            Self::Terminal(window, cursor, stats) => Read::Terminal {
+                window,
+                cursor: *cursor,
+                stats,
+            },
             Self::Pixels(window, found, picture, stats) => Read::Pixels {
                 window,
                 found,
@@ -284,6 +292,7 @@ impl Desktop {
         monitor: &Monitor,
         pixels: Option<Detector>,
         terminal_hint: bool,
+        window_hint: bool,
         terminals: &[String],
     ) -> (Snapshot, Vec<Unread>) {
         // A layer with no frame only covers.
@@ -321,10 +330,7 @@ impl Desktop {
         for (window, read) in readable.into_iter().zip(reads) {
             if is_terminal(window, terminals) {
                 if terminal_hint {
-                    match read_terminal(&mut self.camera, window, pixels, until) {
-                        Ok(terminal) => seen.push(terminal),
-                        Err(e) => failed.push(Unread::new(window, e)),
-                    }
+                    seen.push(read_terminal(window));
                 }
                 continue;
             }
@@ -350,7 +356,9 @@ impl Desktop {
         let untagged: Vec<Seen> = stack
             .windows
             .iter()
-            .filter(|w| w.kind != Kind::Popup && is_kitty(w))
+            .filter(|w| {
+                w.kind != Kind::Popup && (is_kitty(w) || window_hint && w.kind == Kind::Client)
+            })
             .filter(|w| !seen.iter().any(|s| s.address() == w.address))
             .map(|w| Seen::Untagged(w.clone()))
             .collect();
@@ -360,13 +368,6 @@ impl Desktop {
         seen.sort_by_key(|s| stack.windows.iter().position(|w| w.address == s.address()));
         self.scans += 1;
         let mut snapshot = Snapshot::build(self.scans, monitor.id, seen.iter().map(Seen::read));
-        for (index, scanned) in snapshot.windows.iter().enumerate() {
-            if is_terminal(&scanned.window, terminals) {
-                for target in snapshot.targets.iter_mut().filter(|t| t.window == index) {
-                    target.role = "terminal".into();
-                }
-            }
-        }
         keep_visible(&mut snapshot, stack, monitor);
         // A picture taken this scan is the one `layout` reads; a window
         // seen without one needs none.
@@ -377,7 +378,9 @@ impl Desktop {
                     let picture = Picture::new(picture, &window);
                     self.pictures.insert(window.address, picture);
                 }
-                Seen::Pixels(window, _, None, _) | Seen::Untagged(window) => {
+                Seen::Terminal(window, ..)
+                | Seen::Pixels(window, _, None, _)
+                | Seen::Untagged(window) => {
                     unpictured.push(window.address);
                 }
                 Seen::Tree(..) => {}
@@ -394,7 +397,67 @@ impl Desktop {
             let covers: Vec<Rect> = above(stack, &window.address).map(|w| w.rect).collect();
             snapshot.obstacles.extend(in_view([window.rect], &covers));
         }
+        if window_hint {
+            Self::window_hints(&mut snapshot, stack, monitor);
+        }
         (snapshot, failed)
+    }
+
+    /// Add one focus target for each visible client, independent of its contents.
+    fn window_hints(snapshot: &mut Snapshot, stack: &Stack, monitor: &Monitor) {
+        for window in stack.windows.iter().filter(|w| w.kind == Kind::Client) {
+            let Some(area) = window.rect.intersect(monitor.rect) else {
+                continue;
+            };
+            let covers: Vec<_> = above(stack, &window.address).map(|w| w.rect).collect();
+            let parts = in_view([area], &covers);
+            let Some(visible) = parts
+                .iter()
+                .copied()
+                .max_by_key(|r| i64::from(r.w) * i64::from(r.h))
+            else {
+                continue;
+            };
+            let label_area = parts
+                .iter()
+                .copied()
+                .filter(|r| r.w >= BODY_TAG.0 && r.h >= BODY_TAG.1)
+                .min_by_key(|r| area.right() - r.right() + r.y - area.y)
+                .unwrap_or(visible);
+            let Some(index) = snapshot
+                .windows
+                .iter()
+                .position(|s| s.window.address == window.address)
+            else {
+                continue;
+            };
+            let target = Target {
+                object: None,
+                window: index,
+                rect: window.rect,
+                visible: label_area,
+                hit: visible.center(),
+                role: "window".into(),
+                name: window.title.clone(),
+                editable: false,
+                clips: Vec::new(),
+                opens: Vec::new(),
+            };
+            snapshot.targets.push(target);
+        }
+        snapshot.targets.sort_by_key(|t| (t.hit.y, t.hit.x));
+    }
+
+    /// Aim the wheel at the visible part of the window focused right now.
+    pub fn scroll_target(&self) -> Result<Option<Point>> {
+        let Some(window) = focused_window()? else {
+            return Ok(None);
+        };
+        let Some(monitor) = monitors()?.into_iter().find(|m| m.id == window.monitor) else {
+            return Ok(None);
+        };
+        let stack = self.stack(window.monitor)?;
+        Ok(visible_window(&stack, &window.address, monitor.rect).map(Rect::center))
     }
 
     /// Capture what labels may cover separately from target detection. An
@@ -888,6 +951,16 @@ fn in_view(rects: impl IntoIterator<Item = Rect>, covers: &[Rect]) -> Vec<Rect> 
     parts
 }
 
+/// The largest exposed part of a current client, on its monitor.
+fn visible_window(stack: &Stack, address: &str, screen: Rect) -> Option<Rect> {
+    let window = stack.windows.iter().find(|w| w.address == address)?;
+    let area = window.rect.intersect(screen)?;
+    let covers: Vec<_> = above(stack, address).map(|w| w.rect).collect();
+    in_view([area], &covers)
+        .into_iter()
+        .max_by_key(|r| i64::from(r.w) * i64::from(r.h))
+}
+
 /// Shrinks a document body's tag to the clearest tag-sized patch nearest
 /// its middle, and clicks there: an empty cell of a sheet, a blank stretch
 /// of a page. `picture` is the window's ink without grid lines
@@ -951,16 +1024,13 @@ fn is_terminal(window: &Window, terminals: &[String]) -> bool {
 }
 
 /// One focus target on Kitty's active cursor cell, without capturing pixels.
-fn terminal_cursor(window: &Window) -> Result<(Found, Stats)> {
+fn terminal_cursor(window: &Window) -> Result<(Rect, Stats)> {
     let start = Instant::now();
     let cell = kitty::cursor(window, KITTY_TIMEOUT)?
         .intersect(Rect::new(0, 0, window.rect.w, window.rect.h))
         .context("kitty's cursor is outside its window")?;
     Ok((
-        Found {
-            bodies: vec![[cell.x, cell.y, cell.right(), cell.bottom()]],
-            ..Found::default()
-        },
+        cell,
         Stats {
             ms: start.elapsed().as_secs_f64() * 1000.0,
             ..Stats::default()
@@ -968,37 +1038,16 @@ fn terminal_cursor(window: &Window) -> Result<(Found, Stats)> {
     ))
 }
 
-/// Kitty supplies its cursor; other terminals keep their pixel or fixed fallback.
-fn read_terminal(
-    camera: &mut Option<Camera>,
-    window: &Window,
-    pixels: Option<Detector>,
-    until: Instant,
-) -> Result<Seen> {
-    let (found, picture, stats) = if is_kitty(window) {
-        let (found, stats) = terminal_cursor(window)?;
-        (found, None, stats)
+/// Use Kitty's visible cursor, or a fixed focus hint without taking a picture.
+fn read_terminal(window: &Window) -> Seen {
+    let (cursor, stats) = if is_kitty(window) {
+        terminal_cursor(window)
+            .map(|(cell, stats)| (Some(cell), stats))
+            .unwrap_or_default()
     } else {
-        ensure!(
-            window.kind == Kind::Client,
-            "only Kitty supplies a layer's terminal cursor"
-        );
-        if let Some(detector) = pixels {
-            let (found, picture, stats) = look(camera, window, detector, true, until)?;
-            (found, Some(picture), stats)
-        } else {
-            let patch = pixels::terminal_patch(window.rect.w, window.rect.h);
-            (
-                Found {
-                    bodies: vec![[patch.x, patch.y, patch.right(), patch.bottom()]],
-                    ..Found::default()
-                },
-                None,
-                Stats::default(),
-            )
-        }
+        (None, Stats::default())
     };
-    Ok(Seen::Pixels(window.clone(), found, picture, stats))
+    Seen::Terminal(window.clone(), cursor, stats)
 }
 
 /// `window` tagged from its pixels alone: what `dump --pixels` prints.
@@ -1006,18 +1055,12 @@ pub fn read_pixels(window: &Window, detector: Detector, terminals: &[String]) ->
     let terminal = is_terminal(window, terminals);
     let until = Instant::now() + CAPTURE_TIMEOUT;
     let seen = if terminal {
-        read_terminal(&mut None, window, Some(detector), until)?
+        read_terminal(window)
     } else {
         let (found, picture, stats) = look(&mut None, window, detector, false, until)?;
         Seen::Pixels(window.clone(), found, Some(picture), stats)
     };
-    let mut snapshot = Snapshot::build(1, window.monitor, [seen.read()]);
-    if terminal {
-        for target in &mut snapshot.targets {
-            target.role = "terminal".into();
-        }
-    }
-    Ok(snapshot)
+    Ok(Snapshot::build(1, window.monitor, [seen.read()]))
 }
 
 /// Takes a picture of `window` by `until` and finds its tags, with the
@@ -1076,6 +1119,62 @@ mod tests {
     }
 
     #[test]
+    fn window_targets_need_no_tree_and_skip_layers_and_fully_covered_windows() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let monitor = Monitor {
+            id: 0,
+            name: "test".into(),
+            rect: screen,
+            scale: 1.0,
+            focused: true,
+        };
+        let mut layer = window("bar", Rect::new(0, 0, 800, 20));
+        layer.kind = Kind::Layer { level: 2 };
+        let stack = stack(vec![
+            window("hidden", Rect::new(100, 100, 200, 200)),
+            window("visible", screen),
+            layer,
+        ]);
+        let mut snapshot = Snapshot::build(1, 0, stack.windows.iter().map(Read::Untagged));
+        Desktop::window_hints(&mut snapshot, &stack, &monitor);
+        assert_eq!(snapshot.targets.len(), 1);
+        let target = &snapshot.targets[0];
+        assert_eq!(snapshot.windows[target.window].window.address, "visible");
+        assert_eq!(target.shown(), Rect::new(0, 20, 800, 580));
+        assert!(shows(&stack, &monitor, "visible", target.hit));
+        assert!(target.allows(crate::action::Action::Left) && !target.in_pixels());
+    }
+
+    #[test]
+    fn a_window_label_stays_near_the_top_right_when_its_middle_is_covered() {
+        let screen = Rect::new(-800, -100, 800, 600);
+        let monitor = Monitor {
+            id: 0,
+            name: "test".into(),
+            rect: screen,
+            scale: 1.0,
+            focused: true,
+        };
+        let stack = stack(vec![
+            window("back", screen),
+            window("front", Rect::new(-550, 0, 300, 300)),
+        ]);
+        let mut snapshot = Snapshot::build(1, 0, stack.windows.iter().map(Read::Untagged));
+        Desktop::window_hints(&mut snapshot, &stack, &monitor);
+        let target = snapshot
+            .targets
+            .iter()
+            .find(|t| snapshot.windows[t.window].window.address == "back")
+            .unwrap();
+        assert_eq!(target.shown().right(), screen.right());
+        assert_eq!(target.shown().y, screen.y);
+        assert!(shows(&stack, &monitor, "back", target.hit));
+        let at = visible_window(&stack, "back", screen).unwrap().center();
+        assert!(shows(&stack, &monitor, "back", at));
+        assert!(visible_window(&stack, "closed", screen).is_none());
+    }
+
+    #[test]
     fn configured_terminals_match_class_or_executable() {
         let mut window = window("test", Rect::new(0, 0, 100, 100));
         window.class = "CustomProfile".into();
@@ -1089,16 +1188,44 @@ mod tests {
     }
 
     #[test]
-    fn other_terminals_keep_the_fixed_fallback_without_pixels() {
-        let mut window = window("test", Rect::new(100, 50, 800, 600));
-        window.class = "foot".into();
-        let mut camera = None;
-        let seen = read_terminal(&mut camera, &window, None, Instant::now()).unwrap();
-        let snapshot = Snapshot::build(1, 0, [seen.read()]);
-        assert!(camera.is_none());
-        assert_eq!(snapshot.targets.len(), 1);
-        assert_eq!(snapshot.targets[0].rect, Rect::new(854, 616, 36, 24));
-        assert!(snapshot.targets[0].editable);
+    fn terminals_without_remote_control_get_the_fixed_fallback_in_every_pixel_mode() {
+        for class in ["foot", "kitty"] {
+            let mut window = window("test", Rect::new(100, 50, 800, 600));
+            window.class = class.into();
+            window.pid = 0;
+            for detector in [None, Some(Detector::Fast), Some(Detector::Full)] {
+                let snapshot = if let Some(detector) = detector {
+                    read_pixels(&window, detector, &[class.into()]).unwrap()
+                } else {
+                    Snapshot::build(1, 0, [read_terminal(&window).read()])
+                };
+                assert_eq!(snapshot.targets.len(), 1);
+                let target = &snapshot.targets[0];
+                assert_eq!(target.rect, Rect::new(110, 616, 36, 24));
+                assert_eq!(target.role, "terminal fallback");
+                assert!(target.editable && target.in_pixels() && target.opens.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn reported_terminal_cursor_is_exact_and_missing_cursor_gets_a_fallback() {
+        let window = window("test", Rect::new(100, 50, 800, 600));
+        let cell = Rect::new(57, 82, 8, 18);
+        for cursor in [Some(cell), None] {
+            let seen = Seen::Terminal(window.clone(), cursor, Stats::default());
+            let snapshot = Snapshot::build(1, 0, [seen.read()]);
+            let target = &snapshot.targets[0];
+            assert_eq!(target.in_pixels(), cursor.is_none());
+            assert!(target.editable && target.opens.is_empty());
+            if cursor.is_some() {
+                assert_eq!(target.role, "terminal");
+                assert_eq!(target.rect, Rect::new(157, 132, 8, 18));
+                assert_eq!(target.hit, Point::new(161, 141));
+            } else {
+                assert_eq!(target.rect, Rect::new(110, 616, 36, 24));
+            }
+        }
     }
 
     #[test]
@@ -1117,7 +1244,7 @@ mod tests {
         for pixels in [None, Some(Detector::Fast), Some(Detector::Full)] {
             for enabled in [true, false] {
                 let (snapshot, unread) =
-                    desktop.scan(&stack, &monitor, pixels, enabled, &["kitty".into()]);
+                    desktop.scan(&stack, &monitor, pixels, enabled, false, &["kitty".into()]);
                 assert!(
                     unread.is_empty(),
                     "{:?}",
@@ -1138,6 +1265,7 @@ mod tests {
                     assert_eq!(target.rect, cell);
                     assert_eq!(target.hit, cell.center());
                     assert_eq!(target.role, "terminal");
+                    assert!(!target.in_pixels());
                     assert!(target.editable && target.opens.is_empty());
                 }
             }

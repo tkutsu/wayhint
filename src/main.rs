@@ -184,6 +184,9 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         &mut Saved,
         &mut Saved,
     )? {
+        Pick::Scroll { act } => {
+            eprintln!("wayhint: {} in the focused window", act.action.name());
+        }
         Pick::Target { index, act } => {
             eprintln!("wayhint: {} on", act.action.name());
             println!(

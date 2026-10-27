@@ -261,6 +261,59 @@ fn request<T: DeserializeOwned>(command: &str) -> Result<T> {
         .with_context(|| format!("Hyprland {command}: unexpected reply {reply:?}"))
 }
 
+/// Suspends hiding on keypress while wayhint owns the keyboard. Dropping
+/// the guard restores the user's preference, including on an error exit.
+pub struct CursorVisibility {
+    restore: Option<&'static str>,
+}
+
+impl CursorVisibility {
+    pub fn new() -> Result<Self> {
+        let value: serde_json::Value = request("getoption cursor:hide_on_key_press")?;
+        let hidden = value
+            .get("bool")
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| value.get("int")?.as_i64().map(|v| v != 0))
+            .context("Hyprland cursor:hide_on_key_press: missing boolean value")?;
+        if !hidden {
+            return Ok(Self { restore: None });
+        }
+        let mut guard = Self {
+            restore: Some("eval hl.config({cursor = {hide_on_key_press = true}})"),
+        };
+        let mut reply = send("eval hl.config({cursor = {hide_on_key_press = false}})")?;
+        if reply.trim() == "eval is only supported with the lua config manager"
+            || reply.trim() == "unknown request"
+        {
+            guard.restore = Some("keyword cursor:hide_on_key_press true");
+            reply = send("keyword cursor:hide_on_key_press false")?;
+        }
+        if reply.trim() != "ok" {
+            bail!("Hyprland couldn't suspend hiding the cursor on keypress: {reply}");
+        }
+        Ok(guard)
+    }
+}
+
+impl Drop for CursorVisibility {
+    fn drop(&mut self) {
+        let Some(command) = self.restore.take() else {
+            return;
+        };
+        let restored = send(command).and_then(|reply| {
+            if reply.trim() != "ok" {
+                bail!("{reply}");
+            }
+            Ok(())
+        });
+        if let Err(error) = restored {
+            crate::desktop::warn(&format!(
+                "wayhint: couldn't restore hiding the cursor on keypress: {error:#}"
+            ));
+        }
+    }
+}
+
 /// Shows `message` in Hyprland's own notification for `ms`.
 pub fn notify(message: &str, ms: i32) -> Result<()> {
     // `notify ICON MS COLOR TEXT`: icon 0 is Hyprland's warning sign, color
@@ -283,6 +336,34 @@ pub fn focused_window() -> Result<Option<Window>> {
     }
     let wire: WireWindow = serde_json::from_value(value).context("Hyprland activewindow")?;
     Ok(Some(wire.into()))
+}
+
+/// Focus a client by its compositor handle without sending pointer input.
+pub fn focus_window(address: &str) -> Result<()> {
+    ensure_address(address)?;
+    let mut reply = send(&format!(
+        "eval hl.dispatch(hl.dsp.focus({{window = \"address:{address}\"}}))"
+    ))?;
+    if reply.trim() == "eval is only supported with the lua config manager"
+        || reply.trim() == "unknown request"
+    {
+        reply = send(&format!("dispatch focuswindow address:{address}"))?;
+    }
+    if reply.trim() != "ok" {
+        bail!("Hyprland couldn't focus window {address}: {reply}");
+    }
+    Ok(())
+}
+
+/// A handle must remain one exact address selector in the IPC request.
+fn ensure_address(address: &str) -> Result<()> {
+    let Some(hex) = address.strip_prefix("0x") else {
+        bail!("invalid window address")
+    };
+    if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid window address");
+    }
+    Ok(())
 }
 
 /// What a monitor shows as far as Hyprland knows: everything but popups.
@@ -542,6 +623,27 @@ pub fn changes_workspace(line: &str, monitor: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_selectors_accept_only_exact_window_addresses() {
+        for address in ["0x1", "0xabcdef0123456789", "0xABCDEF"] {
+            assert!(ensure_address(address).is_ok());
+        }
+        for address in ["", "0x", "kitty", "0x1,all", "0x1\nclosewindow", "0x.*"] {
+            assert!(ensure_address(address).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires live Hyprland; refocuses the already focused client"]
+    fn focus_window_refocuses_without_pointer_input() -> Result<()> {
+        let window = focused_window()?.context("no focused client")?;
+        let before = cursor()?;
+        focus_window(&window.address)?;
+        assert_eq!(focused_window()?.unwrap().address, window.address);
+        assert_eq!(cursor()?, before);
+        Ok(())
+    }
 
     #[test]
     fn wire_window_becomes_a_rect() {

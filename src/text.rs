@@ -59,6 +59,18 @@ impl Text {
         let take = end.saturating_sub(start) as usize;
         self.content.chars().skip(skip).take(take).collect()
     }
+
+    /// Clips a character box to the object's box and its containing area.
+    /// An empty object box is unknown, so only the area clips it then.
+    fn clip(&self, part: Rect) -> Option<Rect> {
+        let part = part.intersect(self.area)?;
+        let part = if self.rect.is_empty() {
+            part
+        } else {
+            part.intersect(self.rect)?
+        };
+        (part.w >= MIN_SIZE && part.h >= MIN_SIZE).then_some(part)
+    }
 }
 
 /// Where a text came from.
@@ -286,7 +298,7 @@ pub struct Search {
     located: HashMap<Span, Vec<Rect>>,
     matches: Vec<Match>,
     current: usize,
-    /// Where the first letter of each word shows, for `[text.starts]`.
+    /// Where the first letter of each word shows, for `[words.first_character]`.
     starts: Vec<Rect>,
 }
 
@@ -389,9 +401,8 @@ impl Search {
             .iter()
             .filter_map(|span| {
                 let text = &self.texts[span.text];
-                let part = self.located.get(span)?.first()?.intersect(text.area)?;
-                (part.w >= MIN_SIZE && part.h >= MIN_SIZE && shows(text.window, part.center()))
-                    .then_some(part)
+                let part = text.clip(*self.located.get(span)?.first()?)?;
+                shows(text.window, part.center()).then_some(part)
             })
             .collect();
     }
@@ -469,7 +480,8 @@ impl Search {
 }
 
 /// The parts of a match's `boxes` that can show: each cut to its text's
-/// area. A short text whose app gave no box is matched on its own box.
+/// area and object box. A short text whose app gave no character box is
+/// matched on its own box.
 fn visible(text: &Text, boxes: &[Rect]) -> Vec<Rect> {
     let fallback = [text.rect];
     let boxes = if boxes.is_empty() && text.content.chars().count() <= SHORT {
@@ -477,11 +489,7 @@ fn visible(text: &Text, boxes: &[Rect]) -> Vec<Rect> {
     } else {
         boxes
     };
-    boxes
-        .iter()
-        .filter_map(|b| b.intersect(text.area))
-        .filter(|b| b.w >= MIN_SIZE && b.h >= MIN_SIZE)
-        .collect()
+    boxes.iter().filter_map(|&b| text.clip(b)).collect()
 }
 
 #[cfg(test)]
@@ -710,6 +718,51 @@ mod tests {
         search.update(&|_, at: Point| at.x != 90);
         let parts: Vec<&[Rect]> = search.matches().iter().map(|m| &m.parts[..]).collect();
         assert_eq!(parts, [&[label][..]], "only the label shows");
+    }
+
+    #[test]
+    fn a_clipped_title_suffix_has_no_match_or_word_marker() {
+        // Firefox reports hidden Sidebery characters beyond the title's box.
+        let mut search = Search::new(vec![text("hidden", Rect::new(43, 148, 216, 15))]);
+        search.push('h');
+        let spans = search.wanted();
+        search.located(&spans, vec![vec![Rect::new(294, 148, 24, 15)]]);
+        search.update(&everywhere);
+        search.mark_starts(&spans, &everywhere);
+        assert!(
+            search.matches().is_empty(),
+            "the suffix is outside the title"
+        );
+        assert!(search.starts().is_empty(), "its first letter is hidden too");
+    }
+
+    #[test]
+    fn a_partly_clipped_character_keeps_only_its_visible_part() {
+        let mut search = Search::new(vec![text("h", Rect::new(0, 0, 40, 20))]);
+        search.push('h');
+        let spans = search.wanted();
+        search.located(&spans, vec![vec![Rect::new(30, 0, 20, 20)]]);
+        search.update(&everywhere);
+        search.mark_starts(&spans, &everywhere);
+        let shown = Rect::new(30, 0, 10, 20);
+        assert_eq!(search.current().expect("part still shows").parts, [shown]);
+        assert_eq!(search.starts(), [shown]);
+    }
+
+    #[test]
+    fn unknown_object_bounds_still_allow_character_geometry() {
+        // Firefox also exposes containers with empty or unavailable boxes.
+        for bounds in [Rect::new(0, 0, 0, 0), Rect::new(-1, -1, -1, -1)] {
+            let mut search = Search::new(vec![text("h", bounds)]);
+            search.push('h');
+            let spans = search.wanted();
+            let shown = Rect::new(30, 0, 10, 20);
+            search.located(&spans, vec![vec![shown]]);
+            search.update(&everywhere);
+            search.mark_starts(&spans, &everywhere);
+            assert_eq!(search.current().expect("character shows").parts, [shown]);
+            assert_eq!(search.starts(), [shown]);
+        }
     }
 
     #[test]

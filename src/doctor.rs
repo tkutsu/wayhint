@@ -187,8 +187,8 @@ fn wayland(checks: &mut Vec<Check>, monitors: &[Monitor]) {
 /// The fonts the tags, pixel tags and input box are drawn in, and whether the icon font has the messages' icons.
 fn fonts(checks: &mut Vec<Check>, config: &Config) {
     let looks = [
-        ("[style] font", &config.style.font),
-        ("[style.pixels] font", &config.style.for_pixels().font),
+        ("[hints] font", &config.style.font),
+        ("[hints.pixels] font", &config.style.for_pixels().font),
         ("[input] font", &config.input.style.font),
     ];
     for (what, pattern) in looks {
@@ -200,10 +200,10 @@ fn fonts(checks: &mut Vec<Check>, config: &Config) {
     checks.push(icons(&config.info));
 }
 
-/// Whether `[info] icon_font` has every message's icon: fontconfig falls
+/// Whether `[messages] icon_font` has every message's icon: fontconfig falls
 /// back to another font for a name it doesn't know, which has none.
 fn icons(info: &Info) -> Check {
-    let what = "[info] icon_font";
+    let what = "[messages] icon_font";
     let font = match overlay::load_font(&info.icon_font, 13.0) {
         Ok(font) => font,
         Err(e) => return Check::new(Mark::Warn, what, format!("{e:#}; icons are left out")),

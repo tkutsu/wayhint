@@ -25,7 +25,10 @@ use crate::{
     action::Action,
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
-    style::{Badge, Badges, Color, Info, Input, Mark, Marks, Position, StartMark, Starts, Style},
+    style::{
+        Arrow, Badge, Badges, Case, Color, Direction, Info, Input, Look, Mark, Marks, Position,
+        StartMark, Starts, Style,
+    },
 };
 
 /// The default config, every setting explained and commented out:
@@ -40,47 +43,100 @@ pub const DEFAULT: &str = include_str!("../config.default.toml");
 struct File {
     keys: FileKeys,
     hints: FileHints,
-    style: Style,
     pointer: FilePointer,
     pixels: FilePixels,
     scan: FileScan,
-    text: FileText,
+    words: FileWords,
     input: Option<FileInput>,
-    info: FileInfo,
+    messages: FileInfo,
 }
 
-/// `[hints]`: whether a completed tag acts immediately or waits for Enter.
+/// `[hints]`: completed tags and their appearance.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileHints {
     auto_accept: Option<bool>,
+    window_hint: Option<bool>,
+    font: Option<String>,
+    size: Option<f32>,
+    text: Option<Color>,
+    text_end: Option<Color>,
+    text_direction: Option<Direction>,
+    #[serde(alias = "matched")]
+    dimmed: Option<Color>,
+    verb: Option<Color>,
+    background: Option<Color>,
+    background_end: Option<Color>,
+    background_direction: Option<Direction>,
+    border: Option<Color>,
+    border_width: Option<f32>,
+    radius: Option<f32>,
+    padding: Option<[f32; 2]>,
+    position: Option<Position>,
+    offset: Option<[i32; 2]>,
+    case: Option<Case>,
+    arrow: Arrow,
+    pixels: Look,
 }
 
-/// `[text]`: how text mode reads windows, acts on matches and looks.
+impl FileHints {
+    /// Resolve the hint appearance once, before other settings inherit it.
+    fn resolve(self) -> Style {
+        let base = Style::default();
+        Style {
+            font: self.font.unwrap_or(base.font),
+            size: self.size.unwrap_or(base.size),
+            text: self.text.unwrap_or(base.text),
+            text_end: self.text_end,
+            text_direction: self.text_direction.unwrap_or(base.text_direction),
+            dimmed: self.dimmed.unwrap_or(base.dimmed),
+            verb: self.verb.unwrap_or(base.verb),
+            background: self.background.unwrap_or(base.background),
+            background_end: self.background_end,
+            background_direction: self
+                .background_direction
+                .unwrap_or(base.background_direction),
+            border: self.border.unwrap_or(base.border),
+            border_width: self.border_width.unwrap_or(base.border_width),
+            radius: self.radius.unwrap_or(base.radius),
+            padding: self.padding.unwrap_or(base.padding),
+            position: self.position.unwrap_or(base.position),
+            offset: self.offset.unwrap_or(base.offset),
+            case: self.case.unwrap_or(base.case),
+            arrow: self.arrow,
+            pixels: self.pixels,
+        }
+    }
+}
+
+/// `[words]`: how text mode reads windows, acts on matches and looks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct FileText {
+struct FileWords {
     cursor: TextCursor,
     /// Act on the only match left, without Enter.
     #[serde(alias = "pick_unique")]
     auto_accept: bool,
     /// Tags on the targets typing can't find: on unless `false`.
+    #[serde(rename = "fallback_hints")]
     hints: Option<bool>,
-    /// `[text.matches]`, once `[text.style]`, which a file may still say.
+    /// Match appearance; `style` remains a legacy alias for `matches`.
     #[serde(alias = "style")]
     matches: FileMarks,
+    #[serde(rename = "first_character")]
     starts: FileStarts,
     /// `[input]`'s old name, from when it showed only the query.
     input: Option<FileInput>,
 }
 
-/// `[input]`, once `[text.input]`: the box for what's typed, with the
-/// query's decorations. Unset look fields come from the tags' `[style]`,
+/// `[input]`: the box for what's typed, with the
+/// query's decorations. Unset look fields come from the tags' `[hints]`,
 /// with the box's own spot on the screen.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
     visible: Option<bool>,
+    #[serde(rename = "show_typed_hints")]
     hints: Option<bool>,
     placeholder: Option<String>,
     prefix: String,
@@ -146,7 +202,7 @@ impl FileInput {
     }
 }
 
-/// `[info]`: which messages the input box's second line shows, for how
+/// `[messages]`: which messages the input box's second line shows, for how
 /// long, and in which colours.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -156,6 +212,7 @@ struct FileInfo {
     no_targets: Option<bool>,
     no_match: Option<bool>,
     /// Ms a message stays.
+    #[serde(rename = "duration_ms")]
     duration: Option<u32>,
     icon_font: Option<String>,
     scanning_icon: Option<String>,
@@ -176,19 +233,19 @@ impl FileInfo {
         let base = Info::default();
         let duration = match self.duration {
             Some(ms) if !(1..=DURATION).contains(&ms) => {
-                bail!("[info] duration = {ms}: give 1-{DURATION} ms")
+                bail!("[messages] duration_ms = {ms}: give 1-{DURATION} ms")
             }
             Some(ms) => Duration::from_millis(ms.into()),
             None => base.duration,
         };
         let icon_font = self.icon_font.unwrap_or(base.icon_font);
         if icon_font.trim().is_empty() {
-            bail!("[info] icon_font: empty; give a font, and \"\" icons for none");
+            bail!("[messages] icon_font: empty; give a font, and \"\" icons for none");
         }
         let badge = |name: &str, icon: Option<String>, color: Option<Color>, base: Badge| {
             let icon = icon.unwrap_or(base.icon);
             if icon.chars().any(char::is_control) || icon.chars().count() > 2 {
-                bail!("[info] {name}_icon = {icon:?}: one glyph, or \"\" for none");
+                bail!("[messages] {name}_icon = {icon:?}: one glyph, or \"\" for none");
             }
             Ok(Badge {
                 icon,
@@ -228,7 +285,7 @@ impl FileInfo {
     }
 }
 
-/// `[text.matches]`, every match's mark, with `[text.matches.current]` inside
+/// `[words.matches]`, every match's mark, with `[words.matches.current]` inside
 /// it for the selected match's. Unset fields take the defaults (see
 /// [`Mark::new`]); unset current ones come from every match's mark, in
 /// orange ([`Mark::for_current`]).
@@ -236,6 +293,8 @@ impl FileInfo {
 #[serde(default, deny_unknown_fields)]
 struct FileMarks {
     background: Option<Color>,
+    background_end: Option<Color>,
+    background_direction: Option<Direction>,
     border: Option<Color>,
     border_width: Option<f32>,
     radius: Option<f32>,
@@ -247,20 +306,23 @@ struct FileMarks {
 #[serde(default, deny_unknown_fields)]
 struct FileMark {
     background: Option<Color>,
+    background_end: Option<Color>,
+    background_direction: Option<Direction>,
     border: Option<Color>,
     border_width: Option<f32>,
     radius: Option<f32>,
     padding: Option<[f32; 2]>,
 }
 
-/// `[text.starts]`: unset fields take [`Starts::new`]'s.
+/// `[words.first_character]`: unset fields take [`Starts::new`]'s.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileStarts {
     mark: StartMark,
-    line: Option<Color>,
+    color: Option<Color>,
+    color_end: Option<Color>,
+    direction: Option<Direction>,
     thickness: Option<f32>,
-    background: Option<Color>,
     border: Option<Color>,
     border_width: Option<f32>,
     radius: Option<f32>,
@@ -272,10 +334,11 @@ impl FileStarts {
         let base = Starts::new();
         let starts = Starts {
             mark: self.mark,
-            line: self.line.unwrap_or(base.line),
             thickness: self.thickness.unwrap_or(base.thickness),
             look: Mark {
-                background: self.background.unwrap_or(base.look.background),
+                background: self.color.unwrap_or(base.look.background),
+                background_end: self.color_end,
+                background_direction: self.direction.unwrap_or(base.look.background_direction),
                 border: self.border.unwrap_or(base.look.border),
                 border_width: self.border_width.unwrap_or(base.look.border_width),
                 radius: self.radius.unwrap_or(base.look.radius),
@@ -295,6 +358,10 @@ impl FileMarks {
         let base = Mark::new(style);
         let all = Mark {
             background: self.background.unwrap_or(base.background),
+            background_end: self.background_end,
+            background_direction: self
+                .background_direction
+                .unwrap_or(base.background_direction),
             border: self.border.unwrap_or(base.border),
             border_width: self.border_width.unwrap_or(base.border_width),
             radius: self.radius.unwrap_or(base.radius),
@@ -304,13 +371,19 @@ impl FileMarks {
         let c = &self.current;
         let current = Mark {
             background: c.background.unwrap_or(orange.background),
+            background_end: c
+                .background_end
+                .or(orange.background_end.filter(|_| c.background.is_none())),
+            background_direction: c
+                .background_direction
+                .unwrap_or(orange.background_direction),
             border: c.border.unwrap_or(orange.border),
             border_width: c.border_width.unwrap_or(orange.border_width),
             radius: c.radius.unwrap_or(orange.radius),
             padding: c.padding.unwrap_or(orange.padding),
         };
-        all.validate("text.matches")?;
-        current.validate("text.matches.current")?;
+        all.validate("words.matches")?;
+        current.validate("words.matches.current")?;
         Ok(Marks {
             all,
             current,
@@ -325,8 +398,10 @@ struct FileScan {
     /// Ms from the end of one scan to the next while the tags are up, `0`
     /// for no rescans but the one after each click. It doubles, up to 2 s,
     /// while nothing changes (`pick::IDLE_REFRESH`).
+    #[serde(rename = "refresh_ms")]
     refresh: Option<u32>,
     /// Logical px between nearby hint centers, `0` to keep every hint.
+    #[serde(rename = "merge_distance_px")]
     merge_distance: Option<u16>,
 }
 
@@ -346,7 +421,7 @@ impl Default for FilePixels {
     fn default() -> Self {
         Self {
             detector: Pixels::default(),
-            terminal_hint: true,
+            terminal_hint: false,
             terminal_processes: [
                 "kitty",
                 "foot",
@@ -392,6 +467,11 @@ pub fn terminal_hint(explicit: Option<&Path>) -> Result<bool> {
     Ok(unkeyed(explicit)?.pixels.terminal_hint)
 }
 
+/// Surface dumps share the window hint switch without needing a keymap.
+pub fn window_hint(explicit: Option<&Path>) -> Result<bool> {
+    Ok(unkeyed(explicit)?.hints.window_hint.unwrap_or(true))
+}
+
 /// The file at `explicit`, else the default one if it's there, else all
 /// defaults: undecoded, since the keys need a keymap.
 fn unkeyed(explicit: Option<&Path>) -> Result<File> {
@@ -425,34 +505,46 @@ enum Pixels {
 struct FileKeys {
     /// Tag letters, easiest to press first, as the first layout prints them.
     alphabet: Option<String>,
-    /// Other keys that count as an alphabet letter: `";" = "c"`.
     aliases: BTreeMap<String, String>,
-    // One field per verb: a key as written (`"."`, `"Home"`), or `""` for
-    // the action a bare tag does. `Action::ALL` lists the same ten.
-    left: Option<String>,
-    right: Option<String>,
-    middle: Option<String>,
-    double: Option<String>,
-    hover: Option<String>,
-    back: Option<String>,
-    forward: Option<String>,
-    scroll_up: Option<String>,
-    scroll_down: Option<String>,
-    hold: Option<String>,
-    /// Does the last action again, on the same target. No default key;
-    /// `""` is the same as leaving it out.
-    repeat: Option<String>,
-    /// Shows every key and what it does, in the info box. `""` for none.
-    help: Option<String>,
-    /// Leaves wayhint, from tags and text mode alike. Defaults to Esc.
+    /// The action performed by a bare tag or Space.
+    default_action: Option<Action>,
+    left: Option<Binding>,
+    right: Option<Binding>,
+    middle: Option<Binding>,
+    double: Option<Binding>,
+    hover: Option<Binding>,
+    back: Option<Binding>,
+    forward: Option<Binding>,
+    scroll_up: Option<Binding>,
+    scroll_down: Option<Binding>,
+    hold: Option<Binding>,
+    repeat: Option<Binding>,
+    help: Option<Binding>,
+    /// Closing must always have a key.
     close: Option<String>,
 }
 
+/// A shortcut key, or `false` to leave it unbound.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Binding {
+    Key(String),
+    Disabled(bool),
+}
+
+impl Binding {
+    fn key(&self, command: &str) -> Result<Option<&str>> {
+        match self {
+            Self::Key(key) if !key.is_empty() => Ok(Some(key)),
+            Self::Disabled(false) => Ok(None),
+            _ => bail!("[keys] {command}: give a key or false; use default_action for a bare tag"),
+        }
+    }
+}
+
 impl FileKeys {
-    /// The field for `action`, if the file sets it. Named fields and a
-    /// `match`, not a map, so a misspelt verb is still serde's "unknown
-    /// field" error.
-    fn verb(&self, action: Action) -> Option<&str> {
+    /// The configured shortcut for an action, if present.
+    fn verb(&self, action: Action) -> Option<&Binding> {
         match action {
             Action::Left => &self.left,
             Action::Right => &self.right,
@@ -465,7 +557,7 @@ impl FileKeys {
             Action::ScrollDown => &self.scroll_down,
             Action::Hold => &self.hold,
         }
-        .as_deref()
+        .as_ref()
     }
 }
 
@@ -474,11 +566,14 @@ impl FileKeys {
 struct FilePointer {
     after: After,
     /// Px per arrow press. `u16`, so serde itself refuses a negative.
+    #[serde(rename = "nudge_px")]
     nudge: Option<u16>,
     /// Wheel notches per scroll.
+    #[serde(rename = "scroll_steps")]
     scroll: Option<u16>,
     /// Ms the app gets to react to a click before the windows are read
     /// again.
+    #[serde(rename = "settle_ms")]
     settle: Option<u16>,
 }
 
@@ -509,7 +604,7 @@ pub enum After {
     Leave,
 }
 
-/// Where an action lands on the selected text match: `[text] cursor`.
+/// Where an action lands on the selected text match: `[words] cursor`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TextCursor {
@@ -556,50 +651,52 @@ const BUILT_IN: [KeyCode; 8] = [
 const BUILT_IN_NAMES: &str = "Backspace, Space, Enter, Tab and the arrows";
 
 /// Everything wayhint needs from the settings, checked.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // independent settings, including each mode's acceptance
 pub struct Config {
     pub alphabet: Alphabet,
     pub verbs: Verbs,
     /// Act on a completed tag without Enter, including text mode's tags.
     pub hint_auto_accept: bool,
+    /// One focus hint per client window: `[hints] window_hint`.
+    pub window_hint: bool,
     /// The name of the layout the keys were decoded with ("English (US)"),
     /// for `wayhint config`.
     pub layout: String,
     pub style: Style,
-    /// How text mode marks its matches: `[text.matches]`.
+    /// How text mode marks its matches: `[words.matches]`.
     pub marks: Marks,
     /// The box for an armed verb, `drop` and text mode's query: `[input]`.
     pub input: Input,
-    /// The box for what wayhint has to say: `[info]`.
+    /// The box for what wayhint has to say: `[messages]`.
     pub info: Info,
-    /// Where an action lands within a text match: `[text] cursor`.
+    /// Where an action lands within a text match: `[words] cursor`.
     pub text_cursor: TextCursor,
     /// Act on the only match left once the query is long enough, without
-    /// Enter: `[text] auto_accept` (formerly `pick_unique`).
+    /// Enter: `[words] auto_accept` (formerly `pick_unique`).
     pub text_auto_accept: bool,
     /// Tags, in text mode, on the targets with no text to type:
-    /// `[text] hints`.
+    /// `[words] fallback_hints`.
     pub text_hints: bool,
     pub after: After,
-    /// Px one arrow press moves the pointer: `[pointer] nudge`.
+    /// Px one arrow press moves the pointer: `[pointer] nudge_px`.
     pub nudge: i32,
-    /// Wheel notches one scroll turns: `[pointer] scroll`.
+    /// Wheel notches one scroll turns: `[pointer] scroll_steps`.
     pub scroll: u16,
     /// How long the app gets to react to a click before the rescan:
-    /// `[pointer] settle`.
+    /// `[pointer] settle_ms`.
     pub settle: Duration,
     /// How windows with no accessibility tree are read, `None` for not at
     /// all: `[pixels] detector`.
     pub pixels: Option<Detector>,
-    /// One focus tag per terminal, independent of `[pixels] detector`.
+    /// A terminal cursor/fallback tag, independent of window hints and pixels.
     pub terminal_hint: bool,
     /// Executable basenames or window classes read as terminal input areas.
     pub terminal_processes: Vec<String>,
     /// How long the tags stay up before the windows are scanned again,
-    /// `None` for only after a click: `[scan] refresh`.
+    /// `None` for only after a click: `[scan] refresh_ms`.
     pub refresh: Option<Duration>,
-    /// Nearby hint centers share one tag: `[scan] merge_distance`.
+    /// Nearby hint centers share one tag: `[scan] merge_distance_px`.
     pub merge_distance: u16,
 }
 
@@ -754,8 +851,7 @@ impl Alphabet {
     }
 }
 
-/// The verb keys, checked: exactly one action has no key (a bare tag does
-/// it), and every other has a key of its own or is unbound.
+/// Shortcut keys and the independent action performed by a bare tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verbs {
     default: Action,
@@ -886,7 +982,7 @@ impl Verbs {
         let key = decode_key(text, layout).context("[keys] close")?;
         let label = keys::name_of(key.code).map_or_else(|| text.into(), String::from);
         let mut verbs = Self {
-            default: Action::Left,
+            default: file.default_action.unwrap_or(Action::Left),
             close: (key, label),
             keys: Vec::new(),
             unbound: Vec::new(),
@@ -894,40 +990,35 @@ impl Verbs {
             help: None,
             help_unbound: None,
         };
-        let mut defaults = Vec::new();
-        for (action, _) in DEFAULT_VERBS {
-            match file.verb(action) {
-                // `""`: no key, a bare tag does it.
-                Some("") => defaults.push(action),
-                Some(text) => {
-                    let (key, label) = verbs.written(action.name(), text, layout)?;
-                    if !is_verb_key(&label) {
-                        bail!(
-                            "[keys] {} = {text:?}: use a capital, a symbol or a named key, not a lower-case letter or digit",
-                            action.name()
-                        );
-                    }
-                    verbs.keys.push((action, key, label));
+        for action in Action::ALL {
+            if let Some(binding) = file.verb(action)
+                && let Some(text) = binding.key(action.name())?
+            {
+                let (key, label) = verbs.written(action.name(), text, layout)?;
+                if !is_verb_key(&label) {
+                    bail!(
+                        "[keys] {} = {text:?}: use a capital, a symbol or a named key, not a lower-case letter or digit",
+                        action.name()
+                    );
                 }
-                None => {}
+                verbs.keys.push((action, key, label));
             }
         }
-        if let Some(text) = file.repeat.as_deref().filter(|t| !t.is_empty()) {
+        if let Some(binding) = &file.repeat
+            && let Some(text) = binding.key("repeat")?
+        {
             verbs.repeat = Some(verbs.written("repeat", text, layout)?);
         }
-        if let Some(text) = file.help.as_deref().filter(|t| !t.is_empty()) {
+        if let Some(binding) = &file.help
+            && let Some(text) = binding.key("help")?
+        {
             verbs.help = Some(verbs.written("help", text, layout)?);
         }
         for (action, default) in DEFAULT_VERBS {
-            if file.verb(action).is_some() {
+            if file.verb(action).is_some() || action == verbs.default {
                 continue;
             }
-            // Left has no default key: a bare tag left-clicks, unless the
-            // file makes another verb the default.
-            let Some(code) = default else {
-                defaults.push(action);
-                continue;
-            };
+            let Some(code) = default else { continue };
             let (key, label) = default_key(action.name(), code, layout)?;
             if !is_verb_key(&label) || verbs.taken_by(code, tag_keys) {
                 verbs.unbound.push((action, label));
@@ -959,17 +1050,6 @@ impl Verbs {
         // keys compare equal and print the same.
         verbs.keys.sort_by_key(|v| v.0);
         verbs.unbound.sort_by_key(|v| v.0);
-        // A slice pattern names the three cases: one default, none, several.
-        verbs.default = match defaults.as_slice() {
-            [one] => *one,
-            [] => bail!("[keys]: no verb is the default; set one to \"\", as in left = \"\""),
-            [a, b, ..] => bail!(
-                "[keys] {} and {}: only one verb can be the default (\"\"); give {} a key",
-                a.name(),
-                b.name(),
-                a.name()
-            ),
-        };
         Ok(verbs)
     }
 
@@ -1016,7 +1096,7 @@ impl Verbs {
             (None, Some(label)) => {
                 format!("# help has no key: its default, {label:?}, is another command's key\n")
             }
-            (None, None) => "help = \"\"   # no key legend\n".into(),
+            (None, None) => "help = false   # no key legend\n".into(),
         }
     }
 
@@ -1145,43 +1225,47 @@ impl Config {
             .collect();
         let verbs = Verbs::resolve(&file.keys, layout, &tag_keys)?;
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
-        file.style.validate()?;
-        let starts = file.text.starts.resolve()?;
-        let marks = file.text.matches.resolve(&file.style, starts)?;
-        let input = match (file.input, file.text.input) {
+        let hint_auto_accept = file.hints.auto_accept.unwrap_or(true);
+        let window_hint = file.hints.window_hint.unwrap_or(true);
+        let style = file.hints.resolve();
+        style.validate()?;
+        let starts = file.words.starts.resolve()?;
+        let marks = file.words.matches.resolve(&style, starts)?;
+        let input = match (file.input, file.words.input) {
             (Some(_), Some(_)) => {
-                bail!("[input] and [text.input] are the same table; keep [input]")
+                bail!("[input] and [words.input] are the same table; keep [input]")
             }
-            (Some(input), None) => input.resolve(&file.style, "input")?,
-            (None, Some(old)) => old.resolve(&file.style, "text.input")?,
-            (None, None) => FileInput::default().resolve(&file.style, "input")?,
+            (Some(input), None) => input.resolve(&style, "input")?,
+            (None, Some(old)) => old.resolve(&style, "words.input")?,
+            (None, None) => FileInput::default().resolve(&style, "input")?,
         };
-        let info = file.info.resolve()?;
+        let info = file.messages.resolve()?;
         file.pixels.validate()?;
         let nudge = file.pointer.nudge.unwrap_or(NUDGE);
         if nudge == 0 {
-            bail!("[pointer] nudge = 0: an arrow press must move at least 1 px");
+            bail!("[pointer] nudge_px = 0: an arrow press must move at least 1 px");
         }
         let scroll = file.pointer.scroll.unwrap_or(SCROLL);
         if !(1..=50).contains(&scroll) {
-            bail!("[pointer] scroll = {scroll}: give 1-50 wheel notches");
+            bail!("[pointer] scroll_steps = {scroll}: give 1-50 wheel notches");
         }
         let settle = file.pointer.settle.unwrap_or(SETTLE);
         if settle > SETTLE_MAX {
-            bail!("[pointer] settle = {settle}: give 0-{SETTLE_MAX} ms");
+            bail!("[pointer] settle_ms = {settle}: give 0-{SETTLE_MAX} ms");
         }
         Ok(Self {
             alphabet,
             verbs,
-            hint_auto_accept: file.hints.auto_accept.unwrap_or(true),
+            hint_auto_accept,
+            window_hint,
             layout: layout.name().to_string(),
-            style: file.style,
+            style,
             marks,
             input,
             info,
-            text_cursor: file.text.cursor,
-            text_auto_accept: file.text.auto_accept,
-            text_hints: file.text.hints.unwrap_or(true),
+            text_cursor: file.words.cursor,
+            text_auto_accept: file.words.auto_accept,
+            text_hints: file.words.hints.unwrap_or(true),
             after: file.pointer.after,
             nudge: nudge.into(),
             scroll,
@@ -1201,15 +1285,15 @@ impl Config {
         })
     }
 
-    /// `[text]`'s own settings, for `wayhint config`.
-    fn render_text(&self) -> String {
+    /// `[words]`'s own settings, for `wayhint config`.
+    fn render_words(&self) -> String {
         let cursor = match self.text_cursor {
             TextCursor::Start => "start",
             TextCursor::Center => "center",
             TextCursor::End => "end",
         };
         format!(
-            "\n[text]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nhints = {}   # tags on the targets with no text to type, in letters no word starts with\n",
+            "\n[words]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nfallback_hints = {}   # tags on the targets with no text to type, in letters no word starts with\n",
             self.text_auto_accept,
             crate::search::UNIQUE,
             self.text_hints,
@@ -1221,16 +1305,16 @@ impl Config {
         let mut out =
             String::from("# wayhint config in effect: defaults merged with your file\n\n");
         out.push_str(&self.render_keys());
+        let hints = self.style.render();
+        let (header, fields) = hints.split_once('\n').unwrap();
         let _ = writeln!(
             out,
-            "\n[hints]\nauto_accept = {}   # act on a completed tag; false requires Enter, in either mode",
-            self.hint_auto_accept
+            "\n{header}\nauto_accept = {}\nwindow_hint = {}\n{fields}",
+            self.hint_auto_accept, self.window_hint
         );
-        out.push('\n');
-        out.push_str(&self.style.render());
         out.push_str(&self.input.render());
         out.push_str(&self.info.render());
-        out.push_str(&self.render_text());
+        out.push_str(&self.render_words());
         out.push_str(&self.marks.render());
         let after = match self.after {
             After::Restore => {
@@ -1242,17 +1326,17 @@ impl Config {
         };
         let _ = write!(
             out,
-            "\n[pointer]\nafter = {after}\nnudge = {}   # px one arrow press moves the pointer; held, it goes on, faster\n",
+            "\n[pointer]\nafter = {after}\nnudge_px = {}   # px one arrow press moves the pointer; held, it goes on, faster\n",
             self.nudge
         );
         let _ = writeln!(
             out,
-            "scroll = {}   # wheel notches one scroll_up or scroll_down turns",
+            "scroll_steps = {}   # wheel notches one scroll_up or scroll_down turns",
             self.scroll
         );
         let _ = writeln!(
             out,
-            "settle = {}   # ms the app gets to react to a click before the windows are read again",
+            "settle_ms = {}   # ms the app gets to react to a click before the windows are read again",
             self.settle.as_millis()
         );
         let detector = match self.pixels {
@@ -1266,7 +1350,7 @@ impl Config {
         );
         let _ = writeln!(
             out,
-            "terminal_hint = {}   # one terminal focus tag, even when detector is off",
+            "terminal_hint = {}   # terminal cursor/fallback tag, independent of window hints and detector",
             self.terminal_hint
         );
         let _ = writeln!(
@@ -1281,11 +1365,11 @@ impl Config {
         let refresh = self.refresh.map_or(0, |every| every.as_millis());
         let _ = write!(
             out,
-            "\n[scan]\nrefresh = {refresh}   # ms the tags stay up before a rescan, doubling up to 2 s while nothing changes; 0 for only after a click\n"
+            "\n[scan]\nrefresh_ms = {refresh}   # ms the tags stay up before a rescan, doubling up to 2 s while nothing changes; 0 for only after a click\n"
         );
         let _ = writeln!(
             out,
-            "merge_distance = {}   # logical px between nearby hint centers; 0 keeps every hint",
+            "merge_distance_px = {}   # logical px between nearby hint centers; 0 keeps every hint",
             self.merge_distance
         );
         out
@@ -1314,18 +1398,10 @@ impl Config {
                 .collect();
             let _ = writeln!(out, "# left out of the alphabet: {}", dropped.join(", "));
         }
-        out.push_str(
-            "# The verbs: type one before a tag's last letter, or before Space for\n\
-             # the pointer, or twice for where the last command was; in text\n\
-             # mode, verbs come before the text, named keys work any time.\n\
-             # Capitals, symbols and named keys can be verbs; lower-case letters\n\
-             # and digits cannot. \"\" makes a verb what a bare tag does.\n",
-        );
+        let _ = writeln!(out, "default_action = {}", quote(self.verbs.default.name()));
         for action in Action::ALL {
             let (name, about) = (action.name(), action.about());
-            if action == self.verbs.default {
-                let _ = writeln!(out, "{name} = \"\"   # {about}: a bare tag does this");
-            } else if let Some(label) = self.verbs.label(action) {
+            if let Some(label) = self.verbs.label(action) {
                 let _ = writeln!(out, "{name} = {}   # {about}", quote(label));
             } else if let Some((_, label)) = self.verbs.unbound.iter().find(|v| v.0 == action) {
                 let why = if is_verb_key(label) {
@@ -1334,13 +1410,18 @@ impl Config {
                     "is not a symbol on this layout; choose a capital, a symbol or a named key"
                 };
                 let _ = writeln!(out, "# {name} has no key: its default, {label:?}, {why}");
+            } else {
+                let _ = writeln!(out, "{name} = false   # {about}");
             }
         }
-        let repeat = self.verbs.repeat.as_ref().map_or("", |(_, label)| label);
+        let repeat = self
+            .verbs
+            .repeat
+            .as_ref()
+            .map_or_else(|| "false".into(), |(_, label)| quote(label));
         let _ = writeln!(
             out,
-            "repeat = {}   # the last command again, on the same target; \"\" for none",
-            quote(repeat)
+            "repeat = {repeat}   # repeat the last command on its target"
         );
         out.push_str(&self.verbs.render_help());
         let _ = writeln!(
@@ -1476,7 +1557,7 @@ mod tests {
         assert!(err("[keys]\nalphabet = \"aA\"").contains("needs Shift"));
         assert!(err("[keys]\nalphabet = \"aa\"").contains("same key"));
         assert!(err("[keys]\nalphabet = \"a\"").contains("at least two"));
-        assert!(err("[style]\nposition = \"middle\"").contains("bottom-right"));
+        assert!(err("[hints]\nposition = \"middle\"").contains("bottom-right"));
         assert!(err("[keys]\nalphabet = \"aé\"").contains("isn't a key"));
         assert!(
             err("[keys]\nalphabet = \"ab\"\n[keys.aliases]\n\";\" = \"c\"")
@@ -1507,7 +1588,7 @@ mod tests {
     #[test]
     fn symbol_and_named_verb_bindings_load() {
         let config = Config::parse(
-            "[keys]\nalphabet = \"ehatincsulodypmgf\"\nright = \"\"\nleft = \".\"\n\
+            "[keys]\nalphabet = \"ehatincsulodypmgf\"\ndefault_action = \"right\"\nleft = \".\"\n\
              double = \"!\"\nmiddle = \"/\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
              [pointer]\nafter = \"leave\"",
             &us(),
@@ -1565,8 +1646,8 @@ mod tests {
     #[test]
     fn broken_verbs_say_why() {
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[keys]\nright = \"\"").contains("only one verb can be the default"));
-        assert!(err("[keys]\nleft = \".\"").contains("no verb is the default"));
+        assert!(err("[keys]\ndefault_action = \"unknown\"").contains("unknown variant"));
+        assert!(err("[keys]\nright = \"\"").contains("give a key or false"));
         assert!(err("[keys]\nhover = \"esc\"").contains("close and hover"));
         assert!(err("[keys]\nright = \",\"\nmiddle = \",\"").contains("both"));
         assert!(err("[keys]\nback = \"PageUpp\"").contains("the names are Up, Down"));
@@ -1606,11 +1687,11 @@ mod tests {
     #[test]
     fn nudge_is_10_px_unless_set() {
         assert_eq!(Config::parse("", &us()).unwrap().nudge, 10);
-        let five = Config::parse("[pointer]\nnudge = 5", &us()).unwrap();
+        let five = Config::parse("[pointer]\nnudge_px = 5", &us()).unwrap();
         assert_eq!(five.nudge, 5);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[pointer]\nnudge = 0").contains("at least 1 px"));
-        assert!(err("[pointer]\nnudge = -3").contains("invalid value"));
+        assert!(err("[pointer]\nnudge_px = 0").contains("at least 1 px"));
+        assert!(err("[pointer]\nnudge_px = -3").contains("invalid value"));
     }
 
     #[test]
@@ -1646,12 +1727,12 @@ mod tests {
             ("center", TextCursor::Center),
             ("end", TextCursor::End),
         ] {
-            let config = Config::parse(&format!("[text]\ncursor = {name:?}"), &us()).unwrap();
+            let config = Config::parse(&format!("[words]\ncursor = {name:?}"), &us()).unwrap();
             assert_eq!(config.text_cursor, cursor);
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.text_cursor, cursor);
         }
-        let err = Config::parse("[text]\ncursor = \"middle\"", &us()).unwrap_err();
+        let err = Config::parse("[words]\ncursor = \"middle\"", &us()).unwrap_err();
         let err = format!("{err:#}");
         assert!(err.contains("cursor"), "{err}");
         for name in ["start", "center", "end"] {
@@ -1677,8 +1758,25 @@ mod tests {
     }
 
     #[test]
+    fn window_and_terminal_hints_have_independent_switches_and_round_trip() {
+        let defaults = Config::parse("", &us()).unwrap();
+        assert!(defaults.window_hint);
+        assert!(!defaults.terminal_hint);
+        for window in [true, false] {
+            for terminal in [true, false] {
+                let config = Config::parse(&format!(
+                    "[hints]\nwindow_hint = {window}\n[pixels]\nterminal_hint = {terminal}\ndetector = \"off\""
+                ), &us()).unwrap();
+                let again = Config::parse(&config.render(), &us()).unwrap();
+                assert_eq!((again.window_hint, again.terminal_hint), (window, terminal));
+            }
+        }
+        assert!(Config::parse("[hints]\nwindow_hint = \"on\"", &us()).is_err());
+    }
+
+    #[test]
     fn terminal_hint_is_independent_of_the_pixel_detector() {
-        assert!(Config::parse("", &us()).unwrap().terminal_hint);
+        assert!(!Config::parse("", &us()).unwrap().terminal_hint);
         for detector in ["full", "fast", "off"] {
             for enabled in [true, false] {
                 let text = format!("[pixels]\ndetector = {detector:?}\nterminal_hint = {enabled}");
@@ -1696,9 +1794,9 @@ mod tests {
     fn nearby_hint_merging_is_disabled_unless_set() {
         for (text, expected) in [
             ("", 0),
-            ("[scan]\nmerge_distance = 5", 5),
-            ("[scan]\nmerge_distance = 12", 12),
-            ("[scan]\nmerge_distance = 0", 0),
+            ("[scan]\nmerge_distance_px = 5", 5),
+            ("[scan]\nmerge_distance_px = 12", 12),
+            ("[scan]\nmerge_distance_px = 0", 0),
         ] {
             let config = Config::parse(text, &us()).unwrap();
             assert_eq!(config.merge_distance, expected);
@@ -1706,7 +1804,7 @@ mod tests {
             assert_eq!(again.merge_distance, expected);
         }
         for value in ["-1", "65536", "1.5"] {
-            assert!(Config::parse(&format!("[scan]\nmerge_distance = {value}"), &us()).is_err());
+            assert!(Config::parse(&format!("[scan]\nmerge_distance_px = {value}"), &us()).is_err());
         }
     }
 
@@ -1715,14 +1813,14 @@ mod tests {
         let read = |text: &str| Config::parse(text, &us()).unwrap().refresh;
         assert_eq!(read(""), Some(Duration::from_millis(500)));
         assert_eq!(
-            read("[scan]\nrefresh = 250"),
+            read("[scan]\nrefresh_ms = 250"),
             Some(Duration::from_millis(250))
         );
-        assert_eq!(read("[scan]\nrefresh = 0"), None);
+        assert_eq!(read("[scan]\nrefresh_ms = 0"), None);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[scan]\nrefresh = -1").contains("invalid value"));
+        assert!(err("[scan]\nrefresh_ms = -1").contains("invalid value"));
         assert!(err("[scan]\nrefrash = 9").contains("unknown field"));
-        for text in ["", "[scan]\nrefresh = 250", "[scan]\nrefresh = 0"] {
+        for text in ["", "[scan]\nrefresh_ms = 250", "[scan]\nrefresh_ms = 0"] {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(
@@ -1730,6 +1828,32 @@ mod tests {
                 "{text:?} reads back the same"
             );
         }
+    }
+
+    #[test]
+    fn disabled_shortcuts_are_independent_of_the_default_action() {
+        let config = Config::parse("[keys]\ndefault_action = \"right\"\nright = false\nleft = \".\"\nhelp = false\nrepeat = false", &us()).unwrap();
+        assert_eq!(config.verbs.default_action(), Action::Right);
+        assert_eq!(config.verbs.label(Action::Right), None);
+        assert_eq!(config.verbs.action_of(key(52, false)), Some(Action::Left));
+        assert!(!config.verbs.is_help(key(53, true)));
+        assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        for action in Action::ALL {
+            let config =
+                Config::parse(&format!("[keys]\n{} = false", action.name()), &us()).unwrap();
+            assert_eq!(config.verbs.label(action), None);
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        for command in ["right", "repeat", "help"] {
+            for value in ["true", "\"\""] {
+                let err =
+                    Config::parse(&format!("[keys]\n{command} = {value}"), &us()).unwrap_err();
+                assert!(
+                    format!("{err:#}").contains(&format!("[keys] {command}: give a key or false"))
+                );
+            }
+        }
+        assert!(Config::parse("[keys]\nclose = false", &us()).is_err());
     }
 
     #[test]
@@ -1746,7 +1870,7 @@ mod tests {
                 .render()
                 .contains("# left out of the alphabet: f (repeat)")
         );
-        let off = Config::parse("[keys]\nrepeat = \"\"", &us()).unwrap();
+        let off = Config::parse("[keys]\nrepeat = false", &us()).unwrap();
         assert!(!off.verbs.is_repeat(f));
     }
 
@@ -1765,7 +1889,7 @@ mod tests {
 
     #[test]
     fn text_marks_are_yellow_and_orange_unless_set() {
-        let config = Config::parse("[style]\nborder_width = 2\nradius = 3", &us()).unwrap();
+        let config = Config::parse("[hints]\nborder_width = 2\nradius = 3", &us()).unwrap();
         let base = Mark::new(&config.style);
         assert_eq!(config.marks.all, base);
         assert_eq!(config.marks.current, base.for_current());
@@ -1778,8 +1902,8 @@ mod tests {
             "but no border"
         );
         let set = Config::parse(
-            "[text.style]\nbackground = \"#e8dcc440\"\npadding = [1, 2]\n\
-             [text.style.current]\nborder_width = 3",
+            "[words.style]\nbackground = \"#e8dcc440\"\npadding = [1, 2]\n\
+             [words.style.current]\nborder_width = 3",
             &us(),
         )
         .unwrap();
@@ -1802,33 +1926,141 @@ mod tests {
         assert_eq!(again.marks, set.marks);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
         assert!(
-            err("[text.matches.current]\nradius = -1").contains("[text.matches.current] radius")
+            err("[words.matches.current]\nradius = -1").contains("[words.matches.current] radius")
         );
-        assert!(err("[text.matches]\nopacity = 0.5").contains("unknown field"));
-        assert!(err("[text.matches]\nborder = \"red\"").contains("isn't a colour"));
+        assert!(err("[words.matches]\nopacity = 0.5").contains("unknown field"));
+        assert!(err("[words.matches]\nborder = \"red\"").contains("isn't a colour"));
     }
 
     #[test]
-    fn word_starts_are_unmarked_unless_asked_and_round_trip() {
+    fn first_characters_are_unmarked_unless_asked_and_round_trip() {
         let config = Config::parse("", &us()).unwrap();
         assert_eq!(config.marks.starts, Starts::new());
         assert_eq!(config.marks.starts.mark, StartMark::Off);
         let set = Config::parse(
-            "[text.starts]\nmark = \"underline\"\nline = \"#f38ba8\"\nthickness = 3\nradius = 0",
+            "[words.first_character]\nmark = \"underline\"\ncolor = \"#f38ba8\"\nthickness = 3\nradius = 0",
             &us(),
         )
         .unwrap();
         let starts = set.marks.starts;
         assert_eq!(starts.mark, StartMark::Underline);
-        assert_eq!(starts.line, Color::rgba(0xf3, 0x8b, 0xa8, 0xff));
+        assert_eq!(starts.look.background, Color::rgba(0xf3, 0x8b, 0xa8, 0xff));
         assert!((starts.thickness - 3.0).abs() < f32::EPSILON);
         assert_eq!(starts.look.padding, Starts::new().look.padding, "unset");
         let again = Config::parse(&set.render(), &us()).unwrap();
         assert_eq!(again.marks.starts, starts);
+        for (name, mark) in [
+            ("off", StartMark::Off),
+            ("underline", StartMark::Underline),
+            ("box", StartMark::Box),
+            ("dot", StartMark::Dot),
+        ] {
+            let config = Config::parse(&format!("[words.first_character]\nmark = '{name}'\ncolor = '#12345680'\ncolor_end = '#abcdef00'\ndirection = 'bottom-right'"), &us()).unwrap();
+            assert_eq!(config.marks.starts.mark, mark);
+            assert_eq!(
+                config.marks.starts.look.background,
+                Color::rgba(0x12, 0x34, 0x56, 0x80)
+            );
+            assert_eq!(
+                config.marks.starts.look.background_end,
+                Some(Color::rgba(0xab, 0xcd, 0xef, 0))
+            );
+            assert_eq!(
+                config.marks.starts.look.background_direction,
+                Direction::BottomRight
+            );
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[text.starts]\nmark = \"dots\"").contains("unknown variant"));
-        assert!(err("[text.starts]\nthickness = 0").contains("[text.starts] thickness"));
-        assert!(err("[text.starts]\npadding = [-1, 0]").contains("[text.starts] padding"));
+        for field in [
+            "line = '#fff'",
+            "line_end = '#fff'",
+            "line_direction = 'right'",
+            "background = '#fff'",
+            "background_end = '#fff'",
+            "background_direction = 'right'",
+        ] {
+            assert!(err(&format!("[words.first_character]\n{field}")).contains("unknown field"));
+        }
+        assert!(err("[words.first_character]\nmark = \"dots\"").contains("unknown variant"));
+        assert!(
+            err("[words.first_character]\nthickness = 0")
+                .contains("[words.first_character] thickness")
+        );
+        assert!(
+            err("[words.first_character]\npadding = [-1, 0]")
+                .contains("[words.first_character] padding")
+        );
+    }
+
+    #[test]
+    fn word_gradients_round_trip_and_current_overrides_can_be_solid() {
+        for direction in [
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right",
+        ] {
+            let source = format!(
+                r##"
+[words.matches]
+background_end = "#12345680"
+background_direction = "{direction}"
+[words.first_character]
+color_end = "#abcdef80"
+direction = "{direction}"
+"##
+            );
+            let config = Config::parse(&source, &us()).unwrap();
+            let marks = config.marks;
+            assert_eq!(
+                marks.all.background_end,
+                Some(Color::rgba(0x12, 0x34, 0x56, 0x80))
+            );
+            assert_eq!(marks.current.background_end, marks.all.background_end);
+            assert_eq!(
+                marks.current.background_direction,
+                marks.all.background_direction
+            );
+            assert_eq!(
+                marks.starts.look.background_end,
+                Some(Color::rgba(0xab, 0xcd, 0xef, 0x80))
+            );
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+
+            let solid = Config::parse(
+                &format!("{source}\n[words.matches.current]\nbackground = '#fff'"),
+                &us(),
+            )
+            .unwrap();
+            assert_eq!(solid.marks.current.background_end, None);
+            let custom = Config::parse(&format!("{source}\n[words.matches.current]\nbackground = '#fff'\nbackground_end = '#000'\nbackground_direction = 'top'"), &us()).unwrap();
+            assert_eq!(
+                custom.marks.current.background_end,
+                Some(Color::rgba(0, 0, 0, 255))
+            );
+            assert_eq!(custom.marks.current.background_direction, Direction::Top);
+            assert_eq!(Config::parse(&custom.render(), &us()).unwrap(), custom);
+        }
+        for table in ["words.matches", "words.matches.current"] {
+            for field in [
+                "background_end = 'red'",
+                "background_direction = 'sideways'",
+            ] {
+                assert!(Config::parse(&format!("[{table}]\n{field}"), &us()).is_err());
+            }
+        }
+        for field in ["color_end = 'red'", "direction = 'sideways'"] {
+            assert!(Config::parse(&format!("[words.first_character]\n{field}"), &us()).is_err());
+        }
+        for source in ["[text]", "[words.word_starts]"] {
+            let err = Config::parse(source, &us()).unwrap_err();
+            assert!(format!("{err:#}").contains("unknown field"));
+        }
     }
 
     #[test]
@@ -1837,7 +2069,7 @@ mod tests {
             Config::parse("", &us()).unwrap().style.position,
             Position::Auto
         );
-        let placed = Config::parse("[style]\nposition = \"bottom-right\"", &us()).unwrap();
+        let placed = Config::parse("[hints]\nposition = \"bottom-right\"", &us()).unwrap();
         assert_eq!(placed.style.position, Position::BottomRight);
         let again = Config::parse(&placed.render(), &us()).unwrap();
         assert_eq!(again.style.position, Position::BottomRight);
@@ -1851,7 +2083,7 @@ mod tests {
     #[test]
     fn text_input_inherits_tags_but_has_its_own_screen_position() {
         let config = Config::parse(
-            "[style]\nfont = 'serif'\nsize = 22\ntext = '#123456'\nposition = 'top-right'\noffset = [3, 4]",
+            "[hints]\nfont = 'serif'\nsize = 22\ntext = '#123456'\nposition = 'top-right'\noffset = [3, 4]",
             &us(),
         ).unwrap();
         let mut look = config.style.clone();
@@ -1865,15 +2097,15 @@ mod tests {
     fn text_input_and_current_match_settings_round_trip_independently() {
         let config = Config::parse(
             r##"
-[style]
+[hints]
 size = 11
-[text.matches.current]
+[words.matches.current]
 background = "#10203040"
 border = "#50607080"
 border_width = 2
 radius = 6
 padding = [3, 4]
-[text.input]
+[words.input]
 prefix = "find \""
 suffix = '" \literal'
 font = "serif"
@@ -1914,20 +2146,20 @@ offset = [-13, 17]
     #[test]
     fn invalid_text_input_settings_fail_before_the_keyboard_grab() {
         for (field, expected) in [
-            ("size = nan", "[text.input] size"),
-            ("size = 0", "[text.input] size"),
-            ("font = ''", "[text.input] font"),
-            ("padding = [-1, 2]", "[text.input] padding"),
-            ("radius = inf", "[text.input] radius"),
-            ("border_width = -1", "[text.input] border_width"),
-            ("offset = [501, 0]", "[text.input] offset"),
+            ("size = nan", "[words.input] size"),
+            ("size = 0", "[words.input] size"),
+            ("font = ''", "[words.input] font"),
+            ("padding = [-1, 2]", "[words.input] padding"),
+            ("radius = inf", "[words.input] radius"),
+            ("border_width = -1", "[words.input] border_width"),
+            ("offset = [501, 0]", "[words.input] offset"),
             ("background = 'red'", "isn't a colour"),
             ("position = 'nowhere'", "unknown variant"),
             ("colour = '#ffffff'", "unknown field"),
             (r#"prefix = "line\nline""#, "single-line"),
             (r#"suffix = "\t""#, "single-line"),
         ] {
-            let error = Config::parse(&format!("[text.input]\n{field}"), &us()).unwrap_err();
+            let error = Config::parse(&format!("[words.input]\n{field}"), &us()).unwrap_err();
             assert!(
                 format!("{error:#}").contains(expected),
                 "{field}: {error:#}"
@@ -1937,8 +2169,8 @@ offset = [-13, 17]
 
     #[test]
     fn rendered_config_reads_back_the_same() {
-        let text = "[keys]\nalphabet = \"ciaehtns\"\nright = \"\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
-                    [keys.aliases]\n\";\" = \"c\"\n[style]\nsize = 15\nposition = \"top\"\noffset = [3, -2]\n[pointer]\nafter = \"leave\"\nnudge = 9";
+        let text = "[keys]\nalphabet = \"ciaehtns\"\ndefault_action = \"right\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
+                    [keys.aliases]\n\";\" = \"c\"\n[hints]\nsize = 15\nposition = \"top\"\noffset = [3, -2]\n[pointer]\nafter = \"leave\"\nnudge_px = 9";
         let config = Config::parse(text, &us()).unwrap();
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.alphabet, config.alphabet);
@@ -2053,7 +2285,7 @@ offset = [-13, 17]
         assert_eq!(verbs.action_of(key(39, false)), Some(Action::Hold), ";");
         assert_eq!(config.scroll, 5);
         let mine = Config::parse(
-            "[keys]\nscroll_up = \"PgUp\"\nscroll_down = \"pagedown\"\nhold = \"_\"\n[pointer]\nscroll = 3",
+            "[keys]\nscroll_up = \"PgUp\"\nscroll_down = \"pagedown\"\nhold = \"_\"\n[pointer]\nscroll_steps = 3",
             &us(),
         )
         .unwrap();
@@ -2061,8 +2293,8 @@ offset = [-13, 17]
         assert_eq!(mine.verbs.action_of(key(12, true)), Some(Action::Hold));
         assert_eq!(mine.scroll, 3);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[pointer]\nscroll = 0").contains("1-50"));
-        assert!(err("[pointer]\nscroll = 51").contains("1-50"));
+        assert!(err("[pointer]\nscroll_steps = 0").contains("1-50"));
+        assert!(err("[pointer]\nscroll_steps = 51").contains("1-50"));
     }
 
     #[test]
@@ -2086,8 +2318,8 @@ offset = [-13, 17]
     #[test]
     fn old_names_still_load() {
         let config = Config::parse(
-            "[style]\nmatched = \"#11223344\"\n[text.style]\nbackground = \"#55667788\"\n\
-             [text.input]\nmatched = \"#99aabbcc\"",
+            "[hints]\nmatched = \"#11223344\"\n[words.style]\nbackground = \"#55667788\"\n\
+             [words.input]\nmatched = \"#99aabbcc\"",
             &us(),
         )
         .unwrap();
@@ -2102,39 +2334,54 @@ offset = [-13, 17]
         );
         let rendered = config.render();
         assert!(rendered.contains("dimmed = \"#11223344\""));
-        assert!(rendered.contains("[text.matches]") && !rendered.contains("[text.style]"));
+        assert!(rendered.contains("[words.matches]") && !rendered.contains("[words.style]"));
     }
 
     #[test]
-    fn the_leader_follows_the_tags_unless_set() {
-        let config = Config::parse("[style]\ntext = \"#123456\"", &us()).unwrap();
-        let leader = config.style.leader;
-        let (line, dot, outline) = leader.colors(&config.style);
-        assert_eq!((line, dot), (config.style.text, config.style.text));
-        assert_eq!(outline, config.style.background);
+    fn arrows_inherit_colors_and_reject_removed_settings() {
+        let config = Config::parse("[hints]\ntext = \"#123456\"", &us()).unwrap();
+        assert_eq!(
+            config.style.arrow.colors(&config.style),
+            (config.style.text, config.style.background)
+        );
         let again = Config::parse(&config.render(), &us()).unwrap();
-        assert_eq!(again.style, config.style, "unset stays unset");
+        assert_eq!(again.style, config.style);
         let set = Config::parse(
-            "[style.leader]\nline = \"#ff0000\"\ndot = \"#00ff00\"\noutline_width = 0\nwidth = 2",
+            "[hints.arrow]\ncolor = \"#ff0000\"\nlength = 5\noutline_width = 0",
             &us(),
         )
         .unwrap();
-        let (line, dot, _) = set.style.leader.colors(&set.style);
-        assert_eq!(line, Color::rgba(0xff, 0, 0, 0xff));
-        assert_eq!(dot, Color::rgba(0, 0xff, 0, 0xff));
+        assert_eq!(
+            set.style.arrow.colors(&set.style).0,
+            Color::rgba(0xff, 0, 0, 0xff)
+        );
         assert_eq!(
             Config::parse(&set.render(), &us()).unwrap().style,
             set.style
         );
-        let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[style.leader]\nwidth = -1").contains("[style.leader] width"));
-        assert!(err("[style.leader]\ncolour = \"#ffffff\"").contains("unknown field"));
+        for field in ["dot", "line", "width", "radius"] {
+            let err = Config::parse(&format!("[hints.arrow]\n{field} = 1"), &us()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unknown field"),
+                "{field}: {err:#}"
+            );
+        }
+        let err = Config::parse("[hints.arrow]\nlength = -1", &us()).unwrap_err();
+        assert!(format!("{err:#}").contains("[hints.arrow] length"));
     }
 
     #[test]
     fn the_input_box_is_input_and_its_old_name_still_loads() {
-        let new = Config::parse("[input]\nposition = \"top\"\nhints = false", &us()).unwrap();
-        let old = Config::parse("[text.input]\nposition = \"top\"\nhints = false", &us()).unwrap();
+        let new = Config::parse(
+            "[input]\nposition = \"top\"\nshow_typed_hints = false",
+            &us(),
+        )
+        .unwrap();
+        let old = Config::parse(
+            "[words.input]\nposition = \"top\"\nshow_typed_hints = false",
+            &us(),
+        )
+        .unwrap();
         assert_eq!(new.input, old.input);
         assert_eq!(new.input.style.position, Position::Top);
         assert!(!new.input.hints);
@@ -2143,7 +2390,7 @@ offset = [-13, 17]
             "on by default"
         );
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[input]\n[text.input]").contains("same table"));
+        assert!(err("[input]\n[words.input]").contains("same table"));
         assert!(err("[input]\nsize = 0").contains("[input] size"));
         assert!(err("[input]\nfade = 100").contains("unknown field"));
     }
@@ -2155,7 +2402,7 @@ offset = [-13, 17]
         assert!(info.scanning && info.no_targets && info.no_match);
         assert_eq!(info.duration, Duration::from_millis(2000));
         let mine = Config::parse(
-            "[info]\nscanning = false\nno_match = false\nduration = 400\nno_match_color = \"#000\"",
+            "[messages]\nscanning = false\nno_match = false\nduration_ms = 400\nno_match_color = \"#000\"",
             &us(),
         )
         .unwrap();
@@ -2166,8 +2413,8 @@ offset = [-13, 17]
         let again = Config::parse(&mine.render(), &us()).unwrap();
         assert_eq!(again.info, mine.info);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[info]\nduration = 0").contains("[info] duration"));
-        assert!(err("[info]\nposition = \"top\"").contains("unknown field"));
+        assert!(err("[messages]\nduration_ms = 0").contains("[messages] duration_ms"));
+        assert!(err("[messages]\nposition = \"top\"").contains("unknown field"));
     }
 
     #[test]
@@ -2176,7 +2423,7 @@ offset = [-13, 17]
         assert_eq!(plain.style.case, crate::style::Case::Upper);
         assert!(!plain.text_auto_accept, "Enter is needed unless told");
         let mine = Config::parse(
-            "[style]\ncase = \"lower\"\n[style.pixels]\nborder = \"#f00\"\nsize = 11\n[text]\npick_unique = true",
+            "[hints]\ncase = \"lower\"\n[hints.pixels]\nborder = \"#f00\"\nsize = 11\n[words]\npick_unique = true",
             &us(),
         )
         .unwrap();
@@ -2191,9 +2438,91 @@ offset = [-13, 17]
         assert_eq!(again.style, mine.style);
         assert!(again.text_auto_accept);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
-        assert!(err("[style]\ncase = \"title\"").contains("case"));
-        assert!(err("[style.pixels]\nsize = 0").contains("[style.pixels] size"));
-        assert!(err("[style.pixels]\nposition = \"top\"").contains("unknown field"));
+        assert!(err("[hints]\ncase = \"title\"").contains("case"));
+        assert!(err("[hints.pixels]\nsize = 0").contains("[hints.pixels] size"));
+        assert!(err("[hints.pixels]\nposition = \"top\"").contains("unknown field"));
+    }
+
+    #[test]
+    fn hint_gradients_are_optional_validated_and_round_trip() {
+        use crate::style::Direction;
+
+        let plain =
+            Config::parse("[hints]\ntext = '#123456'\nbackground = '#abcdef80'", &us()).unwrap();
+        assert_eq!(plain.style.text_end, None);
+        assert_eq!(plain.style.background_end, None);
+        assert_eq!(
+            plain.style.for_pixels().text,
+            Style::default().for_pixels().text
+        );
+        let again = Config::parse(&plain.render(), &us()).unwrap();
+        assert_eq!(again.style, plain.style);
+
+        let set = Config::parse(
+            "[hints]\ntext = '#123456'\ntext_end = '#abcdef80'\ntext_direction = 'top-right'\n\
+             background = '#789abc'\nbackground_end = '#1230'\nbackground_direction = 'bottom'",
+            &us(),
+        )
+        .unwrap();
+        assert_eq!(
+            set.style.text_end,
+            Some(Color::rgba(0xab, 0xcd, 0xef, 0x80))
+        );
+        assert_eq!(
+            set.style.background_end,
+            Some(Color::rgba(0x11, 0x22, 0x33, 0))
+        );
+        assert_eq!(set.style.text_direction, Direction::TopRight);
+        assert_eq!(set.style.background_direction, Direction::Bottom);
+        assert_eq!(set.style.for_pixels().text, set.style.text);
+        assert_eq!(set.style.for_pixels().text_end, set.style.text_end);
+        let again = Config::parse(&set.render(), &us()).unwrap();
+        assert_eq!(again.style, set.style);
+        assert_eq!(again.input, set.input);
+
+        let overridden = Config::parse(
+            "[hints]\ntext_end = '#abc'\nbackground_end = '#def'\n\
+             [hints.pixels]\ntext = '#123'\nbackground = '#456'",
+            &us(),
+        )
+        .unwrap()
+        .style
+        .for_pixels();
+        assert_eq!(overridden.text_end, None);
+        assert_eq!(overridden.background_end, None);
+        for direction in [
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right",
+        ] {
+            Config::parse(
+                &format!(
+                    "[hints]\ntext_direction = '{direction}'\nbackground_direction = '{direction}'"
+                ),
+                &us(),
+            )
+            .unwrap();
+        }
+        for field in ["text", "background"] {
+            let invalid_direction = format!("[hints]\n{field}_direction = 'sideways'");
+            assert!(
+                format!(
+                    "{:#}",
+                    Config::parse(&invalid_direction, &us()).unwrap_err()
+                )
+                .contains("sideways")
+            );
+            let invalid_color = format!("[hints]\n{field}_end = 'red'");
+            assert!(
+                format!("{:#}", Config::parse(&invalid_color, &us()).unwrap_err())
+                    .contains("isn't a colour")
+            );
+        }
     }
 
     #[test]
@@ -2204,7 +2533,7 @@ offset = [-13, 17]
         for hints in [false, true] {
             for text in [false, true] {
                 let written =
-                    format!("[hints]\nauto_accept = {hints}\n[text]\nauto_accept = {text}");
+                    format!("[hints]\nauto_accept = {hints}\n[words]\nauto_accept = {text}");
                 let config = Config::parse(&written, &us()).unwrap();
                 let again = Config::parse(&config.render(), &us()).unwrap();
                 assert_eq!(again.hint_auto_accept, hints);
@@ -2213,8 +2542,8 @@ offset = [-13, 17]
         }
         for invalid in [
             "[hints]\nauto_accept = \"enter\"",
-            "[text]\nauto_accept = 1",
-            "[text]\nauto_accept = true\npick_unique = false",
+            "[words]\nauto_accept = 1",
+            "[words]\nauto_accept = true\npick_unique = false",
             "[hints]\nauto_acceppt = false",
         ] {
             assert!(Config::parse(invalid, &us()).is_err(), "{invalid}");
@@ -2227,13 +2556,13 @@ offset = [-13, 17]
             Config::parse("", &us()).unwrap().settle,
             Duration::from_millis(150)
         );
-        let config = Config::parse("[pointer]\nsettle = 400", &us()).unwrap();
+        let config = Config::parse("[pointer]\nsettle_ms = 400", &us()).unwrap();
         assert_eq!(config.settle, Duration::from_millis(400));
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.settle, config.settle);
         let err = format!(
             "{:#}",
-            Config::parse("[pointer]\nsettle = 2001", &us()).unwrap_err()
+            Config::parse("[pointer]\nsettle_ms = 2001", &us()).unwrap_err()
         );
         assert!(err.contains("settle"), "{err}");
     }
@@ -2253,7 +2582,7 @@ offset = [-13, 17]
         // Written as "?", it still leaves middle its default `/`.
         let written = Config::parse("[keys]\nhelp = \"?\"", &us()).unwrap();
         assert_eq!(written.verbs.action_of(key(53, false)), middle);
-        let none = Config::parse("[keys]\nhelp = \"\"", &us()).unwrap();
+        let none = Config::parse("[keys]\nhelp = false", &us()).unwrap();
         assert!(!none.verbs.is_help(key(53, true)));
         // `/` as a tag letter keeps it, unshifted, and help its `?`.
         let letter = Config::parse("[keys]\nalphabet = \"asdf/\"", &us()).unwrap();
@@ -2280,9 +2609,9 @@ offset = [-13, 17]
         assert!(both.input.visible && both.info.visible, "drawn by default");
         for (file, input, info) in [
             ("[input]\nvisible = false", false, true),
-            ("[info]\nvisible = false", true, false),
+            ("[messages]\nvisible = false", true, false),
             (
-                "[input]\nvisible = false\n[info]\nvisible = false",
+                "[input]\nvisible = false\n[messages]\nvisible = false",
                 false,
                 false,
             ),
@@ -2298,13 +2627,13 @@ offset = [-13, 17]
     #[test]
     fn the_placeholder_is_text_unless_set() {
         assert_eq!(Config::parse("", &us()).unwrap().input.placeholder, "text");
-        let config = Config::parse("[text.input]\nplaceholder = \"find…\"", &us()).unwrap();
+        let config = Config::parse("[words.input]\nplaceholder = \"find…\"", &us()).unwrap();
         assert_eq!(config.input.placeholder, "find…");
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.input, config.input);
         let err = format!(
             "{:#}",
-            Config::parse("[text.input]\nplaceholder = \"a\\nb\"", &us()).unwrap_err()
+            Config::parse("[words.input]\nplaceholder = \"a\\nb\"", &us()).unwrap_err()
         );
         assert!(err.contains("single-line"), "{err}");
     }
