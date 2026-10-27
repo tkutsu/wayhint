@@ -995,12 +995,6 @@ impl Verbs {
                 && let Some(text) = binding.key(action.name())?
             {
                 let (key, label) = verbs.written(action.name(), text, layout)?;
-                if !is_verb_key(&label) {
-                    bail!(
-                        "[keys] {} = {text:?}: use a capital, a symbol or a named key, not a lower-case letter or digit",
-                        action.name()
-                    );
-                }
                 verbs.keys.push((action, key, label));
             }
         }
@@ -1073,6 +1067,11 @@ impl Verbs {
             .or_else(|| self.is_close(key).then_some("close"));
         if let Some(other) = clash {
             bail!("[keys] {other} and {command} are both {label:?}");
+        }
+        if !is_verb_key(&label) {
+            bail!(
+                "[keys] {command} = {text:?}: use a capital, a symbol or a named key, not a lower-case letter or digit"
+            );
         }
         Ok((key, label))
     }
@@ -1664,24 +1663,26 @@ mod tests {
     }
 
     #[test]
-    fn every_verb_rejects_lower_case_letters_and_digits_but_repeat_still_accepts_them() {
+    fn every_verb_repeat_and_help_reject_lower_case_letters_and_digits() {
         for (name, variant, letters) in [("us", "", "az09"), ("fr", "", "éà"), ("gr", "", "αω")]
         {
             let layout = Layout::named(name, variant);
-            for action in Action::ALL {
+            for command in Action::ALL
+                .into_iter()
+                .map(Action::name)
+                .chain(["repeat", "help"])
+            {
                 for ch in letters.chars() {
-                    let text = format!("[keys]\n{} = \"{ch}\"", action.name());
+                    let text = format!("[keys]\n{command} = \"{ch}\"");
                     let err = format!("{:#}", Config::parse(&text, &layout).unwrap_err());
                     assert!(
                         err.contains("use a capital, a symbol or a named key"),
                         "{text}: {err}"
                     );
-                    assert!(err.contains(action.name()), "{err}");
+                    assert!(err.contains(command), "{err}");
                 }
             }
         }
-        let config = Config::parse("[keys]\nrepeat = \"r\"", &us()).unwrap();
-        assert!(config.verbs.is_repeat(key(19, false)));
     }
 
     #[test]
@@ -1857,21 +1858,40 @@ mod tests {
     }
 
     #[test]
-    fn the_repeat_key_takes_its_letter() {
-        let config = Config::parse("[keys]\nalphabet = \"asdf\"\nrepeat = \"f\"", &us()).unwrap();
-        let f = Key {
-            code: KeyCode::from_evdev(33),
-            shift: false,
-        };
+    fn a_capital_repeat_key_leaves_its_letter_a_tag() {
+        let config = Config::parse("[keys]\nalphabet = \"asdf\"\nrepeat = \"F\"", &us()).unwrap();
+        let f = key(33, true);
         assert!(config.verbs.is_repeat(f));
-        assert_eq!(config.alphabet.len(), 3, "f left the alphabet");
-        assert!(
-            config
-                .render()
-                .contains("# left out of the alphabet: f (repeat)")
-        );
+        assert!(!config.verbs.is_repeat(key(33, false)));
+        assert_eq!(labels(&config), "asdf");
+        assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
         let off = Config::parse("[keys]\nrepeat = false", &us()).unwrap();
         assert!(!off.verbs.is_repeat(f));
+    }
+
+    #[test]
+    fn repeat_and_help_accept_capitals_symbols_and_named_keys() {
+        for command in ["repeat", "help"] {
+            for binding in ["R", "_", "F1"] {
+                let config =
+                    Config::parse(&format!("[keys]\n{command} = {binding:?}"), &us()).unwrap();
+                let key = decode_key(binding, &us()).unwrap();
+                if command == "repeat" {
+                    assert!(config.verbs.is_repeat(key));
+                    assert!(!config.verbs.is_repeat(Key {
+                        shift: !key.shift,
+                        ..key
+                    }));
+                } else {
+                    assert!(config.verbs.is_help(key));
+                    assert!(!config.verbs.is_help(Key {
+                        shift: !key.shift,
+                        ..key
+                    }));
+                }
+                assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+            }
+        }
     }
 
     #[test]
@@ -2169,7 +2189,7 @@ offset = [-13, 17]
 
     #[test]
     fn rendered_config_reads_back_the_same() {
-        let text = "[keys]\nalphabet = \"ciaehtns\"\ndefault_action = \"right\"\nleft = \".\"\nhover = '\"'\nrepeat = \"q\"\n\
+        let text = "[keys]\nalphabet = \"ciaehtns\"\ndefault_action = \"right\"\nleft = \".\"\nhover = '\"'\nrepeat = \"Q\"\n\
                     [keys.aliases]\n\";\" = \"c\"\n[hints]\nsize = 15\nposition = \"top\"\noffset = [3, -2]\n[pointer]\nafter = \"leave\"\nnudge_px = 9";
         let config = Config::parse(text, &us()).unwrap();
         let again = Config::parse(&config.render(), &us()).unwrap();
@@ -2183,13 +2203,12 @@ offset = [-13, 17]
 
     #[test]
     fn a_left_out_letter_is_written_back_so_it_stays_out() {
-        // `r` is a tag letter, so right's default stays off it; then repeat
-        // takes it. Written as `"as"`, the reload would give right its `r`
-        // back, and right and repeat would clash.
-        let config = Config::parse("[keys]\nalphabet = \"asr\"\nrepeat = \"r\"", &us()).unwrap();
+        // Repeat takes `,` from the alphabet and right's default. Rendering
+        // must retain the written alphabet so the same defaults stay unbound.
+        let config = Config::parse("[keys]\nalphabet = \"as,\"\nrepeat = \",\"", &us()).unwrap();
         assert_eq!(labels(&config), "as");
         let rendered = config.render();
-        assert!(rendered.contains("alphabet = \"asr\""), "{rendered}");
+        assert!(rendered.contains("alphabet = \"as,\""), "{rendered}");
         let again = Config::parse(&rendered, &us()).unwrap();
         assert_eq!(again.alphabet, config.alphabet);
         assert_eq!(again.verbs, config.verbs);
