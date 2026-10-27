@@ -161,22 +161,76 @@ pub fn cell_space(frame: &Frame) -> Space {
     Space::pixels(&grid::unruled(frame, &grid::sheets(frame)))
 }
 
-/// `frame` at about one pixel per logical pixel, which every size rule
-/// assumes: a frame `width` logical px wide but 2x or more as many pixels
-/// (a scaled monitor) is averaged down by the whole part of the ratio, as
-/// Neru reads a scaled frame. Returns the pixels per logical pixel left:
-/// 1 at a whole scale, 1.25 at 2.5, 1.5 at 1.5 (a scale under 2 is read
-/// as it is, untested; README, known gaps).
+/// `frame` at one pixel per logical pixel, which every size rule assumes:
+/// a frame `width` logical px wide but with more pixels (a scaled monitor)
+/// is averaged down by the whole part of the ratio, as Neru reads a scaled
+/// frame, then what's left of a fractional scale is resampled. Without that
+/// a 100 px button at 1.5 is 150 px to the rules, and the colour pass found
+/// nothing at 1.25, 1.5, 1.75 or 2.5 (audit, 2026-10-27). Returns the
+/// pixels per logical pixel left, 1 but for rounding.
 pub fn shrink(frame: Frame, width: i32) -> (Frame, f64) {
-    let ratio = |f: &Frame| f.width as f64 / f64::from(width.max(1));
+    let width = width.max(1) as usize;
+    let ratio = |f: &Frame| f.width as f64 / width as f64;
     let factor = ratio(&frame).floor() as usize;
     let frame = if factor >= 2 {
         average(&frame, factor)
     } else {
         frame
     };
+    let frame = if frame.width > width {
+        let height = (frame.height as f64 / ratio(&frame)).round().max(1.0) as usize;
+        resample(&frame, width, height)
+    } else {
+        frame
+    };
     let left = ratio(&frame);
     (frame, left)
+}
+
+/// `frame` at `width` x `height`, each pixel the average of the area of
+/// `frame` it covers, a row at a time.
+fn resample(frame: &Frame, width: usize, height: usize) -> Frame {
+    let cols = spans(frame.width, width);
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    let mut line = vec![0.0f32; frame.width * 3];
+    for row in spans(frame.height, height) {
+        line.fill(0.0);
+        for (y, weight) in row {
+            let source = &frame.rgb[y * frame.width * 3..(y + 1) * frame.width * 3];
+            for (sum, &value) in line.iter_mut().zip(source) {
+                *sum += weight * f32::from(value);
+            }
+        }
+        for col in &cols {
+            let mut sum = [0.0f32; 3];
+            for &(x, weight) in col {
+                for (c, total) in sum.iter_mut().enumerate() {
+                    *total += weight * line[x * 3 + c];
+                }
+            }
+            rgb.extend(sum.map(|v| v.round().clamp(0.0, 255.0) as u8));
+        }
+    }
+    Frame { width, height, rgb }
+}
+
+/// For each of `to` cells laid over `from`, the cells under it and the
+/// share of it each covers.
+fn spans(from: usize, to: usize) -> Vec<Vec<(usize, f32)>> {
+    let step = from as f64 / to as f64;
+    (0..to)
+        .map(|i| {
+            let start = i as f64 * step;
+            let end = ((i + 1) as f64 * step).min(from as f64);
+            (start.floor() as usize..(end.ceil() as usize).min(from))
+                .map(|s| {
+                    let cover = end.min(s as f64 + 1.0) - start.max(s as f64);
+                    (s, (cover / (end - start)) as f32)
+                })
+                .filter(|&(_, share)| share > 0.0)
+                .collect()
+        })
+        .collect()
 }
 
 /// Each `factor` x `factor` block of pixels as one, averaged; blocks at the
