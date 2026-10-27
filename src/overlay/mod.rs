@@ -90,8 +90,8 @@ pub enum Event {
     /// keys to the config, and in the [`Mods`], for a Shift-click.
     Key(Key, Mods),
     /// An arrow is still held: its tick so far, 1 for the first (see
-    /// `hold.rs`). Its press came as a `Key`, and its release brings
-    /// nothing.
+    /// `hold.rs`). Its press came as a `Key`, or a `Typed` while typing,
+    /// and its release brings nothing.
     Held(Key, Mods, u16),
     /// While typing is on ([`Overlay::start_typing`]): a key as it's
     /// pressed, with the character it types, if any. Every key but Enter

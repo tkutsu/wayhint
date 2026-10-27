@@ -136,6 +136,18 @@ impl pick::Source for Saved {
     }
 }
 
+/// No pointer to move: the overlay alone clicks nothing, so the arrows do
+/// nothing either.
+impl pick::Mouse for Saved {
+    fn move_by(&mut self, _: Point) -> Result<()> {
+        Ok(())
+    }
+
+    fn move_to(&mut self, _: Point) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// `wayhint overlay --from snap.json`: the overlay alone, on saved targets.
 /// Prints the picked target as JSON; clicks nothing.
 fn overlay_from(config: &Config, path: &Path) -> Result<()> {
@@ -164,18 +176,16 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         snapshot.targets.len(),
         overlay.keyboard_mode()
     );
-    let cursor = || anyhow::bail!("no pointer when drawing from a file");
     match pick::pick(
         &mut overlay,
         config,
         &mut snapshot,
         pick::Start::default(),
-        &cursor,
+        &mut Saved,
         &mut Saved,
     )? {
         Pick::Target { index, act } => {
-            let (x, y) = (act.nudge.x, act.nudge.y);
-            eprintln!("wayhint: {} on, nudged {x},{y} px", act.action.name());
+            eprintln!("wayhint: {} on", act.action.name());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&snapshot.targets[index])?

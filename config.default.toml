@@ -57,8 +57,8 @@
 
 # Built in, unless chosen as the close key: Backspace takes back the last
 # key, Space acts at the pointer, Enter confirms a completed tag or text
-# match, Tab works in text mode, and the arrows move where a click lands,
-# held for faster.
+# match, Tab works in text mode, and the arrows move the pointer, held for
+# faster: Space or a verb typed twice acts where it is.
 
 # Other keys that type a tag letter, for a layer that sends a different
 # character from the same key: "key" = "letter".
@@ -87,8 +87,8 @@
 # case = "upper"            # the tags' letters: upper or lower; the keys are the same
 
 [style.leader]
-# The line from a tag to the dot where it clicks: shown when an arrow moves
-# a click, or when a tag had to move off its target to stay readable. Each
+# The line from a tag to the dot where it clicks: shown when a tag had to
+# move off its target to stay readable. Each
 # is drawn inside an outline, so it shows on light and dark windows alike.
 # Unset colours follow the tags: the line and dot take [style] text, the
 # outline takes [style] background.
@@ -163,7 +163,9 @@
 # Text mode is a run of its own, `wayhint --text`, on a compositor shortcut
 # beside plain `wayhint` for tags; launching one closes the other.
 # Typing finds text on screen from the start of a word, Enter acts on the
-# current match, Tab and the arrows move between matches. Targets with no
+# current match, Tab and Shift+Tab move between matches. The pointer goes
+# to the current match, the arrows move it from there, and Enter clicks
+# where it is; another match takes it again. Targets with no
 # text to type keep a tag. A verb goes first, before the text, and
 # Backspace with nothing typed takes it back; the close key leaves wayhint.
 # cursor = "center"         # start, center or end of the selected match
@@ -192,7 +194,7 @@
 
 [pointer]
 # after = "restore"         # the cursor goes back after a click; "leave" keeps it on the target
-# nudge = 10                # px one arrow press moves a click; held, it goes on, faster
+# nudge = 10                # px one arrow press moves the pointer; held, it goes on, faster
 # scroll = 5                # wheel notches one scroll_up or scroll_down turns
 # settle = 150              # ms the app gets to react to a click before the windows are read again; raise it for slow menus
 

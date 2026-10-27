@@ -9,10 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    action::{Act, Action, Mods},
-    geometry::Point,
-};
+use crate::action::{Act, Action, Mods};
 
 /// Labels for `count` targets from an alphabet of `size` letters.
 ///
@@ -131,8 +128,6 @@ pub enum Input {
     Verb(Action, Mods),
     /// `Space`: act where the pointer already is, no tag.
     Here(Mods),
-    /// An arrow: move where this command lands, by this many px.
-    Nudge(Point),
     /// The repeat key: the last command again, on the same target.
     Repeat,
     Backspace,
@@ -159,16 +154,14 @@ pub enum Step {
     Exit,
 }
 
-/// The labels on screen, the letters typed so far, the armed verb and the
-/// nudge.
+/// The labels on screen, the letters typed so far and the armed verb.
 ///
-/// A command is a tag or `Space`, with a verb and arrows anywhere before
-/// its last key: `k e h`, `e k h` and `e → k h` all double-click tag
-/// `eh`. Nothing ever waits on a timeout: a verb key is never a tag letter
+/// A command is a tag or `Space`, with a verb anywhere before its last
+/// key: `k e h` and `e k h` both double-click tag `eh`. Nothing ever waits on a timeout: a verb key is never a tag letter
 /// (the config takes verb keys out of the alphabet), and labels are
 /// prefix-free, so the last letter can act immediately. With autoaccept
-/// off, Enter confirms the completed tag. Arrows add up, and only
-/// this command lands where they moved it.
+/// off, Enter confirms the completed tag. Arrows are no input here: they
+/// move the pointer itself (`pick`), where `Space` acts.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
@@ -182,7 +175,6 @@ pub struct Selector {
     /// How many letters were typed when the verb was, so Backspace takes
     /// back whichever came last.
     armed_at: usize,
-    nudge: Point,
 }
 
 impl Selector {
@@ -195,7 +187,6 @@ impl Selector {
             armed: None,
             armed_shifted: false,
             armed_at: 0,
-            nudge: Point::default(),
         }
     }
 
@@ -218,12 +209,6 @@ impl Selector {
         self.armed
     }
 
-    /// How far the arrows have moved this command so far, for the dots
-    /// that show where it lands.
-    pub fn nudge(&self) -> Point {
-        self.nudge
-    }
-
     /// What a pick would do now, with `held` on its last key.
     ///
     /// `Option::unwrap_or` takes the armed verb if there is one; `Copy`
@@ -239,7 +224,6 @@ impl Selector {
                 shift: held.shift && !self.armed_shifted,
                 ..held
             },
-            nudge: self.nudge,
         }
     }
 
@@ -249,15 +233,14 @@ impl Selector {
         self.armed_shifted = false;
     }
 
-    /// Starts the next command: nothing typed, armed or nudged.
+    /// Starts the next command: nothing typed or armed.
     fn reset(&mut self) {
         self.typed.clear();
         self.disarm();
-        self.nudge = Point::default();
     }
 
-    /// The same command on `count` new targets: the verb, its Shift and the
-    /// arrows stay, the letters go. A block's tag opens into its lines this
+    /// The same command on `count` new targets: the verb and its Shift
+    /// stay, the letters go. A block's tag opens into its lines this
     /// way (`pick::pick`), and what was typed before it goes on to them.
     pub fn reopen(&mut self, count: usize, alphabet_size: usize) {
         self.labels = labels(count, alphabet_size);
@@ -360,8 +343,8 @@ impl Selector {
                 self.reset();
                 Step::Again(act)
             }
-            // Letters typed before a verb stay, as before an arrow: the verb
-            // says what, the letters and the nudge where. Another verb
+            // Letters typed before a verb stay: the verb says what, the
+            // letters where. Another verb
             // replaces the first, so a wrong one needs no Backspace.
             Input::Verb(action, held) => {
                 self.armed = Some(action);
@@ -374,19 +357,14 @@ impl Selector {
                 self.reset();
                 Step::Here(act)
             }
-            // Letters typed stay, so a tag half typed can still be moved.
-            Input::Nudge(by) => {
-                self.nudge = self.nudge.offset(by);
-                Step::Typing
-            }
-            // A whole command of its own, nudge included: whatever was
-            // typed before it is dropped, a verb and arrows too.
+            // A whole command of its own: whatever was typed before it is
+            // dropped, a verb too.
             Input::Repeat => {
                 self.reset();
                 Step::Repeat
             }
             // Backspace takes back the last letter or verb, whichever came
-            // last. The opposite arrow takes back a nudge.
+            // last.
             Input::Backspace => {
                 if self.armed.is_some() && self.armed_at == self.typed.len() {
                     self.disarm();
@@ -508,13 +486,9 @@ mod tests {
         Selector::new(5, 4, Action::Left)
     }
 
-    /// `action` with `mods` held, not nudged.
+    /// `action` with `mods` held.
     const fn act(action: Action, mods: Mods) -> Act {
-        Act {
-            action,
-            mods,
-            nudge: Point::new(0, 0),
-        }
+        Act { action, mods }
     }
 
     const fn picked(index: usize, action: Action) -> Step {
@@ -561,21 +535,15 @@ mod tests {
         assert_eq!(s.typed(), [0, 1]);
         assert_eq!(s.press(letter(2)), Step::Ignored, "no extra letters");
         s.press(verb(Action::Right));
-        s.press(Input::Nudge(Point::new(10, -10)));
         assert_eq!(
             s.press(Input::Confirm(CTRL)),
             Step::Picked {
                 index: 4,
-                act: Act {
-                    action: Action::Right,
-                    mods: CTRL,
-                    nudge: Point::new(10, -10),
-                },
+                act: act(Action::Right, CTRL),
             }
         );
         assert_eq!(s.typed(), [0; 0]);
         assert_eq!(s.armed(), None);
-        assert_eq!(s.nudge(), Point::default());
     }
 
     #[test]
@@ -674,12 +642,10 @@ mod tests {
     fn a_verb_typed_twice_acts_again_where_the_last_command_was() {
         let mut s = five();
         s.press(verb(Action::ScrollDown));
-        s.press(Input::Nudge(Point::new(0, 10)));
-        let again = Act {
-            nudge: Point::new(0, 10),
-            ..act(Action::ScrollDown, Mods::NONE)
-        };
-        assert_eq!(s.press(verb(Action::ScrollDown)), Step::Again(again));
+        assert_eq!(
+            s.press(verb(Action::ScrollDown)),
+            Step::Again(act(Action::ScrollDown, Mods::NONE))
+        );
         assert_eq!(s.armed(), None, "a whole command: nothing is left armed");
         s.press(verb(Action::ScrollDown));
         s.press(letter(0));
@@ -724,50 +690,6 @@ mod tests {
         assert_eq!(s.armed(), None);
     }
 
-    /// One arrow press of 14 px.
-    const RIGHT: Input = Input::Nudge(Point::new(14, 0));
-    const UP: Input = Input::Nudge(Point::new(0, -14));
-
-    #[test]
-    fn arrows_add_up_and_go_with_the_pick() {
-        let mut s = five();
-        s.press(RIGHT);
-        s.press(letter(0));
-        s.press(RIGHT);
-        s.press(UP);
-        assert_eq!(s.nudge(), Point::new(28, -14), "around a half-typed tag");
-        let Step::Picked { index: 4, act } = s.press(letter(1)) else {
-            panic!("as picks the fifth target");
-        };
-        assert_eq!(act.nudge, Point::new(28, -14));
-        assert_eq!(
-            s.nudge(),
-            Point::default(),
-            "the next command starts unmoved"
-        );
-    }
-
-    #[test]
-    fn a_verb_keeps_the_nudge_and_space_takes_it() {
-        let mut s = five();
-        s.press(UP);
-        s.press(verb(Action::Right));
-        let Step::Here(act) = s.press(Input::Here(Mods::NONE)) else {
-            panic!("Space acts");
-        };
-        assert_eq!((act.action, act.nudge), (Action::Right, Point::new(0, -14)));
-    }
-
-    #[test]
-    fn backspace_keeps_the_nudge_and_esc_leaves() {
-        let mut s = five();
-        s.press(RIGHT);
-        s.press(verb(Action::Hover));
-        s.press(Input::Backspace);
-        assert_eq!((s.armed(), s.nudge()), (None, Point::new(14, 0)));
-        assert_eq!(s.press(Input::Escape), Step::Exit, "with a nudge");
-    }
-
     #[test]
     fn modifiers_on_the_last_letter_go_with_the_pick() {
         let mut s = five();
@@ -809,12 +731,11 @@ mod tests {
     }
 
     #[test]
-    fn a_reopened_command_keeps_its_verb_shift_and_arrows() {
-        // A shifted verb and an arrow, then the block's letter: what `pick`
-        // keeps from before that letter and reopens on the block's lines.
+    fn a_reopened_command_keeps_its_verb_and_shift() {
+        // A shifted verb, then the block's letter: what `pick` keeps from
+        // before that letter and reopens on the block's lines.
         let mut s = five();
         s.press(Input::Verb(Action::Double, SHIFT));
-        s.press(Input::Nudge(Point::new(14, 0)));
         s.reopen(3, 5);
         assert_eq!(s.typed(), [0usize; 0]);
         assert_eq!(s.labels().len(), 3);
@@ -823,7 +744,6 @@ mod tests {
         };
         assert_eq!(act.action, Action::Double);
         assert!(!act.mods.shift, "the verb's Shift is still no Shift-click");
-        assert_eq!(act.nudge, Point::new(14, 0));
     }
 
     #[test]
@@ -831,10 +751,8 @@ mod tests {
         let mut s = five();
         s.press(verb(Action::Right));
         s.press(letter(0));
-        s.press(RIGHT);
         assert_eq!(s.press(Input::Repeat), Step::Repeat);
         assert_eq!((s.armed(), s.typed()), (None, &[][..]));
-        assert_eq!(s.nudge(), Point::default(), "the repeat brings its own");
     }
 
     #[test]
