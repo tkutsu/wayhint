@@ -139,7 +139,9 @@ struct WireWindow {
 
 #[derive(Deserialize)]
 struct WireWorkspace {
-    /// 0 for none: a monitor that shows no special workspace.
+    /// 0 for none: a monitor that shows no special workspace. Hyprland 0.57
+    /// leaves the field out then.
+    #[serde(default)]
     id: i64,
 }
 
@@ -679,6 +681,17 @@ mod tests {
                 "specialWorkspace":{"id":0,"name":""}}"#;
         let monitor: Monitor = serde_json::from_str::<WireMonitor>(json).unwrap().into();
         assert_eq!(monitor.rect, Rect::new(2560, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn hyprland_0_57_leaves_out_an_empty_special_workspace_id() {
+        let json = r#"{"id":0,"name":"WAYLAND-1","x":0,"y":0,"width":2560,"height":1402,
+                "scale":2,"transform":0,"focused":true,
+                "activeWorkspace":{"address":"1","id":1,"type":"normal","name":"1"},
+                "specialWorkspace":{"address":"","type":"","name":""}}"#;
+        let monitor = serde_json::from_str::<WireMonitor>(json).unwrap();
+        assert_eq!(monitor.active_workspace.id, 1);
+        assert_eq!(monitor.special_workspace.id, 0, "none open");
     }
 
     #[test]
