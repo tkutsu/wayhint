@@ -244,7 +244,7 @@ impl State {
     /// for the app. Every other key acts as it's let go, in the order the
     /// keys went down (`gate.rs`), except while typing (see
     /// [`Event::Typed`]).
-    fn key(&mut self, code: u32, pressed: bool) {
+    pub(super) fn key(&mut self, code: u32, pressed: bool) {
         let code = KeyCode::from_evdev(code);
         if pressed {
             self.seen.press(code);
@@ -263,12 +263,12 @@ impl State {
                 self.events.push_back(Event::Typed(key, self.held, typed));
                 // Held, an arrow moves the pointer in text mode too.
                 if code.is_arrow() {
-                    self.holds.press(key, self.held, Instant::now());
+                    self.holds.press(code, Instant::now());
                 }
             } else if code.is_arrow() {
                 self.gate.forget(code);
                 self.events.push_back(Event::Key(key, self.held));
-                self.holds.press(key, self.held, Instant::now());
+                self.holds.press(code, Instant::now());
             }
             return;
         }
@@ -277,7 +277,10 @@ impl State {
         {
             passthrough.release(code);
         }
-        self.holds.release(code);
+        if self.holds.release(code) {
+            self.events
+                .retain(|event| !matches!(event, Event::Held(..)));
+        }
         // Acting on release: press and release were both swallowed, so
         // nothing reaches the app once the grab ends. While typing, a key
         // found here went down before typing started (a typed key leaves

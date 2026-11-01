@@ -6,158 +6,169 @@
 [keys]
 # Keys use their positions in your keyboard's first layout.
 # The alphabet is ordered from easiest to press to hardest.
-# alphabet = "asdfghjkl"
-# default_action = "left"   # action for a bare tag or Space
+# alphabet = "asdfghjkl"  # Hint letters, ordered from easiest to hardest to press. Default: "asdfghjkl".
+# default_action = "left"  # Action for a bare tag or Enter with nothing typed. Default: "left".
 # Shortcut values are a key or false (disabled). Omit to use the default.
 # Verbs, repeat and help accept capitals, symbols or named keys. Shift belongs to the key.
-# left = false
-# right = ","
-# middle = "/"
-# double = "."
-# hover = "'"
-# back = "Home"
-# forward = "End"
-# scroll_up = "PageUp"
-# scroll_down = "PageDown"
-# hold = ";"               # the next tag or Space releases on that target
-# repeat = false           # repeat the last command on its target
-# help = "?"
-# close = "Esc"            # cannot be disabled; can override a built-in key
+# Space is available as a named key, for example: hover = "Space".
+# left = false  # Left-click shortcut; false disables this shortcut. Default: false.
+# right = ","  # Right-click shortcut. Default: ",".
+# middle = "/"  # Middle-click shortcut. Default: "/".
+# double = "."  # Double-click shortcut. Default: ".".
+# hover = "'"  # Move to a target without clicking. Default: "'".
+# back = "Home"  # Mouse back-button shortcut. Default: "Home".
+# forward = "End"  # Mouse forward-button shortcut. Default: "End".
+# scroll_up = "PageUp"  # Scroll the focused window up immediately by pointer.scroll_steps notches. Default: "PageUp".
+# scroll_down = "PageDown"  # Scroll the focused window down immediately by pointer.scroll_steps notches. Default: "PageDown".
+# hold = ";"  # Hold the mouse button; the next tag or Enter releases it on that target. Default: ";".
+# repeat = false  # Repeat the last command on its target; false disables the shortcut. Default: false.
+# help = "?"  # Show available keys and their actions. Default: "?".
+# close = "Esc"  # Exit Wayhint; cannot be disabled and can override a built-in key. Default: "Esc".
 
-# Optional alternate keys for tag letters: "key" = "letter".
+# Optional alternate keys for tag letters: "key" = "letter". Default: no aliases.
 # [keys.aliases]
-# ";" = "c"
+# ";" = "c"  # Example: use ; as an alternate key for c. Default: no aliases.
 
 [hints]
-# auto_accept = true       # false waits for Enter after a completed tag
-# window_hint = true       # focus each window; top-right label, no arrow, hidden with any verb
-# font = "sans-serif:bold" # fontconfig pattern
-# size = 13
-# text = "#ffffffff"
-# text_end = "#ffffffff"   # omit for solid text
-# text_direction = "right"
-# dimmed = "#ffffff66"     # typed letters
-# verb = "#fab387ff"
-# background = "#1e1e2ef0"
-# background_end = "#1e1e2ef0" # omit for a solid background
-# background_direction = "right"
-# Gradients span each monitor. Directions: left, right, top, bottom, or a corner.
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]         # vertical, horizontal
-# position = "auto"        # beside the target, avoiding other controls
+# auto_accept = true  # Act as soon as a tag is complete; false waits for Enter. Default: true.
+# window_hint = true  # Add a window-focus tag without an arrow; hide it while a verb is armed. Default: true.
+# hide_hidden = true  # Omit fully transparent controls when the app reports opacity; keep unknowns. Default: true.
+# font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: "sans-serif:bold".
+# size = 13  # Font size in logical pixels. Default: 13.
+# gradient = "hint"  # Use hint for gradients inside each tag, or global across each monitor. Default: "hint".
+# text = "#000000ff"  # Text color. Default: "#000000ff".
+# text_end = "#000000ff"  # Text gradient end color; omit for solid text. Default: unset (solid hints.text).
+# text_direction = "right"  # Text gradient direction: left, right, top, bottom or a corner. Default: "right".
+# dimmed = "#00000066"  # Color of typed tag letters. Default: "#00000066".
+# verb = "#9a3412ff"  # Color of the armed verb or drop action. Default: "#9a3412ff".
+# background = "#ffffc2ff"  # Background fill color. Default: "#ffffc2ff".
+# background_end = "#f5e873ff"  # Background gradient end color; an explicit background alone is solid. Default: "#f5e873ff" (unset with an explicit hints.background).
+# An explicit background is solid unless background_end is also set.
+# background_direction = "bottom"  # Background gradient direction: left, right, top, bottom or a corner. Default: "bottom".
+# Directions: left, right, top, bottom, or a corner.
+# border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: "#85865bff".
+# shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: "#00000040".
+# border_width = 1  # Border width in logical pixels; 0 removes the border. Default: 1.
+# radius = 3  # Corner radius in logical pixels. Default: 3.
+# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: [1, 4].
+# position = "auto"  # Place tags beside targets with auto, or at center, an edge or a corner. Default: "auto".
+# max_cover = 50  # Maximum percent of a neighboring target or hint covered by a tag, from 0 to 100. Default: 50.
 # Other positions: center, top, bottom, left, right, or a corner such as top-left.
-# offset = [0, 0]          # right, down
-# case = "upper"           # upper or lower; does not change the keys
+# offset = [0, 0]  # Move tags from their anchor by [right, down] logical pixels. Default: [0, 0].
+# case = "upper"  # Display tag letters in upper or lower case; does not change their keys. Default: "upper".
 
 [hints.arrow]
-# color = "#ffffffff"      # follows hints.text
-# outline = "#1e1e2ef0"    # follows hints.background
-# length = 3              # 0 hides arrows
-# outline_width = 2        # 0 removes the outline
+# color = "#ffffc2ff"  # Arrow fill color; when unset, follows hints.background and its gradient. Default: inherit hints.background, including its gradient.
+# outline = "#85865bff"  # Arrow outline color; when unset, follows hints.border. Default: inherit hints.border.
+# length = 3  # Arrow length in logical pixels; 0 hides arrows. Default: 3.
+# outline_width = 1  # Arrow outline width in logical pixels; 0 removes the outline. Default: 1.
 
 [hints.pixels]
-# Pixel hints inherit [hints], with teal text unless a shared text gradient is set.
-# font = "sans-serif:bold"
-# size = 13
-# text = "#94e2d5ff"       # an explicit color replaces the shared text gradient
-# dimmed = "#ffffff66"
-# verb = "#fab387ff"
-# background = "#1e1e2ef0" # an explicit color replaces the shared background gradient
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]
+# Pixel hints inherit [hints], with dark teal text unless a text gradient is set.
+# font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: inherit hints.font.
+# size = 13  # Font size in logical pixels. Default: inherit hints.size.
+# text = "#155e63ff"  # Text color; setting it replaces the inherited gradient with a solid color. Default: dark teal (#155e63ff), or inherit hints.text when a text gradient is set.
+# dimmed = "#00000066"  # Color of typed tag letters. Default: inherit hints.dimmed.
+# verb = "#9a3412ff"  # Color of the armed verb or drop action. Default: inherit hints.verb.
+# background = "#ffffc2ff"  # Background color; setting it replaces the inherited gradient with a solid color. Default: inherit hints.background.
+# border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: inherit hints.border.
+# shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: inherit hints.shadow.
+# border_width = 1  # Border width in logical pixels; 0 removes the border. Default: inherit hints.border_width.
+# radius = 3  # Corner radius in logical pixels. Default: inherit hints.radius.
+# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
 
 [words]
-# cursor = "center"        # start, center or end of the selected match
-# auto_accept = false      # true acts on a unique match after 3 typed characters
-# fallback_hints = true    # tags for targets without searchable text
+# cursor = "center"  # Place the pointer at the start, center or end of the selected text match. Default: "center".
+# auto_accept = false  # Act on a unique text match after at least 3 typed characters. Default: false.
+# fallback_hints = true  # Show tags for targets without searchable text. Default: true.
+# icon_names = false  # Search icon buttons by their accessibility names. Default: false.
 
 [words.matches]
 # Match boxes inherit radius and padding from [hints].
-# background = "#ffff0080"
-# background_end = "#ffff0080" # omit for a solid background
-# background_direction = "right"
-# border = "#d0d0d0ff"
-# border_width = 0
-# radius = 4
-# padding = [2, 5]
+# background = "#ffff0080"  # Text-match background fill color. Default: "#ffff0080".
+# background_end = "#ffff0080"  # Match background gradient end color; omit for a solid fill. Default: unset (solid words.matches.background).
+# background_direction = "right"  # Match background gradient direction across each monitor. Default: "right".
+# border = "#85865bff"  # Match outline color; border_width controls whether it is drawn. Default: inherit hints.border.
+# border_width = 0  # Match outline width in logical pixels; 0 removes the outline. Default: 0.
+# radius = 3  # Match corner radius in logical pixels. Default: inherit hints.radius.
+# padding = [1, 4]  # Match padding in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
 
 [words.matches.current]
 # Inherits [words.matches], with an orange starting color.
 # An explicit background replaces the inherited gradient unless background_end is set.
-# background = "#ff963280"
-# background_end = "#ff963280"
-# background_direction = "right"
-# border = "#d0d0d0ff"
-# border_width = 0
-# radius = 4
-# padding = [2, 5]
+# background = "#ff963280"  # Selected text-match background fill color. Default: "#ff963280".
+# background_end = "#ff963280"  # Selected match background gradient end color; omit for a solid fill. Default: inherit words.matches.background_end unless current.background is set.
+# background_direction = "right"  # Selected match background gradient direction across each monitor. Default: inherit words.matches.background_direction.
+# border = "#85865bff"  # Selected match outline color; border_width controls whether it is drawn. Default: inherit words.matches.border.
+# border_width = 0  # Selected match outline width in logical pixels; 0 removes the outline. Default: inherit words.matches.border_width.
+# radius = 3  # Selected match corner radius in logical pixels. Default: inherit words.matches.radius.
+# padding = [1, 4]  # Selected match padding in logical pixels: [vertical, horizontal]. Default: inherit words.matches.padding.
 
 [words.first_character]
 # First letters are marked while no query is typed.
-# mark = "off"             # off, underline, box or dot
-# color = "#89b4faff"       # fill for every shape; use alpha for a translucent box
-# color_end = "#89b4faff"   # omit for a solid fill
-# direction = "right"      # gradient direction across each monitor
-# thickness = 2            # underline height or dot diameter; dot sits 1 px below
+# mark = "off"  # Mark word initials while the query is empty: off, underline, box or dot. Default: "off".
+# color = "#89b4faff"  # Fill color shared by underline, box and dot marks. Default: "#89b4faff".
+# color_end = "#89b4faff"  # Fill gradient end color; omit for a solid fill. Default: unset (solid words.first_character.color).
+# direction = "right"  # Fill gradient direction across each monitor. Default: "right".
+# thickness = 2  # Underline height or dot diameter in logical pixels; dots sit 1 px below. Default: 2.
 # These fields apply only to boxes:
-# border = "#89b4faff"
-# border_width = 0
-# radius = 2
-# padding = [0, 1]
+# border = "#89b4faff"  # Box outline color; applies only when mark is box. Default: "#89b4faff".
+# border_width = 0  # Box outline width in logical pixels; 0 removes it. Default: 0.
+# radius = 2  # Box corner radius in logical pixels. Default: 2.
+# padding = [0, 1]  # Box padding in logical pixels: [vertical, horizontal]. Default: [0, 1].
 
 [input]
 # The input box inherits its appearance from [hints], with its own screen position.
-# visible = true           # false hides it; a listening bar still receives updates
-# show_typed_hints = true  # show typed tag letters here and remove them from tags
-# placeholder = "text"
-# prefix = ""
-# suffix = ""
-# font = "sans-serif:bold"
-# size = 13
-# text = "#ffffffff"
-# dimmed = "#ffffff66"     # placeholder color
-# verb = "#fab387ff"
-# background = "#1e1e2ef0"
-# border = "#d0d0d0ff"
-# border_width = 1
-# radius = 4
-# padding = [2, 5]
-# position = "bottom"      # screen position; same choices as hints, except auto
-# offset = [0, -48]
+# visible = true  # Draw the input box; false still sends updates to a listening bar. Default: true.
+# show_typed_hints = true  # Show typed tag letters here and remove them from the tags. Default: true.
+# placeholder = "text"  # Text shown while the query is empty; an empty string hides the idle input. Default: "text".
+# prefix = ""  # Text before the query, such as "find: ". Default: "".
+# suffix = ""  # Text after the query and before the match count. Default: "".
+# font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: inherit hints.font.
+# size = 13  # Font size in logical pixels. Default: inherit hints.size.
+# text = "#000000ff"  # Text color. Default: inherit hints.text.
+# dimmed = "#00000066"  # Placeholder and dimmed-text color. Default: inherit hints.dimmed.
+# verb = "#9a3412ff"  # Color of the armed verb or drop action. Default: inherit hints.verb.
+# background = "#ffffc2ff"  # Background fill color. Default: inherit hints.background.
+# border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: inherit hints.border.
+# shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: inherit hints.shadow.
+# border_width = 1  # Border width in logical pixels; 0 removes the border. Default: inherit hints.border_width.
+# radius = 3  # Corner radius in logical pixels. Default: inherit hints.radius.
+# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
+# position = "bottom"  # Screen anchor: center, an edge or a corner; auto is unavailable. Default: "bottom".
+# offset = [0, -48]  # Move the input from its anchor by [right, down] logical pixels. Default: [0, -48].
 
 [messages]
 # Status messages appear below the input. Visibility is independent of [input].
-# visible = true           # false hides them; a listening bar still receives updates
-# scanning = true
-# no_targets = true
-# no_match = true
-# duration_ms = 2000
-# icon_font = "Symbols Nerd Font"
-# scanning_icon = "\uF002" # use "" for no icon
-# scanning_color = "#89b4faff"
-# no_targets_icon = "\uF05E"
-# no_targets_color = "#f9e2afff"
-# no_match_icon = "\uF057"
-# no_match_color = "#f38ba8ff"
-# help_icon = "\uF11C"
-# help_color = "#b4befeff"
+# visible = true  # Draw status messages; false still sends updates to a listening bar. Default: true.
+# scanning = true  # Show a scanning message when a scan takes over half a second. Default: true.
+# no_targets = true  # Show a message when no targets are available on the monitor. Default: true.
+# no_match = true  # Show a message when a tag key or query matches nothing. Default: true.
+# duration_ms = 2000  # Status-message lifetime in milliseconds. Default: 2000.
+# icon_font = "Symbols Nerd Font"  # Fontconfig pattern used for message icons. Default: "Symbols Nerd Font".
+# scanning_icon = "\uF002"  # Scanning icon; use an empty string for no icon. Default: "\uF002".
+# scanning_color = "#89b4faff"  # Scanning-message color. Default: "#89b4faff".
+# no_targets_icon = "\uF05E"  # No-targets icon; use an empty string for no icon. Default: "\uF05E".
+# no_targets_color = "#f9e2afff"  # No-targets-message color. Default: "#f9e2afff".
+# no_match_icon = "\uF057"  # No-match icon; use an empty string for no icon. Default: "\uF057".
+# no_match_color = "#f38ba8ff"  # No-match-message color. Default: "#f38ba8ff".
+# help_icon = "\uF11C"  # Help icon; use an empty string for no icon. Default: "\uF11C".
+# help_color = "#b4befeff"  # Help-message color. Default: "#b4befeff".
 
 [pointer]
-# after = "leave"          # restore returns the pointer after a click
-# nudge_px = 10            # distance per arrow press; holding accelerates
-# scroll_steps = 5         # wheel notches per scroll action
-# settle_ms = 150          # wait after acting before reading windows again
+# restore_on_action = false  # Return to the pre-command position after an action, except hover; a hold restores after release. Default: false.
+# restore_on_exit = true  # Return the pointer to its launch position when Wayhint exits. Default: true.
+# move_on_select = false  # Move the cursor when the current text match changes; false moves only when acting. Default: false.
+# nudge_px = 10  # Logical pixels moved per arrow press; holding an arrow accelerates. Default: 10.
+# scroll_steps = 5  # Wheel notches per scroll_up or scroll_down action. Default: 5.
+# settle_ms = 150  # Wait this many milliseconds after acting before reading windows again. Default: 150.
 
 [pixels]
-# detector = "full"        # full, fast (for slower CPUs), or off
-# terminal_hint = false    # terminal cursor/fallback tag, independent of window hints and detector
-# terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]
+# detector = "full"  # Pixel detection: full, fast for slower CPUs, or off. Default: "full".
+# terminal_hint = false  # Add a terminal cursor or fallback tag, independently of window hints and detector. Default: false.
+# terminal_processes = ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"]  # Terminal process names; replaces the built-in list, and [] disables detection. Default: ["kitty", "foot", "footclient", "alacritty", "ghostty", "com.mitchellh.ghostty", "wezterm", "wezterm-gui", "org.wezfurlong.wezterm", "xterm"].
 # Setting terminal_processes replaces the list; [] disables terminal detection.
 
 [scan]
-# refresh_ms = 500         # doubles up to 2 s when idle; 0 scans only after actions
-# merge_distance_px = 0    # 0 keeps every hint; otherwise merge nearby centers
+# refresh_ms = 500  # Rescan interval in milliseconds; doubles up to 2 s when idle; 0 scans only after actions. Default: 500.
+# merge_distance_px = 0  # Merge nearby hint centers within this many logical pixels; 0 keeps every hint. Default: 0.

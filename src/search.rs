@@ -6,24 +6,26 @@
 //! ```text
 //! wayhint -> text read -> keys: query edits, Tab, arrows
 //!                                |
-//!                 a new current match: the pointer goes to it
-//!                 an arrow: moves the pointer from there
+//!                 a new current match: the pointer goes to it if
+//!                   [pointer] move_on_select is true
+//!                 an arrow: selects the nearest match in that direction,
+//!                   or moves the pointer with no query or no match
 //!                 nothing typed or armed: Enter acts at the pointer, the
 //!                   help key lists the keys, and the windows are scanned
 //!                   again every [scan] refresh_ms
 //!                 Backspace with nothing typed: takes back a verb
 //!                 close key: leave wayhint, or let go of a hold
 //!                 a verb key before any text (a capital or a symbol), or
-//!                   a named one any time: armed
-//!                 Enter: the armed verb (or the default) on the current match,
-//!                        where the pointer is if the arrows moved it
+//!                   a named one any time: armed; a leading symbol also
+//!                   matches literally, with the default action
+//!                 Enter: the armed verb (or the default) on the current match
 //!                 one match left (with [words] auto_accept): as Enter
 //!                 a whole tag typed (with [words] fallback_hints): its target, as a tag
 //!                 text that matches nothing: kept to edit, and named
 //! ```
 //!
 //! With `[words] fallback_hints`, the targets typing can't find keep a tag: those
-//! whose text wasn't read (an icon, a window read from pixels) or has no
+//! whose text wasn't read (an unnamed icon, a window read from pixels) or has no
 //! word. Their labels are ones no word on screen starts with, so a whole
 //! label is never a query, and what's typed is both until one of them
 //! wins ([`Hints`]).
@@ -49,11 +51,11 @@ use crate::{
     keys::KeyCode,
     overlay::{Event, Frame, Highlight, Overlay, Tag},
     pick::{self, Mouse, Pick, Source},
-    selection::{self, Selector, Step, relabel_free},
+    selection::{self, Selector, relabel_free},
     snapshot::{Snapshot, Target},
     status::{Message, Status},
     style::{Input, Notice, StartMark},
-    text::{Check, Match, Place, Search, Span},
+    text::{Check, Place, Search, Span},
 };
 
 /// How many characters `[words] auto_accept` waits for before acting on
@@ -153,8 +155,7 @@ impl Hints {
     /// label starts no word, but what an alias or another layout types
     /// for it may: then it's text.
     fn typed(&self, pressed: &[Option<usize>], search: &Search) -> Option<usize> {
-        self.picked(pressed)
-            .filter(|_| !search.starts_a_word(search.query()))
+        self.picked(pressed).filter(|_| !search.has_query())
     }
 
     /// A completed hint acts on Enter, or while typing with autoaccept.
@@ -210,6 +211,8 @@ struct Typing {
     /// The verb typed so far, on a copy: a block opened here starts its
     /// lines' text mode from the pick's selector again.
     command: Selector,
+    /// The command before a leading symbol: literal matches ignore that verb.
+    literal: Option<Selector>,
     /// For each character of the query, the tag letter its key is, if any.
     pressed: Vec<Option<usize>>,
     /// The query changed since the matches were found.
@@ -220,30 +223,83 @@ struct Typing {
     help: bool,
     /// A hold keeps a button down: the input box says `drop`.
     holding: bool,
-    /// The match the pointer last went to (its text and where it starts)
-    /// and where, and whether the arrows moved it since.
+    /// The last followed match (its text and where it starts) and its
+    /// action point, and whether the arrows moved the pointer since.
     jumped: Option<((usize, u32), Point)>,
     aimed: bool,
 }
 
 impl Typing {
+    /// Arms a verb, retaining both readings of a leading symbol.
+    fn arm(&mut self, action: Action, mods: Mods, symbol: Option<char>) {
+        if let Some(symbol) = symbol {
+            self.literal = Some(self.command.clone());
+            self.search.push_verb(symbol);
+            self.stale = true;
+        } else if let Some(literal) = &mut self.literal {
+            literal.press(selection::Input::Verb(action, mods));
+        }
+        self.command.press(selection::Input::Verb(action, mods));
+    }
+
+    /// The selected match decides whether the leading symbol is a verb.
+    fn selected_command(&self) -> &Selector {
+        if !self.stale && self.search.current().is_some_and(|found| !found.verb) {
+            self.literal.as_ref().unwrap_or(&self.command)
+        } else {
+            &self.command
+        }
+    }
+
+    /// Removes the last character, restoring the command before a leading symbol.
+    fn backspace(&mut self) -> bool {
+        if self.search.pop() {
+            if self.search.query().is_empty()
+                && let Some(literal) = self.literal.take()
+            {
+                self.command = literal;
+            } else {
+                self.pressed.pop();
+            }
+            true
+        } else {
+            self.command.press(selection::Input::Backspace);
+            false
+        }
+    }
+
     /// Whether nothing is typed or armed: Enter acts at the pointer, the
     /// help key lists the keys, and the windows are scanned again.
     fn idle(&self) -> bool {
         self.search.query().is_empty() && self.command.armed().is_none()
     }
 
-    /// Another match is current: the pointer goes to it, and the arrows
-    /// start over from there. The same one, typed longer or shorter,
-    /// takes the pointer along only if the arrows haven't moved it.
-    fn follow(&mut self, mouse: &mut dyn Mouse, cursor: TextCursor) -> Result<()> {
+    /// Resolves queued edits before routing an arrow to matches or the pointer.
+    fn navigate(&mut self, direction: Point, shown: &Snapshot, source: &mut dyn Source) -> bool {
+        if self.stale {
+            find(&mut self.search, shown, source);
+            self.stale = false;
+        }
+        if !self.search.navigate(direction) {
+            return false;
+        }
+        if self.aimed {
+            self.jumped = None;
+            self.aimed = false;
+        }
+        true
+    }
+
+    /// Follow the current match, moving the pointer if configured. The
+    /// same match keeps any manual pointer aim until selection changes.
+    fn follow(&mut self, mouse: &mut dyn Mouse, shown: &Snapshot, config: &Config) -> Result<()> {
         if self.stale {
             return Ok(());
         }
         let Some(found) = self.search.current() else {
             return Ok(());
         };
-        let Some((_, at)) = spot(found, cursor) else {
+        let Some((_, at)) = spot(&self.search, shown, config.text_cursor) else {
             return Ok(());
         };
         let id = (found.span.text, found.span.start);
@@ -252,7 +308,9 @@ impl Typing {
             .jumped
             .is_some_and(|(was, point)| was == id && (aimed || point == at));
         if !keep {
-            mouse.move_to(at)?;
+            if config.move_on_select {
+                mouse.move_to(at)?;
+            }
             (self.jumped, self.aimed) = (Some((id, at)), false);
         }
         Ok(())
@@ -278,7 +336,7 @@ impl Typing {
                         && !self.holding
             })
             .collect();
-        let verb = self.command.armed().map(Action::name);
+        let verb = self.selected_command().armed().map(Action::name);
         let (search, input) = (Some(&self.search), &config.input);
         Frame {
             tags,
@@ -350,14 +408,14 @@ impl Typing {
 /// `selector` holds the verb from `--verb`, if any. A verb typed here
 /// comes first, before the text: a capital or a symbol, or a named key at
 /// any point. Lower-case letters and digits always go into the query.
+/// A leading symbol also stays in the query: literal matches ignore its verb.
 /// While a hold keeps a button down (`holding`), the close key lets go
 /// where it is. A refresh may change `shown`, which ends as the snapshot
 /// the pick was made in.
 ///
 /// The pointer goes to the current match each time another one becomes
-/// current, a typed character, a label or Tab away, and the arrows move it
-/// from there, held for faster. Enter then clicks where they took it; a
-/// new current match takes the pointer again and starts their count over.
+/// current, a typed character, a label, Tab or an arrow away. With no query,
+/// just a verb or no match, arrows move the pointer, faster when held.
 pub fn search(
     overlay: &mut Overlay,
     shown: &mut Snapshot,
@@ -396,6 +454,7 @@ fn keys(
         hints: Hints::new(&search, shown, config),
         search,
         command: selector.clone(),
+        literal: None,
         pressed: Vec::new(),
         stale: false,
         missed: None,
@@ -437,7 +496,7 @@ fn keys(
             }
             continue;
         };
-        let (key, mods, typed, ticks) = match event {
+        let (key, mods, typed) = match event {
             Event::Escape => (
                 crate::keys::Key {
                     code: KeyCode::ESC,
@@ -445,12 +504,27 @@ fn keys(
                 },
                 Mods::NONE,
                 None,
-                0,
             ),
-            Event::Typed(key, mods, typed) => (key, mods, typed, 0),
+            Event::Typed(key, mods, typed) => (key, mods, typed),
             // Enter, on its release.
-            Event::Key(key, mods) => (key, mods, None, 0),
-            Event::Held(key, mods, ticks) => (key, mods, None, ticks),
+            Event::Key(key, mods) => (key, mods, None),
+            Event::Held(direction, ticks) => {
+                let stale = now.stale;
+                let matched = now.navigate(direction, shown, source);
+                if matched {
+                    now.follow(mouse, shown, config)?;
+                } else {
+                    mouse.move_by(
+                        pick::held_arrow(direction, ticks, config),
+                        &mut overlay.motion(),
+                    )?;
+                    now.aimed = true;
+                }
+                if matched || stale {
+                    overlay.update(&now.draw(shown, config))?;
+                }
+                continue;
+            }
             Event::Interrupted | Event::Closed | Event::KeyboardLost => {
                 return Ok(Pick::Leave);
             }
@@ -460,12 +534,24 @@ fn keys(
         if config.verbs.is_close(key) {
             return Ok(if holding { Pick::Release } else { Pick::Leave });
         }
-        if let Some(by) = pick::arrow(key.code, ticks, config) {
-            mouse.move_by(by)?;
-            now.aimed = true;
+        if let Some(by) = pick::arrow(key.code, config) {
+            let stale = now.stale;
+            let matched = now.navigate(by, shown, source);
+            if matched {
+                now.follow(mouse, shown, config)?;
+            } else {
+                mouse.move_by(by, &mut overlay.motion())?;
+                now.aimed = true;
+            }
+            if matched || stale {
+                overlay.update(&now.draw(shown, config))?;
+            }
             continue;
         }
         let letter = config.alphabet.index_of(key.code);
+        if config.verbs.is_repeat(key) && now.search.query().is_empty() {
+            return Ok(Pick::Repeat);
+        }
         let action = config.verbs.action_of(key);
         let help = config.verbs.is_help(key);
         // A key that types nothing and means nothing here (a modifier on
@@ -481,70 +567,74 @@ fn keys(
             continue;
         }
         now.help = false;
-        // A verb: a named key (PageDown) any time; a character only before
-        // any text, and only one that's no lower-case letter or digit (`,`,
-        // `A`), which costs just the searches that start with it. Typed
-        // twice, it's done again where the last command was.
+        // Named keys and capitals arm a verb. A leading symbol also stays
+        // searchable: the chosen match decides which reading applies.
+        let mut symbol = false;
         if let Some(action) = action
             && (crate::keys::name_of(key.code).is_some()
                 || now.search.query().is_empty()
                     && typed.is_some_and(|c| c.is_uppercase() || !c.is_alphanumeric()))
         {
-            if action.scrolls() {
+            let prefix = typed.filter(|c| {
+                !c.is_alphanumeric()
+                    && !c.is_whitespace()
+                    && !c.is_control()
+                    && !mods.ctrl
+                    && !mods.alt
+                    && crate::keys::name_of(key.code).is_none()
+            });
+            if action.scrolls() && prefix.is_none() {
                 return Ok(Pick::Scroll {
                     act: Act { action, mods },
                 });
             }
-            if let Step::Again(act) = now.command.press(selection::Input::Verb(action, mods)) {
-                return Ok(Pick::Again { act });
+            now.arm(action, mods, prefix);
+            symbol = prefix.is_some();
+            if !symbol {
+                overlay.update(&now.draw(shown, config))?;
+                continue;
             }
-            overlay.update(&now.draw(shown, config))?;
-            continue;
         }
-        let edit = match key.code {
-            // Backspace takes back the last character; with nothing
-            // typed, the verb.
-            KeyCode::BACKSPACE => {
-                if now.search.pop() {
-                    now.pressed.pop();
-                    true
-                } else {
-                    now.command.press(selection::Input::Backspace);
-                    false
-                }
+        let edit = if symbol {
+            true
+        } else {
+            match key.code {
+                // Backspace takes back the last character; with nothing
+                // typed, the verb.
+                KeyCode::BACKSPACE => now.backspace(),
+                KeyCode::ENTER | KeyCode::TAB => false,
+                // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
+                // tag, as a Ctrl- or Alt-click, as with the tags.
+                _ => match typed {
+                    Some(c) if !mods.ctrl && !mods.alt => {
+                        now.search.push(c);
+                        now.pressed.push(letter);
+                        true
+                    }
+                    _ if mods.ctrl || mods.alt => {
+                        let last = [now.pressed.as_slice(), &[letter]].concat();
+                        let Some(index) = now.hints.picked(&last) else {
+                            continue;
+                        };
+                        if !pick::available(&shown.targets[index], &now.command, holding) {
+                            continue;
+                        }
+                        if config.hint_auto_accept {
+                            return Ok(Pick::Target {
+                                index,
+                                act: now.command.act(mods),
+                            });
+                        }
+                        // Ctrl/Alt may type no character. Keep the tag's
+                        // letter so it can be edited or confirmed later.
+                        let Some(letter) = letter else { continue };
+                        now.search.push(config.alphabet.letters()[letter].label);
+                        now.pressed.push(Some(letter));
+                        true
+                    }
+                    _ => continue,
+                },
             }
-            KeyCode::ENTER | KeyCode::TAB => false,
-            // Ctrl and Alt type nothing, AltGr isn't Alt; but they end a
-            // tag, as a Ctrl- or Alt-click, as with the tags.
-            _ => match typed {
-                Some(c) if !mods.ctrl && !mods.alt => {
-                    now.search.push(c);
-                    now.pressed.push(letter);
-                    true
-                }
-                _ if mods.ctrl || mods.alt => {
-                    let last = [now.pressed.as_slice(), &[letter]].concat();
-                    let Some(index) = now.hints.picked(&last) else {
-                        continue;
-                    };
-                    if !pick::available(&shown.targets[index], &now.command, holding) {
-                        continue;
-                    }
-                    if config.hint_auto_accept {
-                        return Ok(Pick::Target {
-                            index,
-                            act: now.command.act(mods),
-                        });
-                    }
-                    // Ctrl/Alt may type no character. Keep the tag's
-                    // letter so it can be edited or confirmed later.
-                    let Some(letter) = letter else { continue };
-                    now.search.push(config.alphabet.letters()[letter].label);
-                    now.pressed.push(Some(letter));
-                    true
-                }
-                _ => continue,
-            },
         };
         now.stale |= edit;
         if edit
@@ -585,7 +675,7 @@ fn keys(
                 && let Some(chosen) = choose(
                     &now.search,
                     shown,
-                    now.command.act(Mods::NONE),
+                    now.selected_command().act(Mods::NONE),
                     cursor,
                     false,
                 )
@@ -605,12 +695,12 @@ fn keys(
                         act: now.command.act(mods),
                     });
                 }
-                // Nothing typed: at the pointer, as `Space` is with the tags.
-                if now.search.query().is_empty() {
+                // Nothing typed: at the pointer, as Enter is with the tags.
+                if now.search.verb_query().is_empty() && now.search.current().is_none() {
                     let act = now.command.act(mods);
                     return Ok(Pick::Here { act });
                 }
-                let act = now.command.act(mods);
+                let act = now.selected_command().act(mods);
                 if let Some(chosen) = choose(&now.search, shown, act, cursor, now.aimed) {
                     return Ok(Pick::Text(Box::new(chosen)));
                 }
@@ -619,7 +709,7 @@ fn keys(
             KeyCode::TAB => now.search.previous(),
             _ => {}
         }
-        now.follow(mouse, cursor)?;
+        now.follow(mouse, shown, config)?;
         overlay.update(&now.draw(shown, config))?;
     }
 }
@@ -627,7 +717,12 @@ fn keys(
 /// Whether the query is long enough, `UNIQUE` characters, and has just one
 /// match.
 fn unique(search: &Search) -> bool {
-    search.query().chars().count() >= UNIQUE && search.matches().len() == 1
+    let query = if search.current().is_some_and(|found| found.verb) {
+        search.verb_query()
+    } else {
+        search.query()
+    };
+    query.chars().count() >= UNIQUE && search.matches().len() == 1
 }
 
 /// The windows' texts, and with `[words.first_character]`, where each word's first
@@ -663,9 +758,15 @@ fn find(search: &mut Search, shown: &Snapshot, source: &mut dyn Source) {
     search.update(&|window, at| source.shows(shown, window, at));
 }
 
-/// Where a click on `found` goes, at `cursor` on its first line (its last
-/// for `End`), and that line's box.
-fn spot(found: &Match, cursor: TextCursor) -> Option<(Rect, Point)> {
+/// The current match's box and click point: a named button's center, or
+/// `cursor` on a text's first line (its last for `End`).
+fn spot(search: &Search, shown: &Snapshot, cursor: TextCursor) -> Option<(Rect, Point)> {
+    let found = search.current()?;
+    let text = &search.texts()[found.span.text];
+    let cursor = match text.place {
+        Place::Object(index) if shown.texts[index].button.is_some() => TextCursor::Center,
+        _ => cursor,
+    };
     let part = match cursor {
         TextCursor::Start | TextCursor::Center => found.parts[0],
         TextCursor::End => *found.parts.last()?,
@@ -689,7 +790,7 @@ fn choose(
 ) -> Option<Chosen> {
     let found = search.current()?;
     let text = &search.texts()[found.span.text];
-    let (part, hit) = spot(found, cursor)?;
+    let (part, hit) = spot(search, shown, cursor)?;
     // The character before the match too, where it was read: one typed
     // there since would leave the match inside a word.
     let (start, end) = (found.span.start, found.span.end);
@@ -979,6 +1080,62 @@ mod tests {
     }
 
     #[test]
+    fn an_icon_name_selects_and_acts_on_the_icon() {
+        use crate::{
+            desktop::tree::ObjectId,
+            snapshot::{Button, TextSource},
+        };
+
+        let object = ObjectId {
+            bus: ":1.42".into(),
+            path: "/settings".into(),
+        };
+        let rect = Rect::new(10, 20, 24, 24);
+        let mut shown = Snapshot::build(1, 0, std::iter::empty());
+        shown.texts.push(TextSource {
+            object: object.clone(),
+            window: 0,
+            role: "button".into(),
+            editable: false,
+            named: true,
+            area: rect,
+            clips: vec![],
+            owner: Some(object.clone()),
+            button: Some(Button { rect, letters: 8 }),
+            menu: None,
+        });
+        let mut found = Search::new(vec![Text {
+            place: Place::Object(0),
+            window: 0,
+            name: "Settings".into(),
+            rect,
+            area: rect,
+            start: 0,
+            content: "Settings".into(),
+        }]);
+        "set".chars().for_each(|c| found.push(c));
+        let wanted = found.wanted();
+        found.located(&wanted, vec![vec![rect]]);
+        found.update(&|_, _| true);
+        let act = Act {
+            action: Action::Right,
+            mods: Mods::NONE,
+        };
+        for cursor in [TextCursor::Start, TextCursor::Center, TextCursor::End] {
+            let chosen = choose(&found, &shown, act, cursor, false).expect("an icon name match");
+            assert_eq!(chosen.target.object, Some(object.clone()));
+            assert_eq!(chosen.target.visible, rect, "highlight the icon's box");
+            assert_eq!(chosen.target.hit, rect.center(), "act on the icon's center");
+            assert_eq!(chosen.target.name, "Settings", "recheck the icon's name");
+            assert_eq!(chosen.act, act);
+            assert!(
+                chosen.check.is_none(),
+                "no hidden character range to select or recheck"
+            );
+        }
+    }
+
+    #[test]
     fn text_cursor_uses_visible_line_edges_and_keeps_the_recheck() {
         use crate::{desktop::tree::ObjectId, snapshot::TextSource};
 
@@ -1117,6 +1274,264 @@ mod tests {
         Config::parse(&format!("[keys]\nalphabet = \"asdf\"\n{text}"), &layout).unwrap()
     }
 
+    fn typing(label: &str, default: Action) -> (Snapshot, Typing) {
+        let (shown, found) = buttons(label);
+        let mut texts = found.texts().to_vec();
+        texts[0].rect.w = 300;
+        let search = Search::new(texts);
+        let config = config("");
+        let now = Typing {
+            hints: Hints::new(&search, &shown, &config),
+            search,
+            command: Selector::new(shown.targets.len(), config.alphabet.len(), default),
+            literal: None,
+            pressed: Vec::new(),
+            stale: false,
+            missed: None,
+            help: false,
+            holding: false,
+            jumped: None,
+            aimed: false,
+        };
+        (shown, now)
+    }
+
+    #[test]
+    fn arrows_select_pending_matches_and_move_the_pointer_only_when_enabled() -> Result<()> {
+        struct Located;
+        impl Source for Located {
+            fn rescan(&mut self, _: &mut dyn FnMut()) -> Result<Option<Snapshot>> {
+                unreachable!()
+            }
+            fn keep(&self, _: &mut Snapshot) {
+                unreachable!()
+            }
+            fn read_text(&mut self, _: &Snapshot) -> Vec<Text> {
+                unreachable!()
+            }
+            fn locate(&mut self, _: &Snapshot, texts: &[Text], spans: &[Span]) -> Vec<Vec<Rect>> {
+                spans
+                    .iter()
+                    .map(|span| {
+                        let x = i32::try_from(span.start).unwrap() * 10;
+                        let w = i32::try_from(span.end - span.start).unwrap() * 10;
+                        vec![Rect::new(x, texts[span.text].rect.y, w, 20)]
+                    })
+                    .collect()
+            }
+            fn shows(&self, _: &Snapshot, _: usize, _: Point) -> bool {
+                true
+            }
+        }
+        #[derive(Default)]
+        struct Pointer(Vec<Point>);
+        impl Mouse for Pointer {
+            fn move_by(&mut self, _: Point, _: &mut dyn FnMut() -> Result<bool>) -> Result<()> {
+                unreachable!("matched arrows select a match instead of nudging")
+            }
+            fn move_to(&mut self, at: Point) -> Result<()> {
+                self.0.push(at);
+                Ok(())
+            }
+        }
+        for enabled in [false, true] {
+            let mut config = config("");
+            config.move_on_select = enabled;
+            config.text_cursor = TextCursor::End;
+            let (shown, mut now) = typing("contact control", Action::Left);
+            let mut source = Located;
+            let right = Point::new(10, 0);
+            assert!(!now.navigate(right, &shown, &mut source), "empty input");
+            now.arm(Action::Right, Mods::NONE, None);
+            assert!(!now.navigate(right, &shown, &mut source), "a verb alone");
+
+            now.search.push('c');
+            now.stale = true;
+            now.aimed = true;
+            assert!(now.navigate(right, &shown, &mut source));
+            assert!(!now.stale && !now.aimed);
+            assert_eq!(now.search.position(), (2, 2), "resolve before navigating");
+            let mut pointer = Pointer::default();
+            now.follow(&mut pointer, &shown, &config)?;
+            if enabled {
+                assert_eq!(pointer.0, [Point::new(89, 10)], "honor cursor placement");
+            } else {
+                assert!(pointer.0.is_empty(), "selection leaves the cursor in place");
+            }
+            let chosen = choose(
+                &now.search,
+                &shown,
+                now.selected_command().act(Mods::NONE),
+                TextCursor::End,
+                now.aimed,
+            )
+            .unwrap();
+            assert_eq!(chosen.act.action, Action::Right, "keep the armed verb");
+            assert_eq!(
+                chosen.target.hit,
+                Point::new(89, 10),
+                "Enter acts on the selected match"
+            );
+            assert!(!chosen.aimed);
+
+            now.search.previous();
+            now.follow(&mut pointer, &shown, &config)?;
+            now.aimed = true;
+            now.follow(&mut pointer, &shown, &config)?;
+            assert!(now.aimed, "the same selection keeps manual aim");
+            now.search.next();
+            now.follow(&mut pointer, &shown, &config)?;
+            assert!(
+                !now.aimed,
+                "a new selection resets manual aim even without moving"
+            );
+            if enabled {
+                assert_eq!(
+                    pointer.0,
+                    [Point::new(89, 10), Point::new(9, 10), Point::new(89, 10)]
+                );
+            } else {
+                assert!(
+                    pointer.0.is_empty(),
+                    "Tab selection also leaves the cursor in place"
+                );
+            }
+
+            now.search.push('x');
+            now.stale = true;
+            assert!(
+                !now.navigate(right, &shown, &mut source),
+                "a pending miss moves the pointer"
+            );
+            assert!(now.backspace());
+            now.stale = true;
+            assert!(
+                now.navigate(right, &shown, &mut source),
+                "Backspace restores match navigation"
+            );
+            assert_eq!(now.search.position(), (2, 2));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_symbol_selects_literal_text_or_a_verb_target() {
+        for default in [Action::Left, Action::Right] {
+            let (shown, mut now) = typing("_hello.md hellooooo", default);
+            now.arm(Action::Hold, Mods::NONE, Some('_'));
+            typed(&mut now.search, "hello");
+            now.stale = false;
+            assert_eq!(now.search.matches().len(), 2);
+            assert_eq!(now.search.current().unwrap().span.start, 0);
+            let choose_current = |now: &Typing| {
+                choose(
+                    &now.search,
+                    &shown,
+                    now.selected_command().act(Mods {
+                        ctrl: true,
+                        alt: false,
+                    }),
+                    TextCursor::Center,
+                    true,
+                )
+                .unwrap()
+            };
+            let literal = choose_current(&now);
+            assert_eq!(literal.act.action, default);
+            assert!(literal.act.mods.ctrl && literal.aimed);
+            assert_eq!(literal.target.name, "_hello.md hellooooo");
+            assert!(
+                now.draw(&shown, &config(""))
+                    .status
+                    .line()
+                    .unwrap()
+                    .0
+                    .starts_with("_hello")
+            );
+            now.search.next();
+            assert_eq!(now.search.current().unwrap().span.start, 10);
+            assert_eq!(choose_current(&now).act.action, Action::Hold);
+            assert!(
+                now.draw(&shown, &config(""))
+                    .status
+                    .line()
+                    .unwrap()
+                    .0
+                    .starts_with("hold _hello")
+            );
+            now.search.previous();
+            assert_eq!(choose_current(&now).act.action, default);
+            assert!(
+                !unique(&now.search),
+                "both interpretations count for autoaccept"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_removes_the_query_then_its_symbol_and_tentative_verb() {
+        let (_, mut now) = typing("_hello.md hellooooo", Action::Left);
+        now.arm(Action::Hold, Mods::NONE, Some('_'));
+        typed(&mut now.search, "h");
+        now.pressed.push(Some(0));
+        assert!(now.backspace());
+        assert_eq!(now.search.query(), "_");
+        assert_eq!(now.pressed, []);
+        assert_eq!(now.command.armed(), Some(Action::Hold));
+        assert!(now.backspace());
+        assert!(now.idle());
+        assert_eq!(now.search.verb_query(), "");
+        assert!(now.literal.is_none());
+        typed(&mut now.search, "hello");
+        now.stale = false;
+        assert_eq!(now.search.matches().len(), 1);
+        assert_eq!(now.selected_command().act(Mods::NONE).action, Action::Left);
+    }
+
+    #[test]
+    fn a_named_verb_overrides_both_readings_of_a_symbol() {
+        let (_, mut now) = typing("_hello.md hellooooo", Action::Left);
+        now.arm(Action::Hold, Mods::NONE, Some('_'));
+        typed(&mut now.search, "hello");
+        now.stale = false;
+        now.arm(Action::Double, Mods::NONE, None);
+        assert_eq!(
+            now.selected_command().act(Mods::NONE).action,
+            Action::Double
+        );
+        now.search.next();
+        assert_eq!(
+            now.selected_command().act(Mods::NONE).action,
+            Action::Double
+        );
+    }
+
+    #[test]
+    fn either_symbol_reading_prevents_a_fallback_hint_from_winning() {
+        let hints = Hints(vec![(0, vec![0])]);
+        for label in ["_add", "add", "_add add"] {
+            let mut found = search(&[label]);
+            found.push_verb('_');
+            typed(&mut found, "a");
+            assert_eq!(hints.typed(&[Some(0)], &found), None, "{label}");
+        }
+        let mut found = search(&["save"]);
+        found.push_verb('_');
+        typed(&mut found, "a");
+        assert_eq!(hints.typed(&[Some(0)], &found), Some(0));
+    }
+
+    #[test]
+    fn autoaccept_counts_the_verb_targets_query_without_its_symbol() {
+        let mut found = search(&["hellooooo"]);
+        found.push_verb('_');
+        typed(&mut found, "he");
+        assert!(!unique(&found));
+        typed(&mut found, "l");
+        assert!(unique(&found));
+        assert!(found.current().unwrap().verb);
+    }
+
     #[test]
     fn text_mode_window_hints_hide_when_any_verb_is_armed() {
         let (mut shown, found) = buttons("Save");
@@ -1126,6 +1541,7 @@ mod tests {
             hints: Hints::new(&found, &shown, &config),
             search: found,
             command: Selector::new(shown.targets.len(), config.alphabet.len(), Action::Left),
+            literal: None,
             pressed: Vec::new(),
             stale: false,
             missed: None,

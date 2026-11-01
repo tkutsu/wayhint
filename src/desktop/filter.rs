@@ -107,6 +107,8 @@ pub enum Reason {
     /// Firefox gives its frame a `click` action.
     TheWindow,
     Disabled,
+    /// The component reports full transparency and `hide_hidden` is enabled.
+    Hidden,
     NoAction,
     /// The same control reported twice (a label inside a button).
     Duplicate,
@@ -197,8 +199,8 @@ const NAMED_ROLES: [&str; 15] = [
 /// Roles that show their name as letters or as an icon, which the tree
 /// can't tell apart: Dolphin's `home` crumb and its `Split` button read
 /// the same (2026-10-25). One is searched by its name when nothing inside
-/// it has text (GTK's and browsers' buttons have a label inside) and its
-/// picture shows letters (`pixels::shows_letters`, in `Desktop::layout`).
+/// it has text (GTK's and browsers' buttons have a label inside). A name
+/// match selects the button's box, including when it shows only an icon.
 const LETTERS_OR_ICON: [&str; 5] = [
     "button",
     "push button",
@@ -224,7 +226,7 @@ pub fn is_button(node: &Node) -> bool {
 /// it can show in: inside every scroll area above it, by `clip`'s rule
 /// without its size limit. One under a scroll area whose box didn't come
 /// is left out, as a candidate is. So is a button with text inside it, or
-/// with no name or box to check its picture by.
+/// with no name or box to match on.
 pub fn text_sources(tree: &Tree) -> Vec<(usize, Rect)> {
     let holds_text: BTreeSet<usize> = (0..tree.nodes.len())
         .filter(|&i| has_text(&tree.nodes[i]) && !is_button(&tree.nodes[i]))
@@ -300,6 +302,22 @@ impl Candidate<'_> {
         is_body(self.role(), self.node.states.editable)
     }
 
+    /// Repeated clickable rows keep their main action beside child controls.
+    fn shares_row_shape(&self, other: &Self) -> bool {
+        self.index != other.index
+            && !matches!(self.role(), "document web" | "internal frame")
+            && self.node.parent == other.node.parent
+            && self.role() == other.role()
+            && self.has_real_action()
+            && other.has_real_action()
+            && self.bounds.w > 2 * self.bounds.h
+            && (self.bounds.x - other.bounds.x).abs() <= 4
+            && (self.bounds.w - other.bounds.w).abs() <= 4
+            && (self.bounds.h - other.bounds.h).abs() <= 4
+            && (self.bounds.y - other.bounds.y).abs() >= self.bounds.h
+            && (self.bounds.y - other.bounds.y).abs() <= 2 * self.bounds.h
+    }
+
     /// Of two nested candidates with the same box, the higher rank stays:
     /// a control role beats a bare click action (YouTube's Create button
     /// inside an unnamed clickable section), which beats the rest; named
@@ -318,7 +336,7 @@ impl Candidate<'_> {
     }
 
     /// Rule 1's first pass: things that are never a target on their own.
-    fn first_pass(&self, window: Rect) -> Option<Reason> {
+    fn first_pass(&self, window: Rect, hide_hidden: bool) -> Option<Reason> {
         let b = self.bounds;
         let s = self.node.states;
         let editable_like = s.focusable && (s.editable || s.selectable);
@@ -330,6 +348,8 @@ impl Candidate<'_> {
             Some(Reason::TheWindow)
         } else if !s.enabled && !s.sensitive {
             Some(Reason::Disabled)
+        } else if hide_hidden && self.node.details.as_ref().is_some_and(|d| d.hidden) {
+            Some(Reason::Hidden)
         } else if !self.is_control() && !editable_like && !self.is_body()
             // Firefox gives a menu's separators a `click`.
             || self.role() == "separator"
@@ -343,7 +363,7 @@ impl Candidate<'_> {
 
 /// Runs every rule, in order. Each step only looks at what the steps before
 /// it kept.
-pub fn filter(tree: &Tree) -> Filtered {
+pub fn filter(tree: &Tree, hide_hidden: bool) -> Filtered {
     let mut out = Filtered::default();
 
     // Candidates the walk read in full. A candidate without details or a box
@@ -369,7 +389,7 @@ pub fn filter(tree: &Tree) -> Filtered {
     let mut kept: Vec<Candidate> = Vec::new();
     let mut disabled_controls: Vec<usize> = Vec::new();
     for c in candidates {
-        match c.first_pass(tree.window.rect) {
+        match c.first_pass(tree.window.rect, hide_hidden) {
             None => kept.push(c),
             Some(reason) => {
                 if reason == Reason::Disabled && c.is_control() {
@@ -385,12 +405,14 @@ pub fn filter(tree: &Tree) -> Filtered {
 
     // Step 2: wrappers. An unnamed container, or any document, with another
     // non-media target inside. A named one (a Sidebery tab row with its
-    // close button inside) is a target.
+    // close button inside) is a target. Repeated wide rows also keep their
+    // own click when the app leaves their accessibility names empty.
     let wrapper: Vec<bool> = kept
         .iter()
         .map(|c| {
             CONTAINER_ROLES.contains(&c.role())
                 && (!c.named() || matches!(c.role(), "document web" | "internal frame"))
+                && !kept.iter().any(|other| c.shares_row_shape(other))
                 && kept
                     .iter()
                     .any(|k| !k.is_media() && tree.is_inside(k.index, c.index))
@@ -587,6 +609,7 @@ mod tests {
                 details: Some(Details {
                     name: name.into(),
                     actions: actions.iter().map(|&a| a.into()).collect(),
+                    hidden: false,
                 }),
             });
             self.nodes.len() - 1
@@ -612,11 +635,11 @@ mod tests {
     }
 
     fn kept(tree: &Tree) -> Vec<usize> {
-        filter(tree).kept.iter().map(|k| k.node).collect()
+        filter(tree, true).kept.iter().map(|k| k.node).collect()
     }
 
     fn reason(tree: &Tree, node: usize) -> Option<Reason> {
-        filter(tree)
+        filter(tree, true)
             .dropped
             .iter()
             .find(|d| d.node == node)
@@ -801,6 +824,68 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_tab_rows_keep_their_hints_alongside_child_actions() {
+        let mut b = Builder::new();
+        let mut expected = Vec::new();
+        for y in [83, 112] {
+            let row = b.add(
+                Some(0),
+                "section",
+                "",
+                &["click"],
+                Rect::new(15, y, 246, 29),
+            );
+            b.add(
+                Some(row),
+                "section",
+                "",
+                &["clickAncestor"],
+                Rect::new(43, y + 7, 216, 15),
+            );
+            let close = b.add(
+                Some(row),
+                "section",
+                "",
+                &["click"],
+                Rect::new(234, y + 1, 26, 26),
+            );
+            expected.extend([row, close]);
+        }
+        assert_eq!(kept(&b.tree()), expected);
+    }
+
+    #[test]
+    fn hidden_controls_are_optional_and_uncertain_controls_are_kept() {
+        let mut b = Builder::new();
+        let transparent = b.add(
+            Some(0),
+            "button",
+            "Close",
+            &["click"],
+            Rect::new(10, 10, 20, 20),
+        );
+        b.nodes[transparent].details.as_mut().unwrap().hidden = true;
+        let uncertain = b.add(
+            Some(0),
+            "button",
+            "Other",
+            &["click"],
+            Rect::new(40, 10, 20, 20),
+        );
+        let tree = b.tree();
+        assert_eq!(kept(&tree), vec![uncertain]);
+        assert_eq!(reason(&tree, transparent), Some(Reason::Hidden));
+        assert_eq!(
+            filter(&tree, false)
+                .kept
+                .iter()
+                .map(|k| k.node)
+                .collect::<Vec<_>>(),
+            vec![transparent, uncertain]
+        );
+    }
+
+    #[test]
     fn image_inside_a_link_is_the_links() {
         let mut b = Builder::new();
         let link = b.add(
@@ -920,7 +1005,7 @@ mod tests {
             tree: Tree,
         }
         let tree = serde_json::from_str::<Raw>(raw).unwrap().tree;
-        filter(&tree)
+        filter(&tree, true)
             .kept
             .iter()
             .map(|k| tree.nodes[k.node].details.as_ref().unwrap().name.clone())
@@ -980,7 +1065,7 @@ mod tests {
             Rect::new(10, 300, 80, 40),
         );
         let tree = b.tree();
-        let out = filter(&tree);
+        let out = filter(&tree, true);
         assert_eq!(
             out.kept,
             vec![Kept {
@@ -1009,7 +1094,7 @@ mod tests {
             Rect::new(-200, 50, 202, 30),
         );
         let tree = b.tree();
-        let out = filter(&tree);
+        let out = filter(&tree, true);
         assert_eq!(
             out.kept,
             vec![Kept {

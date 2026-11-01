@@ -134,8 +134,17 @@ and control Kitty. See [Kitty's remote-control settings](https://sw.kovidgoyal.n
 Type the beginning of a visible word: `con` finds "contact" and "Control",
 while `save fi` continues into the next word. Case and accents are
 ignored, so `cafe` finds "Café". Spaces match whitespace and line breaks.
-Punctuation can start a query too, unless its first key is bound to a
-verb. The items of an open menu are searched by their names.
+Punctuation can start a query too. If the first symbol is also a verb,
+both interpretations stay available: with `_` bound to hold, `_hello`
+finds `_hello.md` for the default action and `hellooooo` for hold. Use
+`Tab` to choose, then `Enter` to act. Icon buttons are also searchable by
+their accessibility names. A name match highlights the button and acts
+at its center, even when the name is not drawn. By default,
+`[words] icon_names = false` searches a
+button's name only when its screenshot appears to show letters. Set
+`icon_names = true` to search names without a screenshot; hint placement
+and pixel target detection still use them. The items of an open menu are
+searched by their names.
 
 Matches get yellow boxes, with the current match in orange, and the
 pointer moves onto the current match. Text is read when a round starts,
@@ -145,9 +154,9 @@ skips the action if it changed.
 
 | Key | Action |
 |---|---|
-| `Enter` | Click where the pointer is: the current match, or where the arrows moved it. With nothing typed, click at the pointer. |
+| `Enter` | Act on the current match. With nothing typed, act at the pointer. |
 | `Tab`, `Shift+Tab` | Move between matches, taking the pointer along. |
-| Arrows | Move the pointer from the match; held, faster. Another match starts over. |
+| Arrows | Select the nearest match in that direction without wrapping. With nothing typed, just a verb, or no match, move the pointer. Hold to repeat. |
 | A complete hint | Act on a control without searchable text. |
 | `Backspace` | Edit the query; with it empty, cancel the armed verb. |
 | `Ctrl` or `Alt` held on `Enter` | Apply that modifier to the click. |
@@ -167,7 +176,7 @@ query: `.save Enter` double-clicks "save". Named keys work at any point.
 In hints-only mode, a verb can come anywhere before the hint's last letter.
 
 Verb bindings accept capitals such as `R`, symbols such as `,`, `.`, `"`
-and `_`, or named keys such as `Home` and `PageDown`. Lowercase letters
+and `_`, or named keys such as `Home`, `PageDown` and `Space`. Lowercase letters
 and digits are rejected. A capital leaves its lowercase letter to the
 hints. Repeat and help follow the same binding rules. Close can also use
 a lowercase letter. `default_action` chooses the action for a bare tag.
@@ -183,17 +192,33 @@ a lowercase letter. `default_action` chooses the action for a bare tag.
 | `PageUp`, `PageDown` | Immediately scroll the focused window up, down by five notches. |
 | `;` | Hold the left button; the next target releases it there to drag. |
 
-Scroll keys act immediately in either mode, without a hint or `Enter`.
-`Ctrl` and `Alt` apply to the scroll. Other verbs typed twice act again at
-the last command's position, or where the pointer was moved since. The
-close key releases a hold in place.
+Named or capital scroll keys act immediately in either mode, without a
+hint or `Enter`. In text mode, a symbol bound to scroll follows the same
+literal-or-verb matching rule.
+`Ctrl` and `Alt` apply to the scroll. Other verbs stay armed when pressed
+again; use Enter with nothing typed to act at the pointer. The repeat key
+repeats the last command on its target. In text mode, it repeats only when
+the query is empty; otherwise its character becomes part of the query.
+The close key releases a hold in place.
 These defaults describe a US layout. Keys are matched by position using
 your first keyboard layout; a default that produces a letter or digit on
 that layout stays unbound. `wayhint config` shows the actual bindings.
 
-The arrows move the pointer itself, 10 pixels per press, faster when held,
-stopping 5 pixels inside the monitor's edge; during a hold they drag. In
-hints-only mode, `Space` acts at the pointer. `?` shows its key legend.
+With nothing typed, just a verb, or no text match, the arrows move the
+pointer itself, 10 pixels per press, faster when held. In hints-only mode,
+they always move the pointer. Pointer movement stops 5 pixels inside the
+monitor's edge; during a hold the arrows drag.
+Held arrows share one motion, so two arrows move diagonally without
+alternating between axes. Releasing the arrows stops the current movement.
+Pointer travel is animated, including returns to the saved position.
+By default, selecting a text match leaves the cursor in place until an
+action is triggered. Set `[pointer] move_on_select = true` to move it as
+the selection changes through typing, Tab or arrows. In hints-only mode,
+`Enter` acts at the pointer when no hint is typed, or
+confirms a completed hint. An incomplete hint does nothing on Enter.
+Space can be bound to a verb, for example `hover = "Space"` under `[keys]`.
+With Space bound to repeat, it inserts a space into a nonempty text query.
+An unbound Space always types a space. `?` shows the key legend.
 Hold `Ctrl` or `Alt` on the hint's last letter to apply it, or on `Enter`
 when confirmation is on. Shift is never held through a click.
 
@@ -229,6 +254,14 @@ auto_accept = true     # act on a unique match after 3 characters
 scroll_steps = 2
 ```
 
+Wayhint saves the cursor position at launch and returns it there when the
+session ends. Set `[pointer] restore_on_exit = false` to leave it where it
+ended up. Set `[pointer] restore_on_action = true` to return it to its
+pre-command position after each action while the session is running.
+This leaves hover in place and defers restoration during a hold until
+release. The default is `false`. The old `after = "restore"` and
+`after = "leave"` values are still accepted as `true` and `false`, respectively.
+
 Each window has a hint near its top right, moved clear of other hints and
 small controls where space permits. It focuses the window without clicking
 and has no arrow. It is hidden whenever a verb is armed or a drag is active.
@@ -242,8 +275,8 @@ the hints' radius and padding. `[words.matches.current]` inherits the other
 match settings, with an orange starting color. An explicit `background` makes
 the current match solid unless `background_end` is also set.
 
-Under `[keys]`, `default_action = "left"` chooses what a bare tag or Space
-does. Set a shortcut to a key, or `false` to disable it; empty strings are
+Under `[keys]`, `default_action = "left"` chooses what a bare tag or Enter
+with nothing typed does. Set a shortcut to a key, or `false` to disable it; empty strings are
 rejected. For example, `default_action = "right"` makes a bare tag right-click,
 and `left = "."` gives left-click a shortcut. The close key must stay bound.
 
@@ -259,12 +292,17 @@ Appearance is configured under `[hints]`, `[words.matches]`,
 `text` colors hint letters; `verb` colors the armed verb in hints and the input.
 Invalid settings are reported before wayhint takes the keyboard.
 
-Hint backgrounds and letters can each use a gradient across the whole monitor,
-visible only inside the tags or letters. Add a second colour and a direction
-under `[hints]`:
+Hints default to bold black letters on a pale yellow vertical gradient, with
+rounded gray borders and soft shadows. Pixel hints use dark teal letters.
+Set `shadow = "#00000000"` under `[hints]` to hide the shadow.
+
+Hint backgrounds and letters can each use a gradient. `gradient = "hint"`
+(the default) repeats it inside each tag. Use `gradient = "global"` to span
+each monitor, visible only inside the tags or letters:
 
 ```toml
 [hints]
+gradient = "global"
 background = "#1e1e2ef0"
 background_end = "#45475af0"
 background_direction = "right"
@@ -274,11 +312,12 @@ text_direction = "bottom-right"
 ```
 
 Directions point toward the second colour: `left`, `right`, `top`, `bottom`,
-`top-left`, `top-right`, `bottom-left` or `bottom-right`. The default is `right`.
-Omit either `_end` field to keep that colour solid. Each monitor has its own
-gradient, shared by all its hints. An explicit `text` or `background` in
-`[hints.pixels]` makes that part of pixel hints solid instead. Typed letters,
-armed verbs and the input box keep their existing colours.
+`top-left`, `top-right`, `bottom-left` or `bottom-right`. Text defaults to
+`right`, backgrounds to `bottom`. An explicit `text` or `background` without
+its `_end` field is solid. Setting either colour in `[hints.pixels]` makes
+that part of pixel hints solid too. The gradient setting applies to both
+backgrounds and letters. Typed letters, armed verbs and the input box use
+solid colours.
 
 Word match boxes use the same monitor-wide gradients under `[words.matches]`
 and `[words.matches.current]`: set `background_end` and `background_direction`.
@@ -302,19 +341,30 @@ The `[words]` tables control searchable words; the `text` color fields under
 `[hints]` and `[input]` control rendered letters.
 
 A hint tries just outside its target: left, below, above, then right,
-centered along the chosen edge and avoiding other controls and hints.
+centered along the chosen edge. `[hints] max_cover = 50` sets how much of each
+neighboring target or hint's area it may cover, as an integer percentage from
+0 to 100 (default 50). Set it to 0 to avoid covering neighbors or 100 to allow full
+coverage. Between hints, the percentage applies to the smaller label. A hint
+with too much overlap tries another position. Aligned rows and columns keep
+their shared placement even when hints overlap beyond the limit.
 Aligned columns share the left or right side nearest the screen edge;
 aligned rows share top or bottom.
 One blocked hint keeps the group's side. Two or more blocked hints make
 the whole group try another side. Shared placements stay anchored,
 including while typing. If every side is blocked, the group centers its
-hints inside the controls. A tiny arrow touches the nearest target edge.
+hints inside the controls. A filled pointer joins the hint's nearest edge,
+using the hint's background gradient and border by default. It points toward
+the target and touches it when the target is within the configured length.
 Configure its `color`, `outline`, `length` and `outline_width` under
 `[hints.arrow]`. Set `length = 0` to hide arrows. Centered fallbacks have no arrow.
 Set `[hints] position` to a point such as `"bottom-right"` to put every
 hint there instead.
 Hints for layer surfaces, including bars, can use space outside the surface
 while staying on the monitor.
+`[hints] hide_hidden = true` (the default) omits controls whose accessibility
+provider reports full transparency. Set it to `false` to include them.
+Unknown visibility is kept: Firefox reports Sidebery's transparent close
+buttons as opaque, so those may still get hints.
 `[words.first_character] mark = "underline"`, `"box"` or `"dot"` marks the first
 character of each word that text mode can find, while nothing is typed.
 `thickness` sets the underline height or dot diameter. Dots sit centered one

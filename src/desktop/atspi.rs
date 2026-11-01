@@ -732,6 +732,14 @@ impl<'c> Walk<'c> {
         let accessible: AccessibleProxy = self.proxy(&node.object).await?;
         let name = self.call(accessible.name());
         let bounds = self.extents(&node.object);
+        let hidden = async {
+            let Ok(component) = self.proxy::<ComponentProxy<'_>>(&node.object).await else {
+                return false;
+            };
+            self.call(component.get_alpha())
+                .await
+                .is_ok_and(|alpha| alpha == 0.0)
+        };
         let actions = async {
             if !node.action {
                 return Ok(Vec::new());
@@ -753,8 +761,17 @@ impl<'c> Walk<'c> {
             }
             Ok::<_, anyhow::Error>(names)
         };
-        let (name, bounds, actions) = tokio::try_join!(name, bounds, actions)?;
-        Ok((Details { name, actions }, bounds))
+        let (details, hidden) =
+            tokio::join!(async { tokio::try_join!(name, bounds, actions) }, hidden);
+        let (name, bounds, actions) = details?;
+        Ok((
+            Details {
+                name,
+                actions,
+                hidden,
+            },
+            bounds,
+        ))
     }
 
     /// Step 4a: details for every candidate, eight at a time.

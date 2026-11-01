@@ -83,7 +83,7 @@ impl Action {
             Self::ScrollDown => {
                 "scroll the focused window down immediately, [pointer] scroll_steps notches"
             }
-            Self::Hold => "press and keep down; the next tag or Space lets go there",
+            Self::Hold => "press and keep down; the next tag or Enter lets go there",
         }
     }
 
@@ -122,7 +122,7 @@ impl Action {
         !matches!(self, Self::Hover | Self::Hold)
     }
 
-    /// Whether the cursor may go back afterwards (`[pointer] after`): not
+    /// Whether the cursor may go back afterwards (`[pointer] restore_on_action`): not
     /// from a hover, which is there to stay.
     pub const fn restores(self) -> bool {
         !matches!(self, Self::Hover)
@@ -130,7 +130,7 @@ impl Action {
 }
 
 /// Modifiers held through a click: Ctrl-click, Alt-click, or both. Held
-/// on a tag's last letter (or on `Space` or `Enter`), they go to the app
+/// on a tag's last letter (or on Enter), they go to the app
 /// through a virtual keyboard around the click. Shift is no click
 /// modifier: it's part of the key, and types the capitals that arm verbs
 /// and pick text matches.

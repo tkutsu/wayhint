@@ -1,6 +1,6 @@
 //! Drawing tags into a pixel buffer, in software.
 //!
-//! `tiny-skia` paints the boxes (anti-aliased rounded rectangles) into a
+//! `tiny-skia` paints the boxes (crisp rounded rectangles) into a
 //! `Pixmap`; `fontdue` rasterizes each letter into a coverage map (how much
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use tiny_skia::{
-    BlendMode, FillRule, GradientStop, IntRect, LinearGradient, Paint, Path, PathBuilder, Pixmap,
-    PixmapPaint, PremultipliedColorU8, Rect, SpreadMode, Stroke, Transform,
+    BlendMode, FillRule, GradientStop, IntRect, LinearGradient, Mask, MaskType, Paint, Path,
+    PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, SpreadMode, Stroke, Transform,
 };
 
 use crate::{
@@ -30,7 +30,7 @@ use crate::{
     placement::{self, Label},
     space::Space,
     status::{Message, Status},
-    style::{Color, Direction, Info, Mark, Marks, Position, StartMark, Style},
+    style::{Color, Direction, Gradient, Info, Mark, Marks, Position, StartMark, Style},
 };
 
 /// Gap kept between a tag and the monitor's edge, in px.
@@ -101,6 +101,11 @@ pub struct Tag {
 type PlacementKey = (Point, Point, Option<crate::desktop::tree::ObjectId>);
 
 impl Tag {
+    /// The control whose edge automatic placement follows.
+    fn auto_control(&self) -> Option<BoxRect> {
+        self.control.filter(|_| self.position == Position::Auto)
+    }
+
     /// Keep placement tied to its object as labels shorten or gain a verb.
     fn placement_key(&self) -> Option<PlacementKey> {
         self.target.map(|hit| (self.at, hit, self.object.clone()))
@@ -156,7 +161,7 @@ pub struct Painter {
     space: Option<Space>,
     /// Each target surface and the area its labels may use.
     regions: Vec<(BoxRect, BoxRect)>,
-    /// Every target's box: what `Position::Auto` keeps its tags off.
+    /// Every target's box: automatic hints limit coverage to `[hints] max_cover`.
     controls: Vec<BoxRect>,
     /// How far each tag was moved off its own box, keyed by its object,
     /// anchor and click point: a verb typed in front changes the text
@@ -183,12 +188,13 @@ enum Side {
 /// The gap between a tag's near edge and its target's edge, in px.
 const BESIDE: i32 = 3;
 
-/// What an `Auto` tag must keep off: neighbouring controls, tags placed
-/// before it, and anything outside `bounds`, its window on the screen.
+/// Automatic placement limits coverage of neighbours, avoids earlier tags,
+/// and stays inside `bounds`, its window on the screen.
 struct Around<'a> {
     controls: &'a [BoxRect],
     tags: &'a [BoxRect],
     bounds: BoxRect,
+    max_cover: u8,
 }
 
 impl Side {
@@ -226,12 +232,13 @@ impl Around<'_> {
         rect.intersect(self.bounds) == Some(rect)
             && rect.intersect(control).is_none()
             && self.controls.iter().all(|&other| {
-                other.intersect(control) == Some(control) || rect.intersect(other).is_none()
+                other.intersect(control) == Some(control)
+                    || !placement::exceeds_cover(rect, other, self.max_cover)
             })
             && !self
                 .tags
                 .iter()
-                .any(|&other| placement::touches(rect, other))
+                .any(|&other| placement::overlaps(rect, other, self.max_cover))
     }
 }
 
@@ -348,12 +355,7 @@ impl Painter {
             .tags
             .iter()
             .enumerate()
-            .filter_map(|(i, tag)| {
-                (tag.position == Position::Auto)
-                    .then_some(tag.control)
-                    .flatten()
-                    .map(|r| (i, r))
-            })
+            .filter_map(|(i, tag)| tag.auto_control().map(|r| (i, r)))
             .collect();
         if eligible.iter().all(|&(i, _)| {
             frame.tags[i]
@@ -412,6 +414,7 @@ impl Painter {
         // Where a grid has both axes, the line nearer a screen edge wins.
         lines.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.len().cmp(&a.1.len())));
         let mut sides = vec![None; frame.tags.len()];
+        let mut occupied = Vec::new();
         for (_, line, preferred) in lines {
             if line.iter().any(|&(i, _)| sides[i].is_some()) {
                 continue;
@@ -420,26 +423,31 @@ impl Painter {
                 .chain(Side::ORDER)
                 .find(|&side| {
                     side == Side::Center
-                        || line
+                        || line.iter().all(|&(i, control)| {
+                            let rect = self.side_rect(&frame.tags[i], control, side, area);
+                            rect.intersect(bounds[i]) == Some(rect)
+                                && occupied.iter().all(|&other| {
+                                    !placement::overlaps(rect, other, self.tags.style.max_cover)
+                                })
+                        }) && line
                             .iter()
                             .filter(|&&(i, control)| {
-                                let around = Around {
+                                !Around {
                                     controls,
                                     tags: &[],
                                     bounds: bounds[i],
-                                };
-                                !around.clear(
-                                    self.side_rect(&frame.tags[i], control, side, area),
-                                    control,
-                                )
+                                    max_cover: self.tags.style.max_cover,
+                                }
+                                .clear(self.side_rect(&frame.tags[i], control, side, area), control)
                             })
                             .take(2)
                             .count()
                             < 2
                 })
                 .unwrap();
-            for (i, _) in line {
+            for (i, control) in line {
                 sides[i] = Some(side);
+                occupied.push(self.side_rect(&frame.tags[i], control, side, area));
             }
         }
         sides
@@ -489,12 +497,13 @@ impl Painter {
         let mut originals = Vec::with_capacity(frame.tags.len());
         let mut ordinary_originals = Vec::with_capacity(frame.tags.len());
         for ((tag, &bounds), side) in frame.tags.iter().zip(&bounds).zip(sides) {
-            let rect = match tag.control.filter(|_| tag.position == Position::Auto) {
+            let rect = match tag.auto_control() {
                 Some(control) => {
                     let around = Around {
                         controls: &controls,
                         tags: &ordinary_originals,
                         bounds,
+                        max_cover: self.tags.style.max_cover,
                     };
                     self.beside(tag, control, side, &around, area)
                 }
@@ -528,7 +537,8 @@ impl Painter {
         let space = self
             .space
             .get_or_insert_with(|| Space::rectangles(screen, &[]));
-        let mut ordinary = placement::resolve(&labels, space).into_iter();
+        let mut ordinary =
+            placement::resolve(&labels, space, self.tags.style.max_cover).into_iter();
         let mut boxes: Vec<_> = frame
             .tags
             .iter()
@@ -601,24 +611,25 @@ impl Painter {
             .enumerate()
             .filter(|(_, t)| t.kind == Kind::Window)
         {
-            let mut blocked: Vec<_> = controls
+            let blocked: Vec<_> = controls
                 .iter()
                 .copied()
                 .filter(|r| r.w <= 192 && r.h <= 96)
                 .collect();
-            blocked.extend(boxes.iter().copied().filter(|r| !r.is_empty()));
+            let hints: Vec<_> = boxes.iter().copied().filter(|r| !r.is_empty()).collect();
             let original = originals[i];
             let kept = tag
                 .placement_key()
                 .and_then(|key| self.placed.get(&key))
                 .map_or(original, |&by| original.offset(by));
-            boxes[i] = placement::window(kept, bounds[i], &blocked);
+            boxes[i] =
+                placement::window(kept, bounds[i], &blocked, &hints, self.tags.style.max_cover);
         }
     }
 
     /// An `Auto` tag by its `control`: on the first side of
-    /// `Side::ORDER` that stays in its bounds and clear of controls and
-    /// earlier tags, or on its line's shared side. The look's offset is
+    /// `Side::ORDER` that stays in bounds and limits target and hint coverage,
+    /// or on its line's shared side. The look's offset is
     /// included in clearance checks. Each tag keeps its side until the next scan.
     fn beside(
         &mut self,
@@ -664,7 +675,7 @@ impl Painter {
         }
         let arranged = self.arrange(frame, area);
         let tags = &arranged;
-        let mut arrows = Vec::new();
+        let mut toward = vec![None; tags.tags.len()];
         for (i, tag) in tags.tags.iter().enumerate() {
             if tag.kind == Kind::Window {
                 continue;
@@ -698,25 +709,23 @@ impl Painter {
             } else {
                 centre(at)
             };
-            if let Some(from) = nearest_edge(rect, look.style.radius, to) {
-                arrows.extend(Self::arrow(from, to, &look.style, control.is_some()));
-            }
+            toward[i] = Some(to);
         }
+        let mut arrows = Vec::new();
         for arrow in tags.arrows.iter().filter(|d| d.tag.is_none()) {
             arrows.extend(Self::arrow(
                 centre(arrow.from),
                 centre(arrow.at),
                 &self.tags.style,
-                false,
             ));
         }
         paint_layer(pixmap, &arrows, self.scale);
-        for tag in &tags.tags {
+        for (tag, to) in tags.tags.iter().zip(toward) {
             let look = match tag.kind {
                 Kind::Plain | Kind::Window => &mut self.tags,
                 Kind::Pixels => &mut self.pixels,
             };
-            look.paint_tag(pixmap, tag, area);
+            look.paint_tag(pixmap, tag, area, to);
         }
         self.paint_input(pixmap, frame, area);
     }
@@ -739,7 +748,7 @@ impl Painter {
             return;
         };
         self.input
-            .draw(pixmap, rect, &rows, Some(&mut self.icons), false);
+            .draw(pixmap, rect, &rows, Some(&mut self.icons), false, None);
     }
 
     /// The input box's lines: what's typed, then the message, wrapped
@@ -780,28 +789,17 @@ impl Painter {
         rows
     }
 
-    /// A short triangle touches a target edge, or marks a point override without a tail.
-    fn arrow(
-        (x, y): (f32, f32),
-        (to_x, to_y): (f32, f32),
-        style: &Style,
-        touch_edge: bool,
-    ) -> Vec<Part> {
+    /// A short filled triangle marks a standalone point override without a tail.
+    fn arrow((x, y): (f32, f32), (to_x, to_y): (f32, f32), style: &Style) -> Vec<Part> {
         let arrow = &style.arrow;
         let (color, outline) = arrow.colors(style);
         let distance = (to_x - x).hypot(to_y - y);
-        let length = arrow
-            .length
-            .min(if touch_edge { distance } else { distance - 1.0 });
+        let length = arrow.length.min(distance - 1.0);
         if length <= 0.0 {
             return Vec::new();
         }
         let (dx, dy) = ((to_x - x) / distance, (to_y - y) / distance);
-        let (x, y, tip_x, tip_y) = if touch_edge {
-            (to_x - dx * length, to_y - dy * length, to_x, to_y)
-        } else {
-            (x, y, x + dx * length, y + dy * length)
-        };
+        let (tip_x, tip_y) = (x + dx * length, y + dy * length);
         let half = length * 0.65;
         let mut path = PathBuilder::new();
         path.move_to(x - dy * half, y + dx * half);
@@ -1010,11 +1008,27 @@ impl TextPainter {
         }
     }
 
-    fn paint_tag(&mut self, pixmap: &mut Pixmap, tag: &Tag, area: (f32, f32)) {
+    fn paint_tag(
+        &mut self,
+        pixmap: &mut Pixmap,
+        tag: &Tag,
+        area: (f32, f32),
+        mut toward: Option<(f32, f32)>,
+    ) {
         let row = self.row(&tag.text, tag.verb, tag.typed);
         let size = self.size_of(std::slice::from_ref(&row));
-        if let Some(rect) = place(tag.at, tag.position, size, area) {
-            self.draw(pixmap, rect, &[row], None, true);
+        if let Some(mut rect) = place(tag.at, tag.position, size, area) {
+            // Move the whole bubble toward its target, preserving the attached arrow.
+            if let Some(to) = toward
+                && let Some(from) = nearest_edge(rect, self.style.radius, to)
+            {
+                let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                let distance = dx.hypot(dy);
+                let (dx, dy) = (4.0 * dx / distance, 4.0 * dy / distance);
+                rect = Rect::from_xywh(rect.x() + dx, rect.y() + dy, size.0, size.1).unwrap();
+                toward = Some((to.0 + dx, to.1 + dy));
+            }
+            self.draw(pixmap, rect, &[row], None, true, toward);
         }
     }
 
@@ -1029,38 +1043,50 @@ impl TextPainter {
         rows: &[Row],
         mut icons: Option<&mut Self>,
         gradients: bool,
+        toward: Option<(f32, f32)>,
     ) {
         let s = self.scale;
         let scaled = Transform::from_scale(s, s);
         let style = &self.style;
         #[allow(clippy::cast_precision_loss)] // monitor sizes are far below 2^24
         let area = (pixmap.width() as f32 / s, pixmap.height() as f32 / s);
-        let background = gradient(
+        let bounds = match style.gradient {
+            Gradient::Global => Rect::from_xywh(0.0, 0.0, area.0, area.1).unwrap(),
+            Gradient::Hint => rect,
+        };
+        let background = crisp(gradient_in(
             style.background,
             style.background_end.filter(|_| gradients),
             style.background_direction,
-            area,
-        );
+            bounds,
+        ));
         let text = style.text_end.filter(|_| gradients).map(|end| {
-            let mut paint = gradient(style.text, Some(end), style.text_direction, area);
+            let mut paint = gradient_in(style.text, Some(end), style.text_direction, bounds);
             paint.shader.transform(scaled);
             paint
         });
-        paint_box_fill(
-            pixmap,
-            rect,
-            &Mark {
-                background: style.background,
-                background_end: None,
-                background_direction: style.background_direction,
-                border: style.border,
-                border_width: style.border_width,
-                radius: style.radius,
-                padding: style.padding,
-            },
-            scaled,
-            &background,
-        );
+        paint_shadow(pixmap, rect, style.radius, style.shadow, scaled);
+        let pointer =
+            toward.and_then(|to| Pointer::new(rect, style.radius, to, style.arrow.length));
+        if let Some(pointer) = pointer {
+            paint_bubble(pixmap, rect, style, &pointer, scaled, &background);
+        } else {
+            paint_box_fill(
+                pixmap,
+                rect,
+                &Mark {
+                    background: style.background,
+                    background_end: None,
+                    background_direction: style.background_direction,
+                    border: style.border,
+                    border_width: style.border_width,
+                    radius: style.radius,
+                    padding: style.padding,
+                },
+                scaled,
+                &background,
+            );
+        }
         let [pad_y, pad_x] = style.padding;
         let (verb, dimmed) = (style.verb, style.dimmed);
         let (columns, gap) = (self.columns(rows), self.gap());
@@ -1253,7 +1279,29 @@ fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark, transform: Transform,
     paint_box_fill(pixmap, rect, look, transform, &fill);
 }
 
-/// Fill a box with a solid colour or screen-wide gradient, keeping its border solid.
+/// A small soft shadow, offset down by two logical pixels, under a tag or input box.
+fn paint_shadow(pixmap: &mut Pixmap, rect: Rect, radius: f32, color: Color, transform: Transform) {
+    if color.a == 0 {
+        return;
+    }
+    for (spread, divisor) in [(3.0, 16), (2.0, 8), (1.0, 4), (0.0, 2)] {
+        let shadow = Rect::from_ltrb(
+            rect.left() - spread,
+            rect.top() + 2.0 - spread,
+            rect.right() + spread,
+            rect.bottom() + 2.0 + spread,
+        );
+        if let Some(path) = shadow.and_then(|r| rounded_rect(r, radius + spread)) {
+            let fill = paint(Color {
+                a: color.a / divisor,
+                ..color
+            });
+            pixmap.fill_path(&path, &fill, FillRule::Winding, transform, None);
+        }
+    }
+}
+
+/// Fill a box with a solid colour or gradient, keeping its border solid.
 fn paint_box_fill(
     pixmap: &mut Pixmap,
     rect: Rect,
@@ -1278,7 +1326,9 @@ fn paint_box_fill(
             width: look.border_width,
             ..Stroke::default()
         };
-        pixmap.stroke_path(&path, &paint(look.border), &stroke, transform, None);
+        let mut border = paint(look.border);
+        border.anti_alias = fill.anti_alias;
+        pixmap.stroke_path(&path, &border, &stroke, transform, None);
     }
 }
 
@@ -1306,10 +1356,208 @@ fn nearest_edge(rect: Rect, radius: f32, (x, y): (f32, f32)) -> Option<(f32, f32
     ))
 }
 
+/// A triangular extension of a hint's nearest straight edge.
+struct Pointer {
+    side: Side,
+    center: f32,
+    half: f32,
+    tip: (f32, f32),
+}
+
+impl Pointer {
+    fn new(rect: Rect, radius: f32, to: (f32, f32), length: f32) -> Option<Self> {
+        let from = nearest_edge(rect, radius, to)?;
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let side = if dx.abs() > dy.abs() {
+            if dx < 0.0 { Side::Left } else { Side::Right }
+        } else if dy < 0.0 {
+            Side::Above
+        } else {
+            Side::Below
+        };
+        let radius = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+        let vertical = matches!(side, Side::Left | Side::Right);
+        let (start, end, along) = if vertical {
+            (rect.top() + radius, rect.bottom() - radius, to.1)
+        } else {
+            (rect.left() + radius, rect.right() - radius, to.0)
+        };
+        let half = (length * 0.8).min((end - start) / 2.0);
+        if length <= 0.0 || half <= 0.0 {
+            return None;
+        }
+        let center = along.clamp(start + half, end - half);
+        let base = match side {
+            Side::Left => (rect.left(), center),
+            Side::Right => (rect.right(), center),
+            Side::Above => (center, rect.top()),
+            Side::Below => (center, rect.bottom()),
+            Side::Center => unreachable!(),
+        };
+        let distance = (to.0 - base.0).hypot(to.1 - base.1);
+        let length = length.min(distance);
+        Some(Self {
+            side,
+            center,
+            half,
+            tip: (
+                base.0 + (to.0 - base.0) / distance * length,
+                base.1 + (to.1 - base.1) / distance * length,
+            ),
+        })
+    }
+
+    fn base(&self, rect: Rect) -> ((f32, f32), (f32, f32)) {
+        let (low, high) = (self.center - self.half, self.center + self.half);
+        match self.side {
+            Side::Above => ((low, rect.top()), (high, rect.top())),
+            Side::Right => ((rect.right(), low), (rect.right(), high)),
+            Side::Below => ((high, rect.bottom()), (low, rect.bottom())),
+            Side::Left => ((rect.left(), high), (rect.left(), low)),
+            Side::Center => unreachable!(),
+        }
+    }
+
+    fn append(&self, path: &mut PathBuilder, rect: Rect, side: Side) {
+        if self.side != side {
+            return;
+        }
+        let (a, b) = self.base(rect);
+        path.line_to(a.0, a.1);
+        path.line_to(self.tip.0, self.tip.1);
+        path.line_to(b.0, b.1);
+    }
+}
+
+/// Outline the rasterized silhouette so angled tips and corners cannot expose fill.
+fn paint_bubble(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    style: &Style,
+    pointer: &Pointer,
+    transform: Transform,
+    fill: &Paint<'_>,
+) {
+    let Some(shape) = bubble_path(rect, style.radius, Some(pointer)) else {
+        return;
+    };
+    let Some(area) = shape
+        .bounds()
+        .transform(transform)
+        .and_then(|r| r.round_out())
+        .zip(IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height()))
+        .and_then(|(r, screen)| r.intersect(&screen))
+    else {
+        return;
+    };
+    let Some(mut layer) = Pixmap::new(area.width(), area.height()) else {
+        return;
+    };
+    #[allow(clippy::cast_precision_loss)] // physical screen coordinates fit an f32
+    let transform = transform.post_translate(-area.left() as f32, -area.top() as f32);
+    layer.fill_path(
+        &shape,
+        &crisp(paint(Color::rgba(255, 255, 255, 255))),
+        FillRule::Winding,
+        transform,
+        None,
+    );
+    let mask = Mask::from_pixmap(layer.as_ref(), MaskType::Alpha);
+    layer.fill(tiny_skia::Color::TRANSPARENT);
+    layer.fill_path(&shape, fill, FillRule::Winding, transform, None);
+    let (a, b) = pointer.base(rect);
+    let mut edge = PathBuilder::new();
+    edge.move_to(a.0, a.1);
+    edge.line_to(pointer.tip.0, pointer.tip.1);
+    edge.line_to(b.0, b.1);
+    let edge = edge.finish().unwrap();
+    if let Some(color) = style.arrow.color {
+        let mut fill = crisp(paint(color));
+        fill.blend_mode = BlendMode::Source;
+        layer.fill_path(&edge, &fill, FillRule::Winding, transform, Some(&mask));
+    }
+    let body = rect.transform(transform).unwrap();
+    for (outside, width, color) in [
+        (false, style.border_width, style.border),
+        (
+            true,
+            style.arrow.outline_width,
+            style.arrow.outline.unwrap_or(style.border),
+        ),
+    ] {
+        if width <= 0.0 {
+            continue;
+        }
+        let mut border = pixel_border(&mask, width * transform.sx);
+        for y in 0..area.height() {
+            for x in 0..area.width() {
+                #[allow(clippy::cast_precision_loss)] // local label dimensions fit an f32
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let in_body = px >= body.left()
+                    && px < body.right()
+                    && py >= body.top()
+                    && py < body.bottom();
+                if in_body == outside {
+                    border.data_mut()[(y * area.width() + x) as usize] = 0;
+                }
+            }
+        }
+        let paint = crisp(paint(color));
+        layer.fill_path(&shape, &paint, FillRule::Winding, transform, Some(&border));
+    }
+    pixmap.draw_pixmap(
+        area.left(),
+        area.top(),
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Pixel distance from the silhouette's exterior, with a complete rim at every angle.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // validated physical border widths
+fn pixel_border(mask: &Mask, width: f32) -> Mask {
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let mut distance: Vec<u32> = mask
+        .data()
+        .iter()
+        .map(|&p| if p == 0 { 0 } else { u32::MAX / 2 })
+        .collect();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let left = if x == 0 { 0 } else { distance[i - 1] };
+            let above = if y == 0 { 0 } else { distance[i - w] };
+            distance[i] = distance[i].min(left.min(above) + 1);
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            let right = if x + 1 == w { 0 } else { distance[i + 1] };
+            let below = if y + 1 == h { 0 } else { distance[i + w] };
+            distance[i] = distance[i].min(right.min(below) + 1);
+        }
+    }
+    let mut border = mask.clone();
+    for (cover, distance) in border.data_mut().iter_mut().zip(distance) {
+        if distance > width.round() as u32 {
+            *cover = 0;
+        }
+    }
+    border
+}
+
 /// A rectangle with rounded corners, as a path. Each corner is a cubic
 /// Bézier curve; `KAPPA` is the control-point distance that makes a cubic
 /// the closest match to a quarter circle.
 fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
+    bubble_path(rect, radius, None)
+}
+
+/// A single closed perimeter shared by the box and its optional pointer.
+fn bubble_path(rect: Rect, radius: f32, pointer: Option<&Pointer>) -> Option<Path> {
     const KAPPA: f32 = 0.552_284_8;
     let radius = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
     let (left, top, right, bottom) = (rect.left(), rect.top(), rect.right(), rect.bottom());
@@ -1317,8 +1565,14 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
     let pull = radius * (1.0 - KAPPA);
     let mut path = PathBuilder::new();
     path.move_to(left + radius, top);
+    if let Some(p) = pointer {
+        p.append(&mut path, rect, Side::Above);
+    }
     path.line_to(right - radius, top);
     path.cubic_to(right - pull, top, right, top + pull, right, top + radius);
+    if let Some(p) = pointer {
+        p.append(&mut path, rect, Side::Right);
+    }
     path.line_to(right, bottom - radius);
     path.cubic_to(
         right,
@@ -1328,6 +1582,9 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
         right - radius,
         bottom,
     );
+    if let Some(p) = pointer {
+        p.append(&mut path, rect, Side::Below);
+    }
     path.line_to(left + radius, bottom);
     path.cubic_to(
         left + pull,
@@ -1337,6 +1594,9 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
         left,
         bottom - radius,
     );
+    if let Some(p) = pointer {
+        p.append(&mut path, rect, Side::Left);
+    }
     path.line_to(left, top + radius);
     path.cubic_to(left, top + pull, left + pull, top, left + radius, top);
     path.close();
@@ -1382,7 +1642,7 @@ fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
     let shift =
         Transform::from_scale(scale, scale).post_translate(-area.left() as f32, -area.top() as f32);
     for part in parts {
-        let mut paint = paint(part.color);
+        let mut paint = crisp(paint(part.color));
         paint.blend_mode = BlendMode::Source;
         match part.width {
             Some(width) => {
@@ -1405,6 +1665,12 @@ fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
     );
 }
 
+/// Give small boxes and arrows solid pixel coverage; text and shadows stay smoothed.
+fn crisp(mut paint: Paint<'_>) -> Paint<'_> {
+    paint.anti_alias = false;
+    paint
+}
+
 fn paint(color: Color) -> Paint<'static> {
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
@@ -1418,14 +1684,35 @@ fn gradient(
     direction: Direction,
     (w, h): (f32, f32),
 ) -> Paint<'static> {
+    gradient_in(
+        start,
+        end,
+        direction,
+        Rect::from_xywh(0.0, 0.0, w, h).unwrap(),
+    )
+}
+
+/// A gradient anchored to a monitor or a placed hint's box, in logical pixels.
+fn gradient_in(
+    start: Color,
+    end: Option<Color>,
+    direction: Direction,
+    bounds: Rect,
+) -> Paint<'static> {
     let Some(end) = end else {
         return paint(start);
     };
     let ((x0, y0), (x1, y1)) = direction.ends();
     let color = |c: Color| tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a);
     let shader = LinearGradient::new(
-        tiny_skia::Point::from_xy(x0 * w, y0 * h),
-        tiny_skia::Point::from_xy(x1 * w, y1 * h),
+        tiny_skia::Point::from_xy(
+            bounds.x() + x0 * bounds.width(),
+            bounds.y() + y0 * bounds.height(),
+        ),
+        tiny_skia::Point::from_xy(
+            bounds.x() + x1 * bounds.width(),
+            bounds.y() + y1 * bounds.height(),
+        ),
         vec![
             GradientStop::new(0.0, color(start)),
             GradientStop::new(1.0, color(end)),
@@ -1499,6 +1786,136 @@ mod tests {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
+    fn hint_gradients_repeat_after_placement_at_every_scale() {
+        for scale in [1.0, 1.25, 2.0] {
+            for direction in [
+                Direction::Left,
+                Direction::Right,
+                Direction::Top,
+                Direction::Bottom,
+                Direction::TopLeft,
+                Direction::TopRight,
+                Direction::BottomLeft,
+                Direction::BottomRight,
+            ] {
+                for letters in [false, true] {
+                    let style = Style {
+                        gradient: Gradient::Hint,
+                        text: Color::rgba(255, 0, 0, 255),
+                        text_end: letters.then_some(Color::rgba(0, 0, 255, 180)),
+                        text_direction: direction,
+                        background: Color::rgba(0, 0, 0, 0),
+                        background_end: (!letters).then_some(Color::rgba(0, 0, 255, 255)),
+                        background_direction: direction,
+                        border_width: 0.0,
+                        shadow: Color::rgba(0, 0, 0, 0),
+                        ..Style::default()
+                    };
+                    let mut painter = TextPainter::new(&style, scale).unwrap();
+                    let mut map =
+                        Pixmap::new((320.0 * scale) as u32, (160.0 * scale) as u32).unwrap();
+                    let text = if letters { "MMM" } else { "   " };
+                    painter.paint_tag(&mut map, &gradient_tag(82, 42, text), (320.0, 160.0), None);
+                    let (width, height) = painter.size(text);
+                    // An offscreen anchor clamps the box to (2, 2). Its
+                    // gradient must follow the placed box, not the anchor.
+                    let mut moved = gradient_tag(-100, -100, text);
+                    moved.position = Position::BottomRight;
+                    painter.paint_tag(&mut map, &moved, (320.0, 160.0), None);
+                    painter.paint_tag(&mut map, &gradient_tag(182, 82, text), (320.0, 160.0), None);
+                    let (dx, dy) = ((100.0 * scale) as u32, (40.0 * scale) as u32);
+                    let mut colors = HashSet::new();
+                    for y in (42.0 * scale) as u32..((42.0 + height) * scale) as u32 {
+                        for x in (82.0 * scale) as u32..((82.0 + width) * scale) as u32 {
+                            let first = map.pixel(x, y).unwrap();
+                            for other in [
+                                map.pixel(x + dx, y + dy).unwrap(),
+                                map.pixel(x - (80.0 * scale) as u32, y - dy).unwrap(),
+                            ] {
+                                // Shader interpolation and glyph coverage round
+                                // separately in tiny-skia's integer pipeline.
+                                for (a, b) in [
+                                    (first.red(), other.red()),
+                                    (first.blue(), other.blue()),
+                                    (first.alpha(), other.alpha()),
+                                ] {
+                                    assert!(
+                                        a.abs_diff(b) <= 3,
+                                        "{direction:?}, {scale}, letters={letters}: {first:?} vs {other:?}"
+                                    );
+                                }
+                            }
+                            if first.alpha() > 100 {
+                                colors.insert((first.red(), first.blue()));
+                            }
+                        }
+                    }
+                    assert!(colors.len() > 5, "the gradient varies inside each hint");
+                    assert_eq!(
+                        painter.glyphs.len(),
+                        1,
+                        "moving hints reuses glyph coverage"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_hints_have_a_yellow_gradient_and_optional_soft_shadow() {
+        let style = Style::default();
+        let mut painter = TextPainter::new(&style, 1.0).unwrap();
+        let mut map = Pixmap::new(160, 80).unwrap();
+        painter.paint_tag(&mut map, &gradient_tag(20, 20, "   "), (160.0, 80.0), None);
+        let (_, height) = painter.size("   ");
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bottom = 20 + height as u32;
+        let top = map.pixel(25, 22).unwrap();
+        let low = map.pixel(25, bottom - 3).unwrap();
+        assert!(top.red() > 240 && top.green() > 240 && top.blue() > low.blue());
+        assert!(
+            map.pixel(25, bottom + 1).unwrap().alpha() > 0,
+            "shadow below box"
+        );
+        assert_eq!(
+            map.pixel(25, bottom + 6).unwrap().alpha(),
+            0,
+            "bounded shadow"
+        );
+        painter.style.shadow.a = 0;
+        map.fill(tiny_skia::Color::TRANSPARENT);
+        painter.paint_tag(&mut map, &gradient_tag(20, 20, "   "), (160.0, 80.0), None);
+        assert_eq!(map.pixel(25, bottom + 1).unwrap().alpha(), 0);
+
+        if let Ok(path) = std::env::var("WAYHINT_STYLE_PREVIEW") {
+            let mut preview = Pixmap::new(640, 200).unwrap();
+            preview.fill(tiny_skia::Color::from_rgba8(245, 245, 245, 255));
+            for (i, scale) in [1.0, 1.25, 2.0].into_iter().enumerate() {
+                let mut painter = TextPainter::new(&style, scale).unwrap();
+                for (j, label) in ["CH", "CI", "CJ", "CK", "DE", "DF"].into_iter().enumerate() {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let (x, y) = (
+                        ((20.0 + j as f32 * 90.0) / scale) as i32,
+                        ((20.0 + i as f32 * 55.0) / scale) as i32,
+                    );
+                    painter.paint_tag(
+                        &mut preview,
+                        &gradient_tag(x, y, label),
+                        (640.0 / scale, 200.0 / scale),
+                        None,
+                    );
+                }
+            }
+            preview.save_png(path).unwrap();
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     fn background_gradients_span_the_monitor_and_stay_inside_tags() {
         for scale in [1.0, 1.25, 2.0] {
             for direction in [
@@ -1512,6 +1929,7 @@ mod tests {
                 Direction::BottomLeft,
             ] {
                 let style = Style {
+                    gradient: Gradient::Global,
                     background: Color::rgba(255, 0, 0, 255),
                     background_end: Some(Color::rgba(0, 0, 255, 255)),
                     background_direction: direction,
@@ -1523,7 +1941,7 @@ mod tests {
                 let mut painter = TextPainter::new(&style, scale).unwrap();
                 let mut map = Pixmap::new((400.0 * scale) as u32, (200.0 * scale) as u32).unwrap();
                 for (x, y) in [(20, 20), (200, 80), (340, 140)] {
-                    painter.paint_tag(&mut map, &gradient_tag(x, y, " "), (400.0, 200.0));
+                    painter.paint_tag(&mut map, &gradient_tag(x, y, " "), (400.0, 200.0), None);
                     let (px, py) = (
                         ((x + 8) as f32 * scale) as u32,
                         ((y + 8) as f32 * scale) as u32,
@@ -1568,12 +1986,15 @@ mod tests {
         for scale in [1.0, 1.25, 2.0] {
             for direction in [Direction::Right, Direction::Bottom, Direction::TopLeft] {
                 let style = Style {
+                    gradient: Gradient::Global,
                     text: Color::rgba(255, 0, 0, 255),
                     text_end: Some(Color::rgba(0, 0, 255, 0)),
                     text_direction: direction,
                     dimmed: Color::rgba(0, 255, 0, 180),
                     verb: Color::rgba(255, 255, 0, 255),
                     background: Color::rgba(0, 0, 0, 0),
+                    background_end: None,
+                    shadow: Color::rgba(0, 0, 0, 0),
                     border_width: 0.0,
                     ..Style::default()
                 };
@@ -1588,8 +2009,8 @@ mod tests {
                 let mut coverage = map.clone();
                 for x in [20, 180, 320] {
                     let tag = gradient_tag(x, 40, "MMM");
-                    painter.paint_tag(&mut map, &tag, (400.0, 160.0));
-                    reference.paint_tag(&mut coverage, &tag, (400.0, 160.0));
+                    painter.paint_tag(&mut map, &tag, (400.0, 160.0), None);
+                    reference.paint_tag(&mut coverage, &tag, (400.0, 160.0), None);
                 }
                 let mut checked = 0;
                 for (i, (pixel, mask)) in map.pixels().iter().zip(coverage.pixels()).enumerate() {
@@ -1624,7 +2045,7 @@ mod tests {
                 let mut tag = gradient_tag(20, 90, "MMM");
                 tag.typed = 2;
                 tag.verb = 1;
-                painter.paint_tag(&mut map, &tag, (400.0, 160.0));
+                painter.paint_tag(&mut map, &tag, (400.0, 160.0), None);
                 assert!(
                     map.pixels()
                         .iter()
@@ -1793,6 +2214,7 @@ offset = [20, 20]
             );
             let input = Style {
                 radius: 0.0,
+                shadow: Color::rgba(0, 0, 0, 0),
                 background: Color::rgba(30, 30, 30, 255),
                 position,
                 offset: [offset.x, offset.y],
@@ -1872,6 +2294,8 @@ offset = [20, 20]
         let mut style = Style {
             text: Color::rgba(240, 20, 30, 255),
             background: Color::rgba(30, 30, 30, 255),
+            background_end: None,
+            shadow: Color::rgba(0, 0, 0, 0),
             radius: 0.0,
             border_width: 0.0,
             padding: [4.0, 6.0],
@@ -1979,6 +2403,7 @@ offset = [20, 20]
         let input = Style {
             text: Color::rgba(255, 255, 255, 255),
             background: Color::rgba(60, 60, 60, 255),
+            shadow: Color::rgba(0, 0, 0, 0),
             border_width: 0.0,
             position: Position::TopLeft,
             offset,
@@ -2269,6 +2694,230 @@ offset = [20, 20]
         assert_eq!(nearest_edge(rect, 0.0, (20.0, 30.0)), None);
         assert_eq!(nearest_edge(rect, 0.0, (5.0, 5.0)), Some((20.0, 30.0)));
         assert_eq!(nearest_edge(rect, 100.0, (40.0, 5.0)), Some((40.0, 30.0)));
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn default_arrow_is_filled_and_connected_to_its_hint() {
+        let style = Style::default();
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 2.0).unwrap();
+        let mut frame = Frame::default();
+        let mut samples = Vec::new();
+        for (i, (x, y)) in [(60, 50), (180, 50), (60, 120), (180, 120)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut tag = gradient_tag(x, y, "CH");
+            let rect = whole_px(
+                place(
+                    tag.at,
+                    tag.position,
+                    painter.tags.size(&tag.text),
+                    (320.0, 200.0),
+                )
+                .unwrap(),
+            );
+            let middle = rect.center();
+            let (control, sample) = match i {
+                0 => (
+                    BoxRect::new(rect.x - 32, middle.y - 10, 20, 20),
+                    Point::new(rect.x - 1, middle.y),
+                ),
+                1 => (
+                    BoxRect::new(middle.x - 10, rect.y - 32, 20, 20),
+                    Point::new(middle.x, rect.y - 1),
+                ),
+                2 => (
+                    BoxRect::new(rect.right() + 12, middle.y - 10, 20, 20),
+                    Point::new(rect.right(), middle.y),
+                ),
+                _ => (
+                    BoxRect::new(middle.x - 10, rect.bottom() + 12, 20, 20),
+                    Point::new(middle.x, rect.bottom()),
+                ),
+            };
+            tag.control = Some(control);
+            frame.tags.push(tag);
+            let mouth = match i {
+                0 => Point::new(rect.x, middle.y),
+                1 => Point::new(middle.x, rect.y),
+                2 => Point::new(rect.right() - 1, middle.y),
+                _ => Point::new(middle.x, rect.bottom() - 1),
+            };
+            samples.push((sample, mouth));
+        }
+        let mut map = Pixmap::new(640, 400).unwrap();
+        painter.paint(&mut map, &frame);
+        if let Ok(path) = std::env::var("WAYHINT_ARROW_PREVIEW") {
+            let mut preview = Pixmap::new(640, 400).unwrap();
+            preview.fill(tiny_skia::Color::from_rgba8(245, 245, 245, 255));
+            preview.draw_pixmap(
+                0,
+                0,
+                map.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
+            preview.save_png(path).unwrap();
+        }
+        for (sample, mouth) in samples {
+            let p = map
+                .pixel((sample.x * 2) as u32, (sample.y * 2) as u32)
+                .unwrap();
+            assert!(
+                p.alpha() > 240 && p.red() > 170 && p.green() > 170,
+                "filled yellow pointer next to hint at {sample:?}: {p:?}"
+            );
+            let p = map
+                .pixel((mouth.x * 2) as u32, (mouth.y * 2) as u32)
+                .unwrap();
+            assert!(
+                p.alpha() == 255 && p.red() > 230 && p.green() > 220,
+                "no border across pointer mouth at {mouth:?}: {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hint_borders_cover_exposed_fill_at_oblique_angles() {
+        let style = Style {
+            size: 11.0,
+            padding: [1.0, 3.0],
+            background: Color::rgba(255, 255, 255, 255),
+            background_end: None,
+            border: Color::rgba(0, 0, 0, 255),
+            shadow: Color::rgba(0, 0, 0, 0),
+            ..Style::default()
+        };
+        for scale in [1.0, 1.25, 2.0] {
+            let mut painter = TextPainter::new(&style, scale).unwrap();
+            let mut map = Pixmap::new(160, 160).unwrap();
+            for step in 0..72_u16 {
+                let angle = f32::from(step) * std::f32::consts::TAU / 72.0;
+                let target = (40.0 + angle.cos() * 30.0, 40.0 + angle.sin() * 30.0);
+                map.fill(tiny_skia::Color::TRANSPARENT);
+                painter.paint_tag(
+                    &mut map,
+                    &gradient_tag(35, 35, "T"),
+                    (80.0, 80.0),
+                    Some(target),
+                );
+                for y in 1..map.height() - 1 {
+                    for x in 1..map.width() - 1 {
+                        let p = map.pixel(x, y).unwrap();
+                        if p.alpha() == 255 && p.red() == 255 {
+                            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                                assert!(
+                                    map.pixel(nx, ny).unwrap().alpha() > 0,
+                                    "exposed light fill at ({x},{y}), {scale}x, angle step {step}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an output path for a native-size angle gallery"]
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    fn render_hint_angle_capture() {
+        let config = std::env::var("WAYHINT_STYLE_FILE")
+            .ok()
+            .map_or_else(String::new, |p| std::fs::read_to_string(p).unwrap());
+        let config =
+            crate::config::Config::parse(&config, &crate::keys::Layout::named("us", "")).unwrap();
+        let mut painter = TextPainter::new(&config.style, 1.0).unwrap();
+        let mut map = Pixmap::new(480, 240).unwrap();
+        map.fill(tiny_skia::Color::from_rgba8(30, 30, 46, 255));
+        for step in 0..72 {
+            let at = Point::new(12 + 40 * (step % 12), 12 + 40 * (step / 12));
+            let angle = step as f32 * std::f32::consts::TAU / 72.0;
+            let target = (
+                at.x as f32 + 7.0 + angle.cos() * 30.0,
+                at.y as f32 + 9.0 + angle.sin() * 30.0,
+            );
+            let label = ["T", "I", "N", "C", "S", "U"][(step / 12) as usize];
+            painter.paint_tag(
+                &mut map,
+                &gradient_tag(at.x, at.y, label),
+                (480.0, 240.0),
+                Some(target),
+            );
+        }
+        map.save_png(std::env::var("WAYHINT_ANGLE_OUTPUT").unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn hint_edges_and_arrows_have_crisp_pixel_coverage() {
+        let style = Style {
+            shadow: Color::rgba(0, 0, 0, 0),
+            ..Style::default()
+        };
+        for scale in [1.0, 1.25, 2.0] {
+            let mut painter = TextPainter::new(&style, scale).unwrap();
+            let mut map = Pixmap::new(200, 160).unwrap();
+            for toward in [
+                None,
+                Some((0.5, 25.5)),
+                Some((30.5, 0.5)),
+                Some((90.5, 25.5)),
+                Some((30.5, 70.5)),
+            ] {
+                map.fill(tiny_skia::Color::TRANSPARENT);
+                painter.paint_tag(
+                    &mut map,
+                    &gradient_tag(20, 20, "   "),
+                    (100.0, 80.0),
+                    toward,
+                );
+                assert!(map.pixels().iter().any(|p| p.alpha() == 255));
+                assert!(
+                    map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 255)),
+                    "no partially covered corner or arrow pixels at {scale}x toward {toward:?}"
+                );
+            }
+            let parts = Painter::arrow((20.5, 20.5), (70.5, 35.5), &style);
+            map.fill(tiny_skia::Color::TRANSPARENT);
+            paint_layer(&mut map, &parts, scale);
+            assert!(map.pixels().iter().any(|p| p.alpha() == 255));
+            assert!(
+                map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 255)),
+                "standalone arrows also have solid coverage at {scale}x"
+            );
+        }
+    }
+
+    #[test]
+    fn crisp_hint_coverage_preserves_configured_transparency() {
+        let mut style = Style {
+            background: Color::rgba(255, 255, 194, 128),
+            background_end: None,
+            border_width: 0.0,
+            shadow: Color::rgba(0, 0, 0, 0),
+            ..Style::default()
+        };
+        style.arrow.outline_width = 0.0;
+        for color in [None, Some(Color::rgba(255, 0, 0, 128))] {
+            style.arrow.color = color;
+            let mut painter = TextPainter::new(&style, 1.0).unwrap();
+            let mut map = Pixmap::new(100, 80).unwrap();
+            painter.paint_tag(
+                &mut map,
+                &gradient_tag(20, 20, "   "),
+                (100.0, 80.0),
+                Some((0.5, 25.5)),
+            );
+            assert!(map.pixels().iter().any(|p| p.alpha() == 128));
+            assert!(
+                map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 128)),
+                "crisp edges keep the configured alpha, including custom arrow colours"
+            );
+        }
     }
 
     #[test]
@@ -2667,7 +3316,7 @@ mod collision_tests {
 
     #[test]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn auto_arrows_touch_all_four_target_edges_without_entering_the_controls() {
+    fn auto_hints_and_arrows_move_four_pixels_into_all_four_target_edges() {
         for (vertical, near) in [(true, true), (true, false), (false, true), (false, false)] {
             let controls: Vec<_> = (0..3)
                 .map(|i| {
@@ -2699,14 +3348,14 @@ mod collision_tests {
                 );
                 assert!(
                     rect.intersect(control).is_none(),
-                    "hint must sit outside its own control"
+                    "clearance is checked before the visual shift"
                 );
                 let middle = control.center();
                 let touch = match (vertical, near) {
-                    (true, true) => Point::new(control.x - 1, middle.y),
-                    (true, false) => Point::new(control.right(), middle.y),
-                    (false, true) => Point::new(middle.x, control.y - 1),
-                    (false, false) => Point::new(middle.x, control.bottom()),
+                    (true, true) => Point::new(control.x + 3, middle.y),
+                    (true, false) => Point::new(control.right() - 4, middle.y),
+                    (false, true) => Point::new(middle.x, control.y + 3),
+                    (false, false) => Point::new(middle.x, control.bottom() - 4),
                 };
                 assert!(
                     pixmap
@@ -2729,6 +3378,42 @@ mod collision_tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn hint_and_arrow_keep_their_shape_when_shifted_at_each_scale() {
+        for scale in [1.0, 1.25, 2.0] {
+            for (dx, dy) in [(4, 0), (-4, 0), (0, 4), (0, -4)] {
+                let style = Style::default();
+                let mut painter = TextPainter::new(&style, scale).unwrap();
+                let mut tag = auto_tag(BUTTON, "EA");
+                tag.at = Point::new(100, 100);
+                tag.position = Position::TopLeft;
+                let area = (400.0, 300.0);
+                let rect = place(tag.at, tag.position, painter.size(&tag.text), area).unwrap();
+                let to = (
+                    rect.x() + rect.width() / 2.0 + dx as f32 * 25.0,
+                    rect.y() + rect.height() / 2.0 + dy as f32 * 25.0,
+                );
+                let mut original =
+                    Pixmap::new((area.0 * scale) as u32, (area.1 * scale) as u32).unwrap();
+                let mut shifted = original.clone();
+                let row = painter.row(&tag.text, tag.verb, tag.typed);
+                painter.draw(&mut original, rect, &[row], None, true, Some(to));
+                painter.paint_tag(&mut shifted, &tag, area, Some(to));
+                let (dx, dy) = ((dx as f32 * scale) as i32, (dy as f32 * scale) as i32);
+                for y in 0..original.height() {
+                    for x in 0..original.width() {
+                        let before = original.pixel(x, y).unwrap();
+                        let after = shifted
+                            .pixel(x.wrapping_add_signed(dx), y.wrapping_add_signed(dy))
+                            .map_or(0, |p| p.alpha());
+                        assert_eq!(before.alpha(), after, "shape at {scale}x, ({dx}, {dy})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_boxed_in_shared_row_stays_centered_inside_its_targets() {
         let controls = [
             BoxRect::new(60, 120, 24, 20),
@@ -2739,10 +3424,10 @@ mod collision_tests {
         painter.controls.extend(controls.iter().flat_map(|r| {
             let p = r.center();
             [
-                BoxRect::new(p.x - 45, p.y - 35, 44, 70),
-                BoxRect::new(p.x + 1, p.y - 35, 44, 70),
-                BoxRect::new(p.x - 45, p.y - 35, 90, 34),
-                BoxRect::new(p.x - 45, p.y + 1, 90, 34),
+                BoxRect::new(r.x - 29, p.y - 10, 26, 20),
+                BoxRect::new(r.right() + 3, p.y - 10, 26, 20),
+                BoxRect::new(p.x - 13, r.y - 23, 26, 20),
+                BoxRect::new(p.x - 13, r.bottom() + 3, 26, 20),
             ]
         }));
         let frame = Frame {
@@ -2765,25 +3450,79 @@ mod collision_tests {
     }
 
     #[test]
-    fn shared_side_survives_a_collision_and_filtering() {
-        let controls = [BoxRect::new(100, 80, 2, 12), BoxRect::new(100, 96, 2, 12)];
-        let mut painter = among(&controls);
-        let frame = Frame {
-            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
-            ..Frame::default()
-        };
-        let arranged = painter.arrange(&frame, (400.0, 300.0));
-        for (tag, control) in arranged.tags.iter().zip(controls) {
-            assert_eq!(tag.at, on(Side::Left, control, "EA").origin());
+    fn independent_hints_keep_tolerated_overlap_and_move_above_the_limit() {
+        for max_cover in [0, 50, 100] {
+            let mut painter = among(&[]);
+            painter.tags.style.max_cover = max_cover;
+            let size = painter.tags.size("EA");
+            let width = whole_px(
+                place(
+                    Point::new(100, 100),
+                    Position::TopLeft,
+                    size,
+                    (400.0, 300.0),
+                )
+                .unwrap(),
+            )
+            .w;
+            let shift = width - width / 2;
+            let frame = Frame {
+                tags: [100, 100 + shift]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, x)| Tag {
+                        at: Point::new(x, 100),
+                        position: Position::TopLeft,
+                        control: None,
+                        target: Some(Point::new(300 + i32::try_from(i).unwrap() * 40, 250)),
+                        ..auto_tag(BUTTON, "EA")
+                    })
+                    .collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            assert_eq!(arranged.tags[0].at, frame.tags[0].at);
+            assert_eq!(arranged.tags[1].at == frame.tags[1].at, max_cover >= 50);
+            let boxes: Vec<_> = arranged
+                .tags
+                .iter()
+                .map(|tag| whole_px(place(tag.at, tag.position, size, (400.0, 300.0)).unwrap()))
+                .collect();
+            assert!(!placement::overlaps(boxes[0], boxes[1], max_cover));
         }
-        let filtered = Frame {
-            tags: vec![frame.tags[1].clone()],
-            ..Frame::default()
-        };
-        assert_eq!(
-            painter.arrange(&filtered, (400.0, 300.0)).tags[0].at,
-            arranged.tags[1].at
-        );
+    }
+
+    #[test]
+    fn shared_side_survives_a_collision_and_filtering() {
+        for (controls, side) in [
+            (
+                [BoxRect::new(100, 80, 2, 12), BoxRect::new(100, 96, 2, 12)],
+                Side::Left,
+            ),
+            (
+                [BoxRect::new(100, 80, 2, 12), BoxRect::new(116, 80, 2, 12)],
+                Side::Above,
+            ),
+        ] {
+            let mut painter = among(&controls);
+            painter.tags.style.max_cover = 0;
+            let frame = Frame {
+                tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+                ..Frame::default()
+            };
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            for (tag, control) in arranged.tags.iter().zip(controls) {
+                assert_eq!(tag.at, on(side, control, "EA").origin());
+            }
+            let filtered = Frame {
+                tags: vec![frame.tags[1].clone()],
+                ..Frame::default()
+            };
+            assert_eq!(
+                painter.arrange(&filtered, (400.0, 300.0)).tags[0].at,
+                arranged.tags[1].at
+            );
+        }
     }
 
     #[test]
@@ -2997,6 +3736,109 @@ mod collision_tests {
     }
 
     #[test]
+    fn auto_bar_keeps_its_side_when_hints_cover_at_most_half_a_toolbar_target() {
+        let bar = BoxRect::new(0, 0, 400, 38);
+        let controls = [BoxRect::new(23, 4, 13, 30), BoxRect::new(40, 4, 13, 30)];
+        let toolbar = BoxRect::new(8, 38, 100, 36);
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        for max_cover in [0, 50, 100] {
+            let mut painter = among(&[controls.as_slice(), &[toolbar]].concat());
+            painter.tags.style.max_cover = max_cover;
+            painter.regions = vec![label_region(
+                bar,
+                crate::desktop::Kind::Layer { level: 1 },
+                AREA,
+            )];
+            let arranged = painter.arrange(&frame, (400.0, 300.0));
+            assert!(
+                arranged
+                    .tags
+                    .iter()
+                    .all(|tag| (tag.at.y == 37) == (max_cover >= 50))
+            );
+        }
+    }
+
+    #[test]
+    fn single_hint_uses_the_configured_coverage_limit() {
+        let neighbour = on(Side::Left, BUTTON, "EA");
+        for max_cover in [0, 50, 100] {
+            let mut painter = among(&[BUTTON, neighbour]);
+            painter.tags.style.max_cover = max_cover;
+            let (got, _) = auto(&mut painter, BUTTON, "EA");
+            assert_eq!(got == neighbour, max_cover == 100);
+        }
+    }
+
+    #[test]
+    fn neighbouring_targets_allow_configured_coverage_but_not_more() {
+        let control = BoxRect::new(10, 10, 20, 20);
+        let neighbour = BoxRect::new(40, 10, 20, 20);
+        for max_cover in [0, 25, 50, 100] {
+            let around = Around {
+                controls: &[control, neighbour],
+                tags: &[],
+                bounds: AREA,
+                max_cover,
+            };
+            for width in 1..=20 {
+                assert_eq!(
+                    around.clear(BoxRect::new(40, 10, width, 20), control),
+                    width * 5 <= i32::from(max_cover),
+                    "{width}/20 covered with max_cover = {max_cover}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_toolbar_hints_limit_overlap_with_bar_labels() {
+        let bar = BoxRect::new(0, 0, 400, 38);
+        let window = BoxRect::new(8, 38, 392, 262);
+        let controls = [
+            BoxRect::new(23, 4, 13, 30),
+            BoxRect::new(95, 4, 14, 30),
+            BoxRect::new(49, 46, 20, 20),
+            BoxRect::new(49, 79, 28, 28),
+        ];
+        let mut painter = among(&controls);
+        painter.regions = vec![
+            label_region(bar, crate::desktop::Kind::Layer { level: 1 }, AREA),
+            (window, window),
+        ];
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (400.0, 300.0));
+        let boxes: Vec<_> = arranged
+            .tags
+            .iter()
+            .map(|tag| {
+                whole_px(
+                    place(
+                        tag.at,
+                        tag.position,
+                        painter.tags.size(&tag.text),
+                        (400.0, 300.0),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        for (i, &rect) in boxes.iter().enumerate() {
+            assert!(boxes[i + 1..].iter().all(|&other| !placement::overlaps(
+                rect,
+                other,
+                painter.tags.style.max_cover
+            )));
+        }
+    }
+
+    #[test]
     fn auto_slightly_overlapping_hit_boxes_still_share_a_row() {
         let controls = [
             BoxRect::new(90, 240, 31, 30),
@@ -3070,7 +3912,7 @@ mod collision_tests {
         let two = among(&[]).tags.size("EA").0;
         #[allow(clippy::cast_possible_truncation)]
         let gap = f32::midpoint(one, two) as i32 + BESIDE;
-        let neighbour = BoxRect::new(0, 100, BUTTON.x - gap, 20);
+        let neighbour = BoxRect::new(BUTTON.x - gap - 2, 100, 2, 20);
         let mut painter = among(&[BUTTON, neighbour]);
         assert_eq!(
             auto(&mut painter, BUTTON, "EA").0,
@@ -3093,6 +3935,7 @@ mod collision_tests {
         let style = Style {
             size: 11.0,
             offset: [3, 3],
+            max_cover: 0,
             ..Style::default()
         };
         let mut painter =

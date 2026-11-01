@@ -1,5 +1,5 @@
 //! Move only colliding labels, preserving their target coordinates. Nearby
-//! candidates must clear captured ink, controls, and every other label.
+//! candidates must clear captured ink and controls, and limit label overlap.
 
 use crate::{
     geometry::{Point, Rect},
@@ -16,13 +16,16 @@ pub struct Label {
 }
 
 /// Keep a window label near its corner while yielding to other targets.
-pub fn window(rect: Rect, bounds: Rect, blocked: &[Rect]) -> Rect {
-    let clear =
-        |r: Rect| r.intersect(bounds) == Some(r) && blocked.iter().all(|&other| !touches(r, other));
+pub fn window(rect: Rect, bounds: Rect, blocked: &[Rect], hints: &[Rect], max_cover: u8) -> Rect {
+    let clear = |r: Rect| {
+        r.intersect(bounds) == Some(r)
+            && blocked.iter().all(|&other| !touches(r, other))
+            && hints.iter().all(|&other| !overlaps(r, other, max_cover))
+    };
     if clear(rect) {
         return rect;
     }
-    let blocked: Vec<_> = blocked.iter().map(|&r| expand(r, 3)).collect();
+    let blocked: Vec<_> = blocked.iter().chain(hints).map(|&r| expand(r, 3)).collect();
     let space = Space::rectangles(bounds, &blocked);
     space
         .spot(bounds, (rect.w, rect.h), rect.center(), 1)
@@ -32,7 +35,7 @@ pub fn window(rect: Rect, bounds: Rect, blocked: &[Rect]) -> Rect {
 
 /// Deterministic, bounded search. Retaining an original position when no
 /// legal gap exists is preferable to moving a hint onto text or controls.
-pub fn resolve(labels: &[Label], space: &Space) -> Vec<Rect> {
+pub fn resolve(labels: &[Label], space: &Space, max_cover: u8) -> Vec<Rect> {
     let mut placed: Vec<_> = labels.iter().map(|l| l.rect).collect();
     let mut gaps = std::collections::HashMap::new();
     // Preserve earlier labels first. If a later label is trapped, revisit the
@@ -46,7 +49,7 @@ pub fn resolve(labels: &[Label], space: &Space) -> Vec<Rect> {
             || !placed[..end]
                 .iter()
                 .enumerate()
-                .any(|(j, &r)| i != j && touches(placed[i], r))
+                .any(|(j, &r)| i != j && overlaps(placed[i], r, max_cover))
         {
             continue;
         }
@@ -64,7 +67,7 @@ pub fn resolve(labels: &[Label], space: &Space) -> Vec<Rect> {
                 && placed
                     .iter()
                     .enumerate()
-                    .all(|(j, &other)| i == j || !touches(r, other))
+                    .all(|(j, &other)| i == j || !overlaps(r, other, max_cover))
                 && labels
                     .iter()
                     .all(|other| other.target.is_none_or(|p| !expand(r, 5).contains(p)))
@@ -100,6 +103,20 @@ pub fn resolve(labels: &[Label], space: &Space) -> Vec<Rect> {
 fn expand(r: Rect, by: i32) -> Rect {
     Rect::new(r.x - by, r.y - by, r.w + 2 * by, r.h + 2 * by)
 }
+
+/// Whether `rect` covers more than the configured percentage of `other`.
+pub fn exceeds_cover(rect: Rect, other: Rect, max_cover: u8) -> bool {
+    rect.intersect(other).is_some_and(|overlap| {
+        100 * i128::from(overlap.w) * i128::from(overlap.h)
+            > i128::from(max_cover) * i128::from(other.w) * i128::from(other.h)
+    })
+}
+
+/// Hint overlap is limited against both labels, so smaller hints stay readable.
+pub fn overlaps(a: Rect, b: Rect, max_cover: u8) -> bool {
+    exceeds_cover(a, b, max_cover) || exceeds_cover(b, a, max_cover)
+}
+
 /// Whether two labels are too close to read apart.
 pub fn touches(a: Rect, b: Rect) -> bool {
     expand(a, 2).intersect(b).is_some()
@@ -108,6 +125,53 @@ pub fn touches(a: Rect, b: Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_overlap_checks_the_smaller_label_in_both_orders() {
+        let large = Rect::new(10, 10, 40, 20);
+        for max_cover in [0, 25, 50, 100] {
+            for width in 1..=20 {
+                let small = Rect::new(50 - width, 10, 20, 20);
+                let exceeds = width * 5 > i32::from(max_cover);
+                assert_eq!(overlaps(large, small, max_cover), exceeds);
+                assert_eq!(overlaps(small, large, max_cover), exceeds);
+            }
+        }
+    }
+
+    #[test]
+    fn window_hints_keep_tolerated_overlap_and_yield_above_it() {
+        let area = Rect::new(0, 0, 100, 80);
+        let rect = Rect::new(10, 10, 20, 20);
+        let other = Rect::new(20, 10, 20, 20);
+        for max_cover in [0, 50, 100] {
+            let out = window(rect, area, &[], &[other], max_cover);
+            assert_eq!(out == rect, max_cover >= 50);
+            assert!(!overlaps(out, other, max_cover));
+        }
+    }
+
+    #[test]
+    fn independent_hint_yields_to_a_fixed_group() {
+        let area = Rect::new(0, 0, 100, 80);
+        let fixed = Label {
+            rect: Rect::new(10, 10, 20, 20),
+            target: Some(Point::new(70, 60)),
+            bounds: area,
+            fixed: true,
+        };
+        let movable = Label {
+            fixed: false,
+            ..fixed
+        };
+        for labels in [[fixed, movable], [movable, fixed]] {
+            let out = resolve(&labels, &Space::rectangles(area, &[]), 50);
+            let fixed_index = usize::from(!labels[0].fixed);
+            assert_eq!(out[fixed_index], fixed.rect);
+            assert_ne!(out[1 - fixed_index], movable.rect);
+            assert!(!overlaps(out[0], out[1], 50));
+        }
+    }
 
     #[test]
     fn a_trapped_later_label_can_be_cleared_by_moving_the_earlier_one() {
@@ -126,7 +190,7 @@ mod tests {
                 bounds: Rect::new(40, 30, 24, 19),
             },
         ];
-        let out = resolve(&labels, &Space::rectangles(area, &[]));
+        let out = resolve(&labels, &Space::rectangles(area, &[]), 0);
         assert!(!touches(out[0], out[1]));
         assert_eq!(out[1], labels[1].rect);
     }
@@ -147,7 +211,7 @@ mod tests {
             .collect();
         let space = Space::rectangles(area, &controls);
         let start = std::time::Instant::now();
-        let out = resolve(&labels, &space);
+        let out = resolve(&labels, &space, 0);
         eprintln!(
             "dense blocked placement: {:.2}ms",
             start.elapsed().as_secs_f64() * 1000.0
@@ -180,17 +244,17 @@ mod tests {
             },
         ];
         let space = Space::rectangles(area, &ink);
-        let out = resolve(&labels, &space);
+        let out = resolve(&labels, &space, 0);
         assert_eq!(out[0], labels[0].rect);
         assert_ne!(out[1], labels[1].rect);
         assert_eq!(out[2], labels[2].rect);
         assert_eq!(space.ink(expand(out[1], 2)), 0);
         for (i, &a) in out.iter().enumerate() {
             for &b in &out[i + 1..] {
-                assert!(!touches(a, b));
+                assert!(!overlaps(a, b, 0));
             }
         }
-        assert_eq!(out, resolve(&labels, &space));
+        assert_eq!(out, resolve(&labels, &space, 0));
     }
 
     #[test]
@@ -203,7 +267,7 @@ mod tests {
             bounds: area,
         }; 2];
         assert_eq!(
-            resolve(&labels, &Space::rectangles(area, &[area])),
+            resolve(&labels, &Space::rectangles(area, &[area]), 0),
             vec![labels[0].rect; 2]
         );
     }

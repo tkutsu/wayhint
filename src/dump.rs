@@ -68,13 +68,19 @@ pub fn run(args: &Dump, config: Option<&std::path::Path>) -> Result<()> {
             stats: &stats,
         });
     }
-    let filtered = filter::filter(&tree);
+    let filtered = filter::filter(&tree, crate::config::hide_hidden(config)?);
     let mut snapshot = Snapshot::build(1, window.monitor, [Read::Tree(&tree, &filtered, &stats)]);
     if let Some(monitor) = desktop::monitors()?
         .into_iter()
         .find(|m| m.id == window.monitor)
     {
-        desktop.layout(&mut snapshot, &monitor, &desktop::Stack::default(), &[]);
+        desktop.layout(
+            &mut snapshot,
+            &monitor,
+            &desktop::Stack::default(),
+            &[],
+            crate::config::icon_names(config)?,
+        );
     }
     if let Some(query) = &args.text {
         return text(&desktop, &snapshot, query);
@@ -167,12 +173,16 @@ fn surfaces(pixels: Option<Detector>, config: Option<&std::path::Path>) -> Resul
     let terminals = crate::config::terminal_processes(config)?;
     let terminal_hint = crate::config::terminal_hint(config)?;
     let window_hint = crate::config::window_hint(config)?;
+    let hide_hidden = crate::config::hide_hidden(config)?;
+    let icon_names = crate::config::icon_names(config)?;
     let (snapshot, unread) = desktop.scan(
         &stack,
         &monitor,
         pixels,
         terminal_hint,
         window_hint,
+        hide_hidden,
+        icon_names,
         &terminals,
     );
     let tags = |w: &Window| {

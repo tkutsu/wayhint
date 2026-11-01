@@ -179,6 +179,8 @@ pub struct Span {
 pub struct Match {
     pub span: Span,
     pub parts: Vec<Rect>,
+    /// The leading symbol was used as a verb rather than matched as text.
+    pub verb: bool,
 }
 
 impl Match {
@@ -292,6 +294,8 @@ pub struct Search {
     /// Each text folded, in `texts`' order.
     folded: Vec<Folded>,
     query: String,
+    /// Also search without the leading symbol, which may be a verb.
+    verb_prefix: bool,
     /// Where each span asked about is, as the app said: global boxes, a line
     /// each, empty if it couldn't say. Kept for the whole text mode, so a
     /// longer query or a Backspace asks nothing it asked before.
@@ -308,6 +312,7 @@ impl Search {
             folded: texts.iter().map(|t| Folded::new(&t.content)).collect(),
             texts,
             query: String::new(),
+            verb_prefix: false,
             located: HashMap::new(),
             matches: Vec::new(),
             current: 0,
@@ -328,9 +333,34 @@ impl Search {
         self.query.push(c);
     }
 
+    /// Keeps a leading verb symbol in the query and searches both readings.
+    pub fn push_verb(&mut self, c: char) {
+        debug_assert_eq!(self.query, "");
+        self.push(c);
+        self.verb_prefix = true;
+    }
+
+    /// The query with its tentative verb removed, also used by fallback hints.
+    pub fn verb_query(&self) -> &str {
+        if self.verb_prefix {
+            &self.query[self.query.chars().next().map_or(0, char::len_utf8)..]
+        } else {
+            &self.query
+        }
+    }
+
+    /// Whether either reading of the query finds text, before locating it.
+    pub fn has_query(&self) -> bool {
+        self.starts_a_word(&self.query) || self.verb_prefix && self.starts_a_word(self.verb_query())
+    }
+
     /// Takes back the last character; `false` if there was none.
     pub fn pop(&mut self) -> bool {
-        self.query.pop().is_some()
+        let popped = self.query.pop().is_some();
+        if self.query.is_empty() {
+            self.verb_prefix = false;
+        }
+        popped
     }
 
     /// Whether typing `typed` would find something: it starts a word of a
@@ -344,18 +374,35 @@ impl Search {
     }
 
     /// Every occurrence of the query in the texts, in no particular order.
-    fn spans(&self) -> Vec<Span> {
+    fn spans(&self) -> Vec<(Span, bool)> {
         let query = Folded::new(&self.query);
+        let verb_query = Folded::new(self.verb_query());
         self.folded
             .iter()
             .zip(&self.texts)
             .enumerate()
             .flat_map(|(i, (text, read))| {
-                text.find(query.as_str()).map(move |found| Span {
+                let span = |found: Range<u32>| Span {
                     text: i,
                     start: read.start + found.start,
                     end: read.start + found.end,
-                })
+                };
+                let literal: Vec<_> = text.find(query.as_str()).map(span).collect();
+                let verbs = self.verb_prefix.then(|| {
+                    text.find(verb_query.as_str())
+                        .map(span)
+                        // `.hello` has one literal match, not another on `hello`.
+                        .filter(|found| {
+                            !literal
+                                .iter()
+                                .any(|full| full.start < found.start && full.end == found.end)
+                        })
+                        .collect::<Vec<_>>()
+                });
+                literal
+                    .into_iter()
+                    .map(|span| (span, false))
+                    .chain(verbs.into_iter().flatten().map(|span| (span, true)))
             })
             .collect()
     }
@@ -363,7 +410,7 @@ impl Search {
     /// The occurrences of the query whose place isn't known yet: what to
     /// ask the app before [`Search::update`].
     pub fn wanted(&self) -> Vec<Span> {
-        let mut spans = self.spans();
+        let mut spans: Vec<_> = self.spans().into_iter().map(|(span, _)| span).collect();
         spans.retain(|span| !self.located.contains_key(span));
         spans
     }
@@ -424,14 +471,14 @@ impl Search {
         let mut matches: Vec<Match> = self
             .spans()
             .into_iter()
-            .filter_map(|span| {
+            .filter_map(|(span, verb)| {
                 let text = &self.texts[span.text];
                 let boxes = self.located.get(&span)?;
                 let parts = visible(text, boxes)
                     .into_iter()
                     .filter(|part| shows(text.window, part.center()))
                     .collect::<Vec<_>>();
-                (!parts.is_empty()).then_some(Match { span, parts })
+                (!parts.is_empty()).then_some(Match { span, parts, verb })
             })
             .collect();
         matches.sort_by_key(|m| (m.point().y, m.point().x));
@@ -476,6 +523,39 @@ impl Search {
         if !self.matches.is_empty() {
             self.current = (self.current + self.matches.len() - 1) % self.matches.len();
         }
+    }
+
+    /// Selects the nearest match in the half-plane ahead of `direction`,
+    /// without wrapping. True when arrows belong to matches, even at an
+    /// edge; false when they should move the pointer instead.
+    pub fn navigate(&mut self, direction: Point) -> bool {
+        if self.verb_query().is_empty() {
+            return false;
+        }
+        let Some(current) = self.current() else {
+            return false;
+        };
+        let at = current.point();
+        let (x, y) = (
+            i128::from(direction.x.signum()),
+            i128::from(direction.y.signum()),
+        );
+        let next = self
+            .matches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, found)| {
+                let point = found.point();
+                let dx = i128::from(point.x) - i128::from(at.x);
+                let dy = i128::from(point.y) - i128::from(at.y);
+                let forward = dx * x + dy * y;
+                (forward > 0).then_some((dx * dx + dy * dy, index))
+            })
+            .min();
+        if let Some((_, index)) = next {
+            self.current = index;
+        }
+        true
     }
 }
 
@@ -609,6 +689,36 @@ mod tests {
     }
 
     #[test]
+    fn symbol_prefixes_keep_literal_and_verb_spans_distinct() {
+        for symbol in ['_', '.', '/', '§', '🦀'] {
+            let content = format!("{symbol}hello.md hellooooo");
+            let mut search = Search::new(vec![text(&content, Rect::new(0, 0, 300, 20))]);
+            search.push_verb(symbol);
+            "hello".chars().for_each(|c| search.push(c));
+            locate(&mut search);
+            search.update(&everywhere);
+            let found: Vec<_> = search
+                .matches()
+                .iter()
+                .map(|found| (found.span.start, found.span.end, found.verb))
+                .collect();
+            assert_eq!(found, [(0, 6, false), (10, 15, true)], "{symbol}");
+        }
+    }
+
+    #[test]
+    fn unbound_symbols_are_literal_and_symbols_inside_queries_stay_literal() {
+        for query in ["_hello", ".hello", "hello_world"] {
+            let mut search = Search::new(vec![text(query, Rect::new(0, 0, 300, 20))]);
+            query.chars().for_each(|c| search.push(c));
+            locate(&mut search);
+            search.update(&everywhere);
+            assert_eq!(search.matches().len(), 1, "{query}");
+            assert!(!search.current().unwrap().verb);
+        }
+    }
+
+    #[test]
     fn word_starts_are_what_a_first_letter_finds_and_only_shown_ones_mark() {
         let mut search = Search::new(vec![
             text("Save as… can't", Rect::new(0, 0, 200, 10)),
@@ -670,6 +780,178 @@ mod tests {
         assert_eq!(search.position(), (3, 3), "back from the first is the last");
         search.next();
         assert_eq!(search.position(), (1, 3), "on from the last is the first");
+    }
+
+    fn spatial_search(points: &[(i32, i32)]) -> Search {
+        let mut search = Search::new(
+            points
+                .iter()
+                .map(|&(x, y)| text("word", Rect::new(x, y, 20, 10)))
+                .collect(),
+        );
+        search.push('w');
+        let spans = search.wanted();
+        let boxes = spans
+            .iter()
+            .map(|s| vec![search.texts[s.text].rect])
+            .collect();
+        search.located(&spans, boxes);
+        search.update(&everywhere);
+        search
+    }
+
+    #[test]
+    fn arrows_select_matches_in_space_and_stay_at_edges() {
+        let mut search = spatial_search(&[
+            (0, 0),
+            (100, 0),
+            (200, 0),
+            (0, 100),
+            (100, 100),
+            (200, 100),
+            (0, 200),
+            (100, 200),
+            (200, 200),
+        ]);
+        for (direction, expected) in [
+            (Point::new(0, -10), 1),
+            (Point::new(-10, 0), 3),
+            (Point::new(10, 0), 5),
+            (Point::new(0, 10), 7),
+        ] {
+            search.current = 4;
+            assert!(search.navigate(direction));
+            assert_eq!(search.position(), (expected + 1, 9));
+            assert!(
+                search.navigate(direction),
+                "an edge still consumes the arrow"
+            );
+            assert_eq!(search.position(), (expected + 1, 9), "no wrapping");
+            assert_eq!(search.query(), "w", "navigation keeps the query");
+        }
+        search.current = 8;
+        search.next();
+        assert_eq!(search.position(), (1, 9), "Tab still wraps");
+        search.previous();
+        assert_eq!(search.position(), (9, 9), "Shift+Tab still wraps");
+    }
+
+    #[test]
+    fn arrows_reach_offset_matches_anywhere_in_the_requested_direction() {
+        for (direction, offset, farther, behind, beside) in [
+            (
+                Point::new(0, -1),
+                (400, 290),
+                (300, 50),
+                (310, 310),
+                (310, 300),
+            ),
+            (
+                Point::new(0, 1),
+                (400, 310),
+                (300, 550),
+                (310, 290),
+                (310, 300),
+            ),
+            (
+                Point::new(-1, 0),
+                (290, 400),
+                (50, 300),
+                (310, 310),
+                (300, 310),
+            ),
+            (
+                Point::new(1, 0),
+                (310, 400),
+                (550, 300),
+                (290, 310),
+                (300, 310),
+            ),
+        ] {
+            let mut search = spatial_search(&[(300, 300), offset, farther, behind, beside]);
+            search.current = search
+                .matches
+                .iter()
+                .position(|m| m.span.text == 0)
+                .unwrap();
+            assert!(search.navigate(direction));
+            assert_eq!(
+                search.current().unwrap().span.text,
+                1,
+                "choose the closest match in {direction:?}, even far off-axis"
+            );
+        }
+    }
+
+    #[test]
+    fn arrows_choose_nearby_matches_in_their_direction_and_repeat() {
+        let mut search = spatial_search(&[(0, 0), (100, 5), (10, 100), (20, 200)]);
+        assert!(search.navigate(Point::new(0, 1)));
+        assert_eq!(
+            search.current().unwrap().point(),
+            Point::new(110, 10),
+            "Down includes the closest match even when it is mostly to the right"
+        );
+        assert!(search.navigate(Point::new(0, 1)));
+        assert_eq!(
+            search.current().unwrap().point(),
+            Point::new(20, 105),
+            "held arrows continue from the newly selected match"
+        );
+        assert!(search.navigate(Point::new(0, 1)));
+        assert_eq!(search.current().unwrap().point(), Point::new(30, 205));
+        assert!(search.navigate(Point::new(0, 1)));
+        assert_eq!(search.current().unwrap().point(), Point::new(30, 205));
+
+        let mut search = spatial_search(&[(0, 0), (100, 100), (200, 200)]);
+        assert!(search.navigate(Point::new(1, 1)), "combined held arrows");
+        assert_eq!(search.position(), (2, 3));
+        assert!(
+            search.navigate(Point::new(0, 0)),
+            "opposite held arrows cancel"
+        );
+        assert_eq!(search.position(), (2, 3));
+        assert!(search.navigate(Point::new(1, 1)));
+        assert_eq!(search.position(), (3, 3));
+    }
+
+    #[test]
+    fn arrows_move_the_pointer_without_a_query_or_match() {
+        let direction = Point::new(1, 0);
+        let mut search = spatial_search(&[(0, 0)]);
+        assert!(
+            search.navigate(direction),
+            "one match consumes arrows at its edge"
+        );
+        search.pop();
+        search.update(&everywhere);
+        assert!(!search.navigate(direction), "empty input");
+        search.push_verb('_');
+        search.update(&everywhere);
+        assert!(!search.navigate(direction), "just a verb");
+        search.push('z');
+        search.update(&everywhere);
+        assert!(!search.navigate(direction), "no matches");
+
+        let mut literal = Search::new(vec![text("_word", Rect::new(0, 0, 100, 10))]);
+        literal.push_verb('_');
+        locate(&mut literal);
+        literal.update(&everywhere);
+        assert!(
+            literal.current().is_some(),
+            "the symbol also matches literally"
+        );
+        assert!(
+            !literal.navigate(direction),
+            "a verb alone still moves the pointer"
+        );
+        literal.push('w');
+        locate(&mut literal);
+        literal.update(&everywhere);
+        assert!(
+            literal.navigate(direction),
+            "a verb and query navigate matches"
+        );
     }
 
     #[test]

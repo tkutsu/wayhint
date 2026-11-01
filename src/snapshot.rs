@@ -69,8 +69,8 @@ pub struct TextSource {
     /// Text mode's tags skip that target, since typing the text finds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<ObjectId>,
-    /// A button's name may be letters or an icon: `Desktop::layout` keeps
-    /// it only where its picture shows letters.
+    /// A button searched by its accessible name: matches select the
+    /// control's box and act at its center, even when it shows an icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub button: Option<Button>,
     /// A menu item's name and global box, as the scan read them: its text
@@ -87,7 +87,7 @@ pub struct MenuItem {
     pub rect: Rect,
 }
 
-/// What `Desktop::layout` checks a button's picture by.
+/// A button searched by name, with its scan geometry and name length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Button {
     pub rect: Rect,
@@ -826,6 +826,7 @@ mod tests {
             details: Some(Details {
                 name: name.into(),
                 actions: vec!["click".into()],
+                hidden: false,
             }),
         };
         let nodes = vec![
@@ -838,7 +839,7 @@ mod tests {
                 window: Window { kind, ..window() },
                 nodes: nodes.clone(),
             };
-            let filtered = filter::filter(&tree);
+            let filtered = filter::filter(&tree, true);
             let stats = Stats::default();
             let read = Read::Tree(&tree, &filtered, &stats);
             Snapshot::build(1, 0, [read]).texts

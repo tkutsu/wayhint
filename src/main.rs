@@ -139,7 +139,7 @@ impl pick::Source for Saved {
 /// No pointer to move: the overlay alone clicks nothing, so the arrows do
 /// nothing either.
 impl pick::Mouse for Saved {
-    fn move_by(&mut self, _: Point) -> Result<()> {
+    fn move_by(&mut self, _: Point, _: &mut dyn FnMut() -> Result<bool>) -> Result<()> {
         Ok(())
     }
 
@@ -196,9 +196,6 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
         }
         Pick::Here { act, .. } => {
             eprintln!("wayhint: {} where the pointer is", act.action.name());
-        }
-        Pick::Again { act } => {
-            eprintln!("wayhint: {} where the last command was", act.action.name());
         }
         Pick::Repeat => eprintln!("wayhint: repeat (nothing to repeat here)"),
         Pick::Release => eprintln!("wayhint: release (nothing is held here)"),

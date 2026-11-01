@@ -136,13 +136,11 @@ fn claim(all: &[Vec<usize>], kept: &[Option<&[usize]>]) -> Vec<Vec<usize>> {
 pub enum Input {
     /// A tag letter, by its index in the alphabet.
     Letter(usize, Mods),
-    /// Enter: act on a completed tag, with these modifiers.
+    /// Enter: confirm a completed tag, or act at the pointer if none is typed.
     Confirm(Mods),
     /// A verb key: the tag being typed gets this action instead of the
     /// default.
     Verb(Action, Mods),
-    /// `Space`: act where the pointer already is, no tag.
-    Here(Mods),
     /// The repeat key: the last command again, on the same target.
     Repeat,
     Backspace,
@@ -156,11 +154,8 @@ pub enum Step {
     Typing,
     /// A whole label was typed: do `act` at this target, by index.
     Picked { index: usize, act: Act },
-    /// `Space`: do `act` where the pointer is.
+    /// Enter with no tag typed: do `act` where the pointer is.
     Here(Act),
-    /// A verb typed twice, no letter between: do `act` again where the
-    /// last command was done. The run knows where that was.
-    Again(Act),
     /// The repeat key. The run knows what the last command was.
     Repeat,
     /// A letter no label continues with. Nothing changes, nothing runs.
@@ -171,12 +166,12 @@ pub enum Step {
 
 /// The labels on screen, the letters typed so far and the armed verb.
 ///
-/// A command is a tag or `Space`, with a verb anywhere before its last
+/// A command is a tag or `Enter`, with a verb anywhere before its last
 /// key: `k e h` and `e k h` both double-click tag `eh`. Nothing ever waits on a timeout: a verb key is never a tag letter
 /// (the config takes verb keys out of the alphabet), and labels are
 /// prefix-free, so the last letter can act immediately. With autoaccept
 /// off, Enter confirms the completed tag. Arrows are no input here: they
-/// move the pointer itself (`pick`), where `Space` acts.
+/// move the pointer itself (`pick`), where Enter with no tag typed acts.
 #[derive(Debug, Clone)]
 pub struct Selector {
     labels: Vec<Vec<usize>>,
@@ -331,6 +326,11 @@ impl Selector {
                     Step::Ignored
                 }
             }
+            Input::Confirm(held) if self.typed.is_empty() => {
+                let act = self.act(held);
+                self.reset();
+                Step::Here(act)
+            }
             Input::Confirm(held) => {
                 if let Some(index) = self.labels.iter().position(|l| *l == self.typed) {
                     let act = self.act(held);
@@ -340,13 +340,6 @@ impl Selector {
                     Step::Ignored
                 }
             }
-            // The same verb twice with no letter yet: `PgDn PgDn` scrolls
-            // where the last one did. Arrows in between still count.
-            Input::Verb(action, held) if self.armed == Some(action) && self.typed.is_empty() => {
-                let act = self.act(held);
-                self.reset();
-                Step::Again(act)
-            }
             // Letters typed before a verb stay: the verb says what, the
             // letters where. Another verb
             // replaces the first, so a wrong one needs no Backspace.
@@ -354,11 +347,6 @@ impl Selector {
                 self.armed = Some(action);
                 self.armed_at = self.typed.len();
                 Step::Typing
-            }
-            Input::Here(held) => {
-                let act = self.act(held);
-                self.reset();
-                Step::Here(act)
             }
             // A whole command of its own: whatever was typed before it is
             // dropped, a verb too.
@@ -531,7 +519,6 @@ mod tests {
     #[test]
     fn confirmation_waits_for_a_whole_tag_and_uses_enters_modifiers() {
         let mut s = five().with_auto_accept(false);
-        assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored);
         assert_eq!(s.press(letter(0)), Step::Typing);
         assert_eq!(s.press(Input::Confirm(CTRL)), Step::Ignored, "a prefix");
         assert_eq!(s.press(Input::Letter(1, ALT)), Step::Typing);
@@ -582,7 +569,10 @@ mod tests {
         );
         assert!(s.relabel(&[None, Some(1), Some(2), Some(3), Some(4)], 4));
         assert!(s.typed().is_empty(), "a reused label is not a selection");
-        assert_eq!(s.press(Input::Confirm(Mods::NONE)), Step::Ignored);
+        assert_eq!(
+            s.press(Input::Confirm(Mods::NONE)),
+            Step::Here(act(Action::Left, Mods::NONE))
+        );
     }
 
     #[test]
@@ -591,7 +581,11 @@ mod tests {
         s.press(verb(Action::Right));
         s.press(letter(1));
         s.reopen(2, 4);
-        assert_eq!(s.press(Input::Confirm(Mods::NONE)), Step::Ignored);
+        assert_eq!(
+            s.press(Input::Confirm(Mods::NONE)),
+            Step::Here(act(Action::Right, Mods::NONE))
+        );
+        s.press(verb(Action::Right));
         assert_eq!(s.press(letter(0)), Step::Typing);
         assert_eq!(
             s.press(Input::Confirm(Mods::NONE)),
@@ -642,18 +636,20 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_typed_twice_acts_again_where_the_last_command_was() {
+    fn a_verb_typed_twice_stays_armed_until_enter_or_a_tag() {
         let mut s = five();
-        s.press(verb(Action::ScrollDown));
+        s.press(verb(Action::Right));
+        assert_eq!(s.press(verb(Action::Right)), Step::Typing);
+        assert_eq!(s.armed(), Some(Action::Right));
         assert_eq!(
-            s.press(verb(Action::ScrollDown)),
-            Step::Again(act(Action::ScrollDown, Mods::NONE))
+            s.press(Input::Confirm(CTRL)),
+            Step::Here(act(Action::Right, CTRL))
         );
-        assert_eq!(s.armed(), None, "a whole command: nothing is left armed");
-        s.press(verb(Action::ScrollDown));
+        assert_eq!(s.armed(), None);
+        s.press(verb(Action::Right));
         s.press(letter(0));
         assert_eq!(
-            s.press(verb(Action::ScrollDown)),
+            s.press(verb(Action::Right)),
             Step::Typing,
             "after a letter, the verb is for that tag"
         );
@@ -681,16 +677,18 @@ mod tests {
     }
 
     #[test]
-    fn space_acts_where_the_pointer_is() {
+    fn enter_with_no_tag_acts_where_the_pointer_is() {
         let mut s = five();
         let here = |action, mods| Step::Here(act(action, mods));
         assert_eq!(
-            s.press(Input::Here(Mods::NONE)),
+            s.press(Input::Confirm(Mods::NONE)),
             here(Action::Left, Mods::NONE)
         );
         s.press(verb(Action::Middle));
-        assert_eq!(s.press(Input::Here(CTRL)), here(Action::Middle, CTRL));
+        assert_eq!(s.press(Input::Confirm(CTRL)), here(Action::Middle, CTRL));
         assert_eq!(s.armed(), None);
+        let mut empty = Selector::new(0, 4, Action::Right).with_auto_accept(false);
+        assert_eq!(empty.press(Input::Confirm(ALT)), here(Action::Right, ALT));
     }
 
     #[test]
