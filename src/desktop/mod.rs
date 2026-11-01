@@ -286,6 +286,7 @@ impl Desktop {
     /// (its windows with no pixels, its dropdown layer) are kept untagged,
     /// for text mode to ask kitty what they show. Why comes back next to
     /// the snapshot, with any frames `stack` couldn't place.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)] // independent scan settings, shared by runs and dumps
     pub fn scan(
         &mut self,
         stack: &Stack,
@@ -293,6 +294,8 @@ impl Desktop {
         pixels: Option<Detector>,
         terminal_hint: bool,
         window_hint: bool,
+        hide_hidden: bool,
+        icon_names: bool,
         terminals: &[String],
     ) -> (Snapshot, Vec<Unread>) {
         // A layer with no frame only covers.
@@ -337,7 +340,7 @@ impl Desktop {
             let detector = pixels.filter(|_| window.kind == Kind::Client);
             match (read, detector) {
                 (Ok((tree, stats)), _) => {
-                    let filtered = filter::filter(&tree);
+                    let filtered = filter::filter(&tree, hide_hidden);
                     seen.push(Seen::Tree(tree, filtered, stats));
                 }
                 (Err(e), None) => failed.push(Unread::new(window, e)),
@@ -386,7 +389,7 @@ impl Desktop {
                 Seen::Tree(..) => {}
             }
         }
-        self.layout(&mut snapshot, monitor, stack, &unpictured);
+        self.layout(&mut snapshot, monitor, stack, &unpictured, icon_names);
         let unscanned = stack.windows.iter().filter(|w| {
             !snapshot
                 .windows
@@ -473,10 +476,14 @@ impl Desktop {
         monitor: &Monitor,
         stack: &Stack,
         unpictured: &[String],
+        icon_names: bool,
     ) {
         let mut obstacles = Vec::new();
-        // Text sources kept: a button only where its picture shows letters.
-        let mut keep: Vec<bool> = snapshot.texts.iter().map(|t| t.button.is_none()).collect();
+        let mut keep: Vec<bool> = snapshot
+            .texts
+            .iter()
+            .map(|t| icon_names || t.button.is_none())
+            .collect();
         for (index, scanned) in snapshot.windows.iter().enumerate() {
             let window = &scanned.window;
             if window.rect.intersect(monitor.rect).is_none() {
@@ -494,7 +501,7 @@ impl Desktop {
                 Kind::Client => self.picture(window).ok(),
                 _ => None,
             };
-            if let Some(picture) = &picture {
+            if !icon_names && let Some(picture) = &picture {
                 let scale = picture.scale;
                 for (i, text) in snapshot.texts.iter().enumerate() {
                     if let Some(button) = text.button.filter(|_| text.window == index) {
@@ -588,7 +595,7 @@ impl Desktop {
                     );
                 }
                 let with: Vec<usize> = (0..reads.len())
-                    .filter(|&i| !filter::filter(&reads[i].0).kept.is_empty())
+                    .filter(|&i| !filter::filter(&reads[i].0, true).kept.is_empty())
                     .collect();
                 let pick = match with.as_slice() {
                     // None has controls: any of them gives no tags.
@@ -1243,8 +1250,16 @@ mod tests {
         let mut desktop = Desktop::connect().unwrap();
         for pixels in [None, Some(Detector::Fast), Some(Detector::Full)] {
             for enabled in [true, false] {
-                let (snapshot, unread) =
-                    desktop.scan(&stack, &monitor, pixels, enabled, false, &["kitty".into()]);
+                let (snapshot, unread) = desktop.scan(
+                    &stack,
+                    &monitor,
+                    pixels,
+                    enabled,
+                    false,
+                    true,
+                    true,
+                    &["kitty".into()],
+                );
                 assert!(
                     unread.is_empty(),
                     "{:?}",

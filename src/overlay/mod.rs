@@ -92,10 +92,9 @@ pub enum Event {
     /// Shift is in the [`Key`], because `_` and `-` are different keys to
     /// the config; the [`Mods`] are what a click can hold, Ctrl and Alt.
     Key(Key, Mods),
-    /// An arrow is still held: its tick so far, 1 for the first (see
-    /// `hold.rs`). Its press came as a `Key`, or a `Typed` while typing,
-    /// and its release brings nothing.
-    Held(Key, Mods, u16),
+    /// All held arrows as one direction and tick count (see `hold.rs`).
+    /// Their presses came as keys; releases bring no extra movement.
+    Held(Point, u16),
     /// While typing is on ([`Overlay::start_typing`]): a key as it's
     /// pressed, with the character it types, if any. Every key but Enter
     /// comes this way, and its release brings nothing: acting on presses
@@ -352,6 +351,28 @@ impl Overlay {
         !self.state.holds.is_empty()
     }
 
+    /// Poll input between motion frames; releasing or changing arrows stops
+    /// this movement, and pending exit events are left for the normal loop.
+    pub fn motion(&mut self) -> impl FnMut() -> Result<bool> + '_ {
+        let direction = self.state.holds.direction();
+        move || {
+            self.event_loop
+                .dispatch(Some(Duration::ZERO), &mut self.state)?;
+            Ok(self.state.holds.direction() == direction
+                && !self.state.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        Event::Interrupted
+                            | Event::Closed
+                            | Event::KeyboardLost
+                            | Event::Monitors
+                            | Event::Workspace
+                            | Event::Escape
+                    )
+                }))
+        }
+    }
+
     /// Starts reading keys as text, for text mode: they come as
     /// [`Event::Typed`], in the layout they're typed in.
     pub fn start_typing(&mut self) -> Result<()> {
@@ -532,6 +553,10 @@ impl Overlay {
     /// Waits for an event or a held arrow's tick, until `until` if given:
     /// `None` when that time comes first.
     pub fn next_event(&mut self, until: Option<Instant>) -> Result<Option<Event>> {
+        // A pointer roundtrip may already have read releases into Wayland's
+        // queue. Handle them before consuming another queued movement.
+        self.event_loop
+            .dispatch(Some(Duration::ZERO), &mut self.state)?;
         loop {
             if let Some(event) = self.state.events.pop_front() {
                 return Ok(Some(event));
@@ -544,11 +569,9 @@ impl Overlay {
             let wake = until.into_iter().chain(tick).min();
             let wait = wake.map(|at| at.saturating_duration_since(now));
             self.event_loop.dispatch(wait, &mut self.state)?;
-            let ticks = self.state.holds.due(Instant::now());
-            let held = ticks
-                .into_iter()
-                .map(|(key, mods, n)| Event::Held(key, mods, n));
-            self.state.events.extend(held);
+            if let Some((direction, ticks)) = self.state.holds.due(Instant::now()) {
+                self.state.events.push_back(Event::Held(direction, ticks));
+            }
         }
     }
 

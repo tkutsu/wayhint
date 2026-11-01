@@ -25,16 +25,15 @@
 //!
 //! The keys pick a target and a verb (`[verb] tag`, the verb anywhere
 //! before the tag's last letter), or a verb and the spot under the
-//! pointer (`[verb] Space`), which skips the re-check, or a verb typed
-//! twice, done again where the last command was.
+//! pointer (`[verb] Enter` with nothing typed), which skips the re-check.
 //! Ctrl or Alt held on the last key are held through the click; Shift
 //! never is, since it types the capitals that are verbs.
 //! A hold presses a button and keeps it down through the next round: the
 //! next command, whatever its verb, lets go where it points.
 //! The arrows move the pointer itself: after a hold they drag, and
-//! `Space` or a verb typed twice acts where they took it. In text mode the
-//! pointer goes to the current match first, and Enter clicks where the
-//! arrows took it from there.
+//! Enter with nothing typed acts where they took it. In text mode the
+//! pointer optionally follows the current match, and Enter acts on the
+//! match unless the arrows aimed the pointer elsewhere.
 //! The repeat key does the last command on a target again: the target is
 //! found in the new scan by its accessibility object, not by its tag or
 //! where it was. A pixel target has none, so it can't be repeated.
@@ -62,7 +61,7 @@ use smithay_client_toolkit::reexports::client::Connection;
 
 use crate::{
     action::{Act, Action, Mods},
-    config::{After, Config},
+    config::Config,
     desktop::{self, Desktop, Monitor, Stack, Unread, Verdict, tree::ObjectId},
     geometry::{Point, Rect},
     keyboard::Keyboard,
@@ -92,12 +91,11 @@ struct Session {
     screens: Vec<Rect>,
     /// The last command on a target, for the repeat key.
     last: Option<Command>,
-    /// Where the last command was done, or wayhint moved the pointer
-    /// since, for a verb typed twice.
-    spot: Option<Point>,
     /// Where the pointer was before wayhint moved it, until the next
-    /// command: where `[pointer] after = "restore"` puts it back.
+    /// command: where `[pointer] restore_on_action = true` puts it back.
     home: Option<Point>,
+    /// The launch position, independent of per-command pointer restoration.
+    return_to: Option<Point>,
     /// The button a hold keeps down, until the next command lets go.
     held: Option<Held>,
     /// What the scans have warned about so far: each rescan finds the same
@@ -116,7 +114,7 @@ struct Command {
 }
 
 /// A hold's button, down at `at`, and where the cursor goes back to once
-/// it's let go, if `[pointer] after` puts it back.
+/// it's let go, if `[pointer] restore_on_action` puts it back.
 #[derive(Debug, Clone, Copy)]
 struct Held {
     at: Point,
@@ -141,6 +139,11 @@ pub fn run(
     start: Start,
     toggle: std::os::unix::net::UnixDatagram,
 ) -> Result<()> {
+    let return_to = if config.restore_on_exit {
+        Some(desktop::cursor().context("saving the cursor position for exit")?)
+    } else {
+        None
+    };
     if static_mode {
         config.refresh = None;
     }
@@ -180,16 +183,16 @@ pub fn run(
         keyboard: None,
         screens: monitors.iter().map(|m| m.rect).collect(),
         last: None,
-        spot: None,
         home: None,
+        return_to,
         held: None,
         warned: HashSet::new(),
         conn,
     };
 
     let result = session.start(&config, once || static_mode, static_mode, start);
-    session.clean_up();
-    result
+    let cleaned = session.clean_up();
+    result.and(cleaned)
 }
 
 impl Session {
@@ -226,7 +229,7 @@ impl Session {
             act.action,
             act.mods,
             desktop::cursor()?,
-            config.after == After::Restore,
+            config.restore_on_action,
         )?;
         Ok(Done::Acted { ends: false })
     }
@@ -269,12 +272,7 @@ impl Session {
                 config,
                 &mut snapshot,
                 first,
-                &mut Hand::new(
-                    &mut self.pointer,
-                    &self.screens,
-                    &mut self.spot,
-                    &mut self.home,
-                ),
+                &mut Hand::new(&mut self.pointer, &self.screens, &mut self.home),
                 &mut scans,
             )?;
             // Moved out, so `scans` lets go of the desktop for the click.
@@ -287,25 +285,13 @@ impl Session {
                 // Nothing was done, so `--once` goes on too, and the letters
                 // typed so far go with the old tags.
                 Pick::Rescan => continue,
-                // `Space`: the cursor is already there, and there's no
-                // target to re-check, or to repeat on. Nor any telling
+                // Enter with nothing typed: the cursor is already there,
+                // with no target to re-check, or to repeat on. Nor any telling
                 // what's under it, so a click there ends the run in case it
                 // was a text field (see `command`).
                 Pick::Here { act } => {
                     self.last = None;
                     self.act(act.action, act.mods, desktop::cursor()?, false)?;
-                    Done::Acted {
-                        ends: act.action.clicks(),
-                    }
-                }
-                // A verb typed twice: where the last command was, or at
-                // the pointer before the first. As unknown as `Space`'s spot,
-                // so a click there ends the run too.
-                Pick::Again { act } => {
-                    self.last = None;
-                    let at = self.spot.map_or_else(desktop::cursor, Ok)?;
-                    let restore = config.after == After::Restore;
-                    self.act(act.action, act.mods, at, restore)?;
                     Done::Acted {
                         ends: act.action.clicks(),
                     }
@@ -424,7 +410,7 @@ impl Session {
                 Ok(Done::Acted { ends: false })
             }
             Verdict::Click { editable } => {
-                let restore = config.after == After::Restore;
+                let restore = config.restore_on_action;
                 let Act { action, mods } = command.act;
                 let at = at.unwrap_or(target.hit);
                 self.act(action, mods, at, restore)?;
@@ -469,7 +455,6 @@ impl Session {
     fn act(&mut self, action: Action, mods: Mods, at: Point, restore: bool) -> Result<()> {
         let home = self.home.take();
         if let Some(held) = self.held.take() {
-            self.spot = Some(at);
             self.overlay.clear()?;
             let from = desktop::cursor().unwrap_or(held.at);
             self.pointer.drag(from, at)?;
@@ -496,7 +481,6 @@ impl Session {
         } else {
             at
         };
-        self.spot = Some(at);
         // Back where it was before wayhint moved it, if it did.
         let back = if restore && action.restores() {
             home.or_else(|| desktop::cursor().ok())
@@ -528,14 +512,12 @@ impl Session {
     }
 
     /// Puts the pointer back where it was before wayhint moved it, as
-    /// `[pointer] after = "restore"` does after a click: leaving undoes the
+    /// `[pointer] restore_on_action = true` does after a click: leaving undoes the
     /// arrows and the jumps to matches. Not while a hold keeps a button
     /// down: that would drag.
     fn go_home(&mut self, config: &Config) -> Result<()> {
         match self.home.take() {
-            Some(home) if config.after == After::Restore && self.held.is_none() => {
-                self.pointer.go(home)
-            }
+            Some(home) if config.restore_on_action && self.held.is_none() => self.pointer.go(home),
             _ => Ok(()),
         }
     }
@@ -571,15 +553,20 @@ impl Session {
         keyboard.hold(mods, self.overlay.locks())
     }
 
-    /// The one cleanup path: nothing pressed, keyboard handed back. `Drop`
-    /// on each part does the same as a backstop, so a panic is covered too.
-    fn clean_up(&mut self) {
+    /// Release buttons and modifiers before returning to the launch position,
+    /// then hand the keyboard back even if restoring the cursor fails.
+    fn clean_up(&mut self) -> Result<()> {
         self.pointer.release_all();
         if let Some(keyboard) = &mut self.keyboard {
             keyboard.release_all();
         }
         let _ = self.overlay.clear();
+        let restored = match self.return_to.take() {
+            Some(at) => self.pointer.put_back(at),
+            None => Ok(()),
+        };
         let _ = self.overlay.release_keyboard();
+        restored.context("restoring the cursor position on exit")
     }
 }
 
@@ -657,13 +644,11 @@ impl pick::Source for Scans<'_> {
     }
 }
 
-/// The pointer for a pick, moved by the virtual pointer. Where it goes is
-/// the spot a verb typed twice acts on, and where it was before the first
-/// move is `home`.
+/// The pointer for a pick, moved by the virtual pointer. Where it was
+/// before the first move is `home`.
 struct Hand<'a> {
     pointer: &'a mut Pointer,
     screens: &'a [Rect],
-    spot: &'a mut Option<Point>,
     home: &'a mut Option<Point>,
 }
 
@@ -671,22 +656,27 @@ impl<'a> Hand<'a> {
     const fn new(
         pointer: &'a mut Pointer,
         screens: &'a [Rect],
-        spot: &'a mut Option<Point>,
         home: &'a mut Option<Point>,
     ) -> Self {
         Self {
             pointer,
             screens,
-            spot,
             home,
         }
     }
 }
 
 impl pick::Mouse for Hand<'_> {
-    fn move_by(&mut self, by: Point) -> Result<()> {
-        let at = moved(desktop::cursor()?, by, self.screens);
-        self.move_to(at)
+    fn move_by(&mut self, by: Point, keep_going: &mut dyn FnMut() -> Result<bool>) -> Result<()> {
+        if by == Point::default() {
+            return Ok(());
+        }
+        let from = desktop::cursor()?;
+        if self.home.is_none() {
+            *self.home = Some(from);
+        }
+        let at = moved(from, by, self.screens);
+        self.pointer.nudge(from, at, keep_going)
     }
 
     fn move_to(&mut self, at: Point) -> Result<()> {
@@ -694,7 +684,6 @@ impl pick::Mouse for Hand<'_> {
             *self.home = desktop::cursor().ok();
         }
         self.pointer.go(at)?;
-        *self.spot = Some(at);
         Ok(())
     }
 }
@@ -720,6 +709,8 @@ fn scan(
                 config.pixels,
                 config.terminal_hint,
                 config.window_hint,
+                config.hide_hidden,
+                config.icon_names,
                 &config.terminal_processes,
             );
             anyhow::Ok((stack, scan))

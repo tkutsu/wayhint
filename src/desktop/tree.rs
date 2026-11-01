@@ -64,6 +64,9 @@ pub struct Node {
 pub struct Details {
     pub name: String,
     pub actions: Vec<String>,
+    /// The component explicitly reports full transparency; unknown opacity is kept.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// One scan's raw result. Nodes are in walk order (breadth first), so a

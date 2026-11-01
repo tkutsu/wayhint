@@ -22,8 +22,8 @@ use crate::{
 
 /// How far inside its monitor's edge the arrows stop the pointer, in px.
 const EDGE: i32 = 5;
-/// A held arrow speeds up by one `[pointer] nudge_px` a tick every this many
-/// ticks (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` a tick.
+/// Held arrows gain one `[pointer] nudge_px` over this many ticks
+/// (25 ms each, `overlay/hold.rs`), up to `TOP_SPEED` times the base step.
 const SPEED_UP: u16 = 8;
 const TOP_SPEED: u16 = 4;
 /// The longest a screen that stays the same waits between refreshes: each
@@ -37,10 +37,8 @@ pub enum Pick {
     Scroll { act: Act },
     /// Do `act` at the target at `index`.
     Target { index: usize, act: Act },
-    /// Do `act` where the pointer is (`Space`).
+    /// Do `act` where the pointer is (Enter with nothing typed).
     Here { act: Act },
-    /// Do `act` where the last command was done (a verb typed twice).
-    Again { act: Act },
     /// Do the last command again, on its target.
     Repeat,
     /// `Esc` while a hold keeps a button down: let go where it is.
@@ -130,7 +128,7 @@ pub trait Source {
 /// button a hold keeps down stays down through both: a drag.
 pub trait Mouse {
     /// Moves it `by` px, stopping inside its monitor's edge (see `moved`).
-    fn move_by(&mut self, by: Point) -> Result<()>;
+    fn move_by(&mut self, by: Point, keep_going: &mut dyn FnMut() -> Result<bool>) -> Result<()>;
     /// Moves it to `at`.
     fn move_to(&mut self, at: Point) -> Result<()>;
 }
@@ -139,7 +137,7 @@ pub trait Mouse {
 /// `start.verb` (from `--verb`) is armed as if its key were the first one
 /// typed, and `start.text` (no `--hints`) makes it a text-mode pick
 /// ([`text`]). The arrows move the pointer through `mouse`, held for
-/// faster, and `Space` or a verb typed twice acts where it is.
+/// faster, and Enter with nothing typed acts where it is.
 ///
 /// Every `[scan] refresh_ms` with no pick, `source` scans again and the tags
 /// follow: a target found again keeps its tag, and what was typed for it
@@ -261,17 +259,19 @@ pub fn pick(
             due = next(every);
             continue;
         };
-        let (key, mods, ticks) = match event {
+        let (key, mods) = match event {
             Event::Escape => (
                 Key {
                     code: KeyCode::ESC,
                     shift: false,
                 },
                 Mods::NONE,
-                0,
             ),
-            Event::Key(key, mods) => (key, mods, 0),
-            Event::Held(key, mods, ticks) => (key, mods, ticks),
+            Event::Key(key, mods) => (key, mods),
+            Event::Held(direction, ticks) => {
+                mouse.move_by(held_arrow(direction, ticks, config), &mut overlay.motion())?;
+                continue;
+            }
             // Only text mode types, and it reads its own keys.
             Event::Typed(..) => continue,
             Event::Interrupted | Event::Closed | Event::KeyboardLost => return Ok(Pick::Leave),
@@ -288,9 +288,9 @@ pub fn pick(
             continue;
         }
         if !config.verbs.is_close(key)
-            && let Some(by) = arrow(key.code, ticks, config)
+            && let Some(by) = arrow(key.code, config)
         {
-            mouse.move_by(by)?;
+            mouse.move_by(by, &mut overlay.motion())?;
             continue;
         }
         // A key that means nothing (a modifier on its own) leaves the
@@ -336,7 +336,6 @@ pub fn pick(
             }
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
             Step::Here(act) => return Ok(Pick::Here { act }),
-            Step::Again(act) => return Ok(Pick::Again { act }),
             Step::Repeat => return Ok(Pick::Repeat),
             // The letter is dropped, and named for `[messages] duration`.
             Step::Ignored => {
@@ -462,7 +461,6 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
     match key.code {
         KeyCode::BACKSPACE => Some(Input::Backspace),
         KeyCode::ENTER => Some(Input::Confirm(mods)),
-        KeyCode::SPACE => Some(Input::Here(mods)),
         _ if config.verbs.is_repeat(key) => Some(Input::Repeat),
         code => config
             .verbs
@@ -479,7 +477,7 @@ fn input_of(key: Key, mods: Mods, config: &Config) -> Option<Input> {
 /// and the input box.
 ///
 /// The input box names the armed verb, dimmed, or `drop` while a hold
-/// keeps a button down: a verb with no key (`--verb`) and `Space`, which
+/// keeps a button down: a verb with no key (`--verb`) and bare Enter, which
 /// uses no tag, show nowhere else. With `[input] show_typed_hints`, the letters typed
 /// follow it there, and the tags keep only the letters still to type.
 /// Without, each tag reads as the whole command: everything typed so far,
@@ -627,10 +625,8 @@ fn status(selector: &Selector, config: &Config, holding: bool) -> Status {
     )
 }
 
-/// How far the arrow `code` goes: `[pointer] nudge_px` px its way, and held
-/// down, on at each of its `ticks`, faster (see `speed`). `None` for a key
-/// that is no arrow.
-pub fn arrow(code: KeyCode, ticks: u16, config: &Config) -> Option<Point> {
+/// One arrow press moves `[pointer] nudge_px` in its direction.
+pub fn arrow(code: KeyCode, config: &Config) -> Option<Point> {
     let (x, y) = match code {
         KeyCode::UP => (0, -1),
         KeyCode::DOWN => (0, 1),
@@ -638,15 +634,14 @@ pub fn arrow(code: KeyCode, ticks: u16, config: &Config) -> Option<Point> {
         KeyCode::RIGHT => (1, 0),
         _ => return None,
     };
-    let step = config.nudge * speed(ticks);
-    Some(Point::new(x * step, y * step))
+    Some(Point::new(x * config.nudge, y * config.nudge))
 }
 
-/// How many `[pointer] nudge_px` steps an arrow moves at its `ticks`th tick
-/// held down, 0 being its press: one, and one more every `SPEED_UP` ticks,
-/// up to `TOP_SPEED`.
-fn speed(ticks: u16) -> i32 {
-    i32::from((1 + ticks / SPEED_UP).min(TOP_SPEED))
+/// Move both held axes together, ramping speed each tick rather than in jumps.
+pub fn held_arrow(direction: Point, ticks: u16, config: &Config) -> Point {
+    let ramp = ticks.min((TOP_SPEED - 1) * SPEED_UP);
+    let step = config.nudge * i32::from(SPEED_UP + ramp) / i32::from(SPEED_UP);
+    Point::new(direction.x * step, direction.y * step)
 }
 
 /// Where the pointer at `at` goes, moved `by`: kept `EDGE` px inside the
@@ -870,7 +865,7 @@ mod tests {
             };
             input_of(key, Mods::NONE, &config)
         };
-        assert_eq!(input(57, false), Some(Input::Here(Mods::NONE)));
+        assert_eq!(input(57, false), None, "unbound Space does nothing");
         assert_eq!(input(28, true), Some(Input::Confirm(Mods::NONE)));
         assert_eq!(
             input(51, false),
@@ -887,15 +882,15 @@ mod tests {
             "Shift on a is still a, and no Shift-click"
         );
         assert_eq!(input(105, false), None, "an arrow is no input");
-        assert_eq!(arrow(KeyCode::LEFT, 0, &config), Some(Point::new(-10, 0)));
-        assert_eq!(arrow(KeyCode::UP, 0, &config), Some(Point::new(0, -10)));
-        assert_eq!(arrow(KeyCode::RIGHT, 7, &config), Some(Point::new(10, 0)));
+        assert_eq!(arrow(KeyCode::LEFT, &config), Some(Point::new(-10, 0)));
+        assert_eq!(arrow(KeyCode::UP, &config), Some(Point::new(0, -10)));
+        assert_eq!(arrow(KeyCode::RIGHT, &config), Some(Point::new(10, 0)));
         assert_eq!(
-            arrow(KeyCode::RIGHT, 8, &config),
-            Some(Point::new(20, 0)),
+            held_arrow(Point::new(1, 0), 8, &config),
+            Point::new(20, 0),
             "held, faster"
         );
-        assert_eq!(arrow(KeyCode::from_evdev(30), 0, &config), None);
+        assert_eq!(arrow(KeyCode::from_evdev(30), &config), None);
     }
 
     #[test]
@@ -923,9 +918,46 @@ mod tests {
     }
 
     #[test]
+    fn space_routes_to_its_binding_and_enter_executes_the_armed_verb() {
+        let layout = crate::keys::Layout::named("us", "");
+        let space = Key {
+            code: KeyCode::SPACE,
+            shift: false,
+        };
+        let enter = Key {
+            code: KeyCode::ENTER,
+            shift: false,
+        };
+        let config = Config::parse("[keys]\nhover = \"Space\"", &layout).unwrap();
+        let mut selector = Selector::new(2, config.alphabet.len(), Action::Left);
+        let input = input_of(space, Mods::NONE, &config).unwrap();
+        assert_eq!(input, Input::Verb(Action::Hover, Mods::NONE));
+        assert_eq!(selector.press(input), Step::Typing);
+        assert_eq!(selector.press(input), Step::Typing);
+        let mods = Mods {
+            ctrl: true,
+            alt: false,
+        };
+        assert_eq!(
+            selector.press(input_of(enter, mods, &config).unwrap()),
+            Step::Here(Act {
+                action: Action::Hover,
+                mods
+            })
+        );
+        let config = Config::parse("[keys]\nrepeat = \"Space\"", &layout).unwrap();
+        assert_eq!(input_of(space, Mods::NONE, &config), Some(Input::Repeat));
+    }
+
+    #[test]
     fn a_held_arrow_speeds_up_to_a_top_speed() {
-        let speeds: Vec<i32> = [0, 7, 8, 16, 24, 32, 1000].map(speed).into();
-        assert_eq!(speeds, [1, 1, 2, 3, 4, 4, 4]);
+        let config = Config::parse("", &crate::keys::Layout::named("us", "")).unwrap();
+        let steps =
+            [0, 7, 8, 16, 24, 32, 1000].map(|tick| held_arrow(Point::new(-1, 1), tick, &config));
+        assert_eq!(
+            steps,
+            [10, 18, 20, 30, 40, 40, 40].map(|step| Point::new(-step, step))
+        );
     }
 
     #[test]

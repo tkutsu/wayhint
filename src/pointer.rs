@@ -7,7 +7,10 @@
 //! backstop. A button left pressed by a crashed tool is the worst thing it
 //! can do to a desktop.
 
-use std::{thread::sleep, time::Duration};
+use std::{
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use rustix::time::{ClockId, clock_gettime};
@@ -47,11 +50,12 @@ const ARRIVE: Duration = Duration::from_millis(30);
 const PRESS: Duration = Duration::from_millis(20);
 /// One wheel notch, as a mouse sends it: 15 in the axis's units, one step.
 const NOTCH: f64 = 15.0;
-/// A drag moves in this many steps, `STEP` apart: apps start a drag once
-/// the pointer has moved a few px with the button down, and some want to
-/// see it move more than once.
-const STEPS: i32 = 12;
-const STEP: Duration = Duration::from_millis(8);
+/// Send intermediate positions often enough for high-refresh displays.
+const FRAME: Duration = Duration::from_millis(4);
+/// Finish each arrow nudge before the next 25 ms repeat, at any configured distance.
+const NUDGE: Duration = Duration::from_millis(20);
+/// Keep the existing drag duration while sending smaller motion steps.
+const DRAG: Duration = Duration::from_millis(96);
 
 /// The button a click presses, and how many times: a hover or a scroll,
 /// none.
@@ -129,7 +133,7 @@ impl Pointer {
     /// with [`Pointer::put_back`], after letting go of any modifiers. A
     /// hold leaves its button down, for [`Pointer::drag`] to let go.
     pub fn act(&mut self, action: Action, at: Point) -> Result<()> {
-        self.move_to(at)?;
+        self.glide(at)?;
         sleep(ARRIVE);
         match action {
             Action::ScrollUp => self.scroll(-1)?,
@@ -154,10 +158,9 @@ impl Pointer {
     /// steps, and lets go there: the end of a hold. From a point to
     /// itself, it's a long press.
     pub fn drag(&mut self, from: Point, to: Point) -> Result<()> {
-        for i in 1..=STEPS {
-            let along = |a: i32, b: i32| a + (b - a) * i / STEPS;
-            self.move_to(Point::new(along(from.x, to.x), along(from.y, to.y)))?;
-            sleep(STEP);
+        self.glide_from(from, to, DRAG, &mut || Ok(true))?;
+        if from == to {
+            sleep(DRAG);
         }
         sleep(PRESS);
         for button in self.held.clone() {
@@ -179,10 +182,20 @@ impl Pointer {
         Ok(())
     }
 
-    /// Moves the cursor to `to` at once, with a held button still down: an
-    /// arrow moving it.
+    /// Moves smoothly to `to`, keeping any held button down for a drag.
     pub fn go(&mut self, to: Point) -> Result<()> {
-        self.move_to(to)?;
+        self.glide(to)?;
+        self.handled()
+    }
+
+    /// Animate one arrow movement from the position already read by the caller.
+    pub fn nudge(
+        &mut self,
+        from: Point,
+        to: Point,
+        keep_going: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<()> {
+        self.glide_from(from, to, NUDGE, keep_going)?;
         self.handled()
     }
 
@@ -190,8 +203,44 @@ impl Pointer {
     /// end before the pointer leaves.
     pub fn put_back(&mut self, to: Point) -> Result<()> {
         sleep(ARRIVE);
-        self.move_to(to)?;
+        self.glide(to)?;
         self.handled()
+    }
+
+    /// Short nudges finish within one repeat interval; longer trips take at
+    /// most 80 ms, so clicks, match changes and restoration remain responsive.
+    fn glide(&self, to: Point) -> Result<()> {
+        let from = crate::desktop::cursor().unwrap_or(to);
+        self.glide_from(from, to, travel_time(from, to), &mut || Ok(true))
+    }
+
+    /// Interpolate both axes in the same frame, using elapsed time so slow
+    /// compositor writes cannot stretch the movement or build up old frames.
+    fn glide_from(
+        &self,
+        from: Point,
+        to: Point,
+        duration: Duration,
+        keep_going: &mut dyn FnMut() -> Result<bool>,
+    ) -> Result<()> {
+        if !keep_going()? {
+            return Ok(());
+        }
+        if from == to {
+            return self.move_to(to);
+        }
+        let started = Instant::now();
+        loop {
+            if !keep_going()? {
+                return Ok(());
+            }
+            let elapsed = started.elapsed();
+            self.move_to(along(from, to, elapsed, duration))?;
+            if elapsed >= duration {
+                return Ok(());
+            }
+            sleep(FRAME.min(duration.saturating_sub(started.elapsed())));
+        }
     }
 
     /// Waits until the compositor has handled everything sent. Without
@@ -241,6 +290,23 @@ impl Pointer {
     }
 }
 
+/// Allow more frames for long trips without slowing held-arrow repetition.
+fn travel_time(from: Point, to: Point) -> Duration {
+    let distance = from.x.abs_diff(to.x).max(from.y.abs_diff(to.y));
+    Duration::from_millis((u64::from(distance) / 2).clamp(20, 80))
+}
+
+/// A point on the straight path, including the exact endpoint when late.
+#[allow(clippy::cast_possible_truncation)] // interpolated logical pixels fit the endpoints' i32 range
+fn along(from: Point, to: Point, elapsed: Duration, duration: Duration) -> Point {
+    if elapsed >= duration {
+        return to;
+    }
+    let fraction = elapsed.as_secs_f64() / duration.as_secs_f64();
+    let axis = |a, b| (f64::from(a) + (f64::from(b) - f64::from(a)) * fraction).round() as i32;
+    Point::new(axis(from.x, to.x), axis(from.y, to.y))
+}
+
 /// The time to stamp an input event with: milliseconds of the monotonic
 /// clock, the clock the compositor stamps the real mouse and keyboard with.
 ///
@@ -261,5 +327,56 @@ impl Drop for Pointer {
         self.release_all();
         self.device.destroy();
         let _ = self.conn.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagonal_travel_stays_on_one_line_and_finishes_exactly() {
+        let from = Point::new(-100, 80);
+        let to = Point::new(100, -120);
+        let duration = travel_time(from, to);
+        let mut previous = from;
+        for milliseconds in (0..=80).step_by(4) {
+            let at = along(from, to, Duration::from_millis(milliseconds), duration);
+            assert_eq!(at.x + at.y, -20, "both axes must move in the same frame");
+            assert!(
+                at.x >= previous.x && at.y <= previous.y,
+                "no backwards steps"
+            );
+            assert!(
+                at.x - previous.x <= 10,
+                "no jump straight to the destination"
+            );
+            previous = at;
+        }
+        assert_eq!(previous, to);
+        assert_eq!(
+            along(from, to, duration * 2, duration),
+            to,
+            "a late frame lands exactly"
+        );
+    }
+
+    #[test]
+    fn nudges_stay_responsive_and_long_trips_are_bounded() {
+        let from = Point::default();
+        for distance in [1, 10, 40] {
+            let to = Point::new(distance, 0);
+            let duration = travel_time(from, to);
+            assert!(
+                duration < Duration::from_millis(25),
+                "keep up with arrow repeats"
+            );
+            assert_eq!(along(from, to, duration / 2, duration).y, 0);
+            assert_eq!(along(from, to, duration, duration), to);
+        }
+        assert_eq!(
+            travel_time(from, Point::new(100_000, 0)),
+            Duration::from_millis(80)
+        );
     }
 }

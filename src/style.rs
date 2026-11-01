@@ -148,7 +148,25 @@ impl Position {
 /// The farthest `[hints] offset` moves a tag, either way, in px.
 const OFFSET: i32 = 500;
 
-/// The direction from a gradient's first colour to its second, across a monitor.
+/// Where hint gradients start and end: the monitor, or each tag's box.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gradient {
+    Global,
+    #[default]
+    Hint,
+}
+
+impl Gradient {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Hint => "hint",
+        }
+    }
+}
+
+/// The direction from a gradient's first colour to its second.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Direction {
@@ -177,7 +195,7 @@ impl Direction {
         }
     }
 
-    /// Start and end in fractions of the monitor's width and height.
+    /// Start and end in fractions of the gradient's width and height.
     pub const fn ends(self) -> ((f32, f32), (f32, f32)) {
         match self {
             Self::Left => ((1.0, 0.0), (0.0, 0.0)),
@@ -221,8 +239,9 @@ pub struct Style {
     pub font: String,
     /// Text size in px.
     pub size: f32,
+    pub gradient: Gradient,
     pub text: Color,
-    /// A second colour enables one monitor-wide gradient on hint letters.
+    /// A second colour enables a gradient on hint letters.
     pub text_end: Option<Color>,
     pub text_direction: Direction,
     /// Letters already typed, a placeholder. Once called `matched`, which
@@ -233,15 +252,19 @@ pub struct Style {
     /// `drop` in the input box.
     pub verb: Color,
     pub background: Color,
-    /// A second colour enables one monitor-wide gradient on hint backgrounds.
+    /// A second colour enables a gradient on hint backgrounds.
     pub background_end: Option<Color>,
     pub background_direction: Direction,
     pub border: Color,
+    /// A soft shadow below the box; zero alpha disables it.
+    pub shadow: Color,
     pub border_width: f32,
     pub radius: f32,
     /// Vertical, then horizontal, in px.
     pub padding: [f32; 2],
     pub position: Position,
+    /// Maximum percentage of a neighbouring target or hint an automatic hint may cover.
+    pub max_cover: u8,
     /// Moves every tag from its position, right then down, in px.
     pub offset: [i32; 2],
     /// The letters' case on the tags.
@@ -287,8 +310,8 @@ impl Case {
 }
 
 /// The letters of tags found in pixels, unless `[hints.pixels] text` sets
-/// them: teal.
-const PIXELS_TEXT: Color = Color::rgba(0x94, 0xe2, 0xd5, 0xff);
+/// them: dark teal, legible on the default yellow background.
+const PIXELS_TEXT: Color = Color::rgba(0x15, 0x5e, 0x63, 0xff);
 
 /// A table that changes part of `[hints]` for one kind of tag:
 /// `[hints.pixels]` for tags found in a window's pixels, which are guesses
@@ -306,6 +329,7 @@ pub struct Look {
     pub verb: Option<Color>,
     pub background: Option<Color>,
     pub border: Option<Color>,
+    pub shadow: Option<Color>,
     pub border_width: Option<f32>,
     pub radius: Option<f32>,
     pub padding: Option<[f32; 2]>,
@@ -332,6 +356,7 @@ impl Look {
                 color(now.background),
             ),
             ("border", self.border.is_some(), color(now.border)),
+            ("shadow", self.shadow.is_some(), color(now.shadow)),
             (
                 "border_width",
                 self.border_width.is_some(),
@@ -372,17 +397,17 @@ impl Default for Arrow {
             color: None,
             outline: None,
             length: 3.0,
-            outline_width: 2.0,
+            outline_width: 1.0,
         }
     }
 }
 
 impl Arrow {
-    /// Unset colors follow the hint's text and background.
+    /// Unset colors follow the hint's background and border.
     pub fn colors(&self, style: &Style) -> (Color, Color) {
         (
-            self.color.unwrap_or(style.text),
-            self.outline.unwrap_or(style.background),
+            self.color.unwrap_or(style.background),
+            self.outline.unwrap_or(style.border),
         )
     }
 
@@ -403,8 +428,8 @@ impl Arrow {
         let (color, outline) = self.colors(style);
         let mut out = String::from("\n[hints.arrow]\n");
         for (name, set, now, from) in [
-            ("color", self.color, color, "text"),
-            ("outline", self.outline, outline, "background"),
+            ("color", self.color, color, "background"),
+            ("outline", self.outline, outline, "border"),
         ] {
             match set {
                 Some(color) => {
@@ -426,19 +451,22 @@ impl Default for Style {
         Self {
             font: "sans-serif:bold".into(),
             size: 13.0,
-            text: Color::rgba(0xff, 0xff, 0xff, 0xff),
+            gradient: Gradient::Hint,
+            text: Color::rgba(0, 0, 0, 0xff),
             text_end: None,
             text_direction: Direction::default(),
-            dimmed: Color::rgba(0xff, 0xff, 0xff, 0x66),
-            verb: Color::rgba(0xfa, 0xb3, 0x87, 0xff),
-            background: Color::rgba(0x1e, 0x1e, 0x2e, 0xf0),
-            background_end: None,
-            background_direction: Direction::default(),
-            border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
+            dimmed: Color::rgba(0, 0, 0, 0x66),
+            verb: Color::rgba(0x9a, 0x34, 0x12, 0xff),
+            background: Color::rgba(0xff, 0xff, 0xc2, 0xff),
+            background_end: Some(Color::rgba(0xf5, 0xe8, 0x73, 0xff)),
+            background_direction: Direction::Bottom,
+            border: Color::rgba(0x85, 0x86, 0x5b, 0xff),
+            shadow: Color::rgba(0, 0, 0, 0x40),
             border_width: 1.0,
-            radius: 4.0,
-            padding: [2.0, 5.0],
+            radius: 3.0,
+            padding: [1.0, 4.0],
             position: Position::default(),
+            max_cover: 50,
             offset: [0, 0],
             case: Case::default(),
             arrow: Arrow::default(),
@@ -450,6 +478,12 @@ impl Default for Style {
 impl Style {
     /// Numbers serde can't check by type alone.
     pub fn validate(&self) -> Result<()> {
+        if self.max_cover > 100 {
+            bail!(
+                "[hints] max_cover: {} percent is outside 0-100",
+                self.max_cover
+            );
+        }
         self.validate_table("hints")?;
         self.for_pixels().validate_table("hints.pixels")
     }
@@ -478,6 +512,7 @@ impl Style {
             background: p.background.unwrap_or(self.background),
             background_end: self.background_end.filter(|_| p.background.is_none()),
             border: p.border.unwrap_or(self.border),
+            shadow: p.shadow.unwrap_or(self.shadow),
             border_width: p.border_width.unwrap_or(self.border_width),
             radius: p.radius.unwrap_or(self.radius),
             padding: p.padding.unwrap_or(self.padding),
@@ -516,11 +551,12 @@ impl Style {
     /// `wayhint config`.
     pub fn render(&self) -> String {
         format!(
-            "{}{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
+            "{}max_cover = {}   # maximum percent of a neighbouring target or hint's area; default 50\n{}case = \"{}\"   # the tags' letters: upper or lower\n{}{}",
             self.render_table(
                 "hints",
-                "on the target: auto (beside it, where no other control is), or "
+                "on the target: auto (beside it, within max_cover), or "
             ),
+            self.max_cover,
             self.render_gradients(),
             self.case.name(),
             self.arrow.render(self),
@@ -533,7 +569,10 @@ impl Style {
 
     /// Optional hint gradients stay unset when the config is printed and read again.
     fn render_gradients(&self) -> String {
-        let mut out = String::new();
+        let mut out = format!(
+            "gradient = \"{}\"   # global: across the monitor; hint: inside each tag\n",
+            self.gradient.name()
+        );
         for (name, start, end, direction) in [
             ("text", self.text, self.text_end, self.text_direction),
             (
@@ -574,6 +613,11 @@ impl Style {
             ),
             ("background", self.background, ""),
             ("border", self.border, ""),
+            (
+                "shadow",
+                self.shadow,
+                "   # soft shadow; zero alpha disables it",
+            ),
         ] {
             let _ = writeln!(out, "{name} = \"{color}\"{what}");
         }
@@ -994,7 +1038,7 @@ mod tests {
             ..Style::default()
         };
         let pixels = style.for_pixels();
-        assert_eq!(pixels.text, Color::rgba(0x94, 0xe2, 0xd5, 0xff), "teal");
+        assert_eq!(pixels.text, PIXELS_TEXT, "dark teal");
         assert_eq!(
             Style {
                 text: style.text,

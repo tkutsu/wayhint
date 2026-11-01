@@ -26,8 +26,8 @@ use crate::{
     keys::{self, HOME_ROW, Key, KeyCode, Layout},
     pixels::Detector,
     style::{
-        Arrow, Badge, Badges, Case, Color, Direction, Info, Input, Look, Mark, Marks, Position,
-        StartMark, Starts, Style,
+        Arrow, Badge, Badges, Case, Color, Direction, Gradient, Info, Input, Look, Mark, Marks,
+        Position, StartMark, Starts, Style,
     },
 };
 
@@ -57,8 +57,10 @@ struct File {
 struct FileHints {
     auto_accept: Option<bool>,
     window_hint: Option<bool>,
+    hide_hidden: Option<bool>,
     font: Option<String>,
     size: Option<f32>,
+    gradient: Option<Gradient>,
     text: Option<Color>,
     text_end: Option<Color>,
     text_direction: Option<Direction>,
@@ -69,10 +71,12 @@ struct FileHints {
     background_end: Option<Color>,
     background_direction: Option<Direction>,
     border: Option<Color>,
+    shadow: Option<Color>,
     border_width: Option<f32>,
     radius: Option<f32>,
     padding: Option<[f32; 2]>,
     position: Option<Position>,
+    max_cover: Option<u8>,
     offset: Option<[i32; 2]>,
     case: Option<Case>,
     arrow: Arrow,
@@ -86,21 +90,26 @@ impl FileHints {
         Style {
             font: self.font.unwrap_or(base.font),
             size: self.size.unwrap_or(base.size),
+            gradient: self.gradient.unwrap_or(base.gradient),
             text: self.text.unwrap_or(base.text),
             text_end: self.text_end,
             text_direction: self.text_direction.unwrap_or(base.text_direction),
             dimmed: self.dimmed.unwrap_or(base.dimmed),
             verb: self.verb.unwrap_or(base.verb),
             background: self.background.unwrap_or(base.background),
-            background_end: self.background_end,
+            background_end: self
+                .background_end
+                .or(base.background_end.filter(|_| self.background.is_none())),
             background_direction: self
                 .background_direction
                 .unwrap_or(base.background_direction),
             border: self.border.unwrap_or(base.border),
+            shadow: self.shadow.unwrap_or(base.shadow),
             border_width: self.border_width.unwrap_or(base.border_width),
             radius: self.radius.unwrap_or(base.radius),
             padding: self.padding.unwrap_or(base.padding),
             position: self.position.unwrap_or(base.position),
+            max_cover: self.max_cover.unwrap_or(base.max_cover),
             offset: self.offset.unwrap_or(base.offset),
             case: self.case.unwrap_or(base.case),
             arrow: self.arrow,
@@ -117,6 +126,8 @@ struct FileWords {
     /// Act on the only match left, without Enter.
     #[serde(alias = "pick_unique")]
     auto_accept: bool,
+    /// Search buttons by name even when they show only an icon.
+    icon_names: Option<bool>,
     /// Tags on the targets typing can't find: on unless `false`.
     #[serde(rename = "fallback_hints")]
     hints: Option<bool>,
@@ -149,6 +160,7 @@ struct FileInput {
     verb: Option<Color>,
     background: Option<Color>,
     border: Option<Color>,
+    shadow: Option<Color>,
     border_width: Option<f32>,
     radius: Option<f32>,
     padding: Option<[f32; 2]>,
@@ -169,6 +181,7 @@ impl FileInput {
             verb: self.verb.unwrap_or(base.style.verb),
             background: self.background.unwrap_or(base.style.background),
             border: self.border.unwrap_or(base.style.border),
+            shadow: self.shadow.unwrap_or(base.style.shadow),
             border_width: self.border_width.unwrap_or(base.style.border_width),
             radius: self.radius.unwrap_or(base.style.radius),
             padding: self.padding.unwrap_or(base.style.padding),
@@ -472,6 +485,16 @@ pub fn window_hint(explicit: Option<&Path>) -> Result<bool> {
     Ok(unkeyed(explicit)?.hints.window_hint.unwrap_or(true))
 }
 
+/// Hidden-target filtering is shared by runs and dumps without decoding keys.
+pub fn hide_hidden(explicit: Option<&Path>) -> Result<bool> {
+    Ok(unkeyed(explicit)?.hints.hide_hidden.unwrap_or(true))
+}
+
+/// Whether text search includes icon names, without decoding key bindings.
+pub fn icon_names(explicit: Option<&Path>) -> Result<bool> {
+    Ok(unkeyed(explicit)?.words.icon_names.unwrap_or(false))
+}
+
 /// The file at `explicit`, else the default one if it's there, else all
 /// defaults: undecoded, since the keys need a keymap.
 fn unkeyed(explicit: Option<&Path>) -> Result<File> {
@@ -506,7 +529,7 @@ struct FileKeys {
     /// Tag letters, easiest to press first, as the first layout prints them.
     alphabet: Option<String>,
     aliases: BTreeMap<String, String>,
-    /// The action performed by a bare tag or Space.
+    /// The action performed by a bare tag or Enter with nothing typed.
     default_action: Option<Action>,
     left: Option<Binding>,
     right: Option<Binding>,
@@ -564,7 +587,11 @@ impl FileKeys {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FilePointer {
-    after: After,
+    /// Legacy spelling; resolved output uses `restore_on_action`.
+    after: Option<After>,
+    restore_on_action: Option<bool>,
+    restore_on_exit: Option<bool>,
+    move_on_select: bool,
     /// Px per arrow press. `u16`, so serde itself refuses a negative.
     #[serde(rename = "nudge_px")]
     nudge: Option<u16>,
@@ -589,18 +616,14 @@ const SETTLE: u16 = 150;
 /// The longest settle, in ms: past this a run feels stuck between clicks.
 const SETTLE_MAX: u16 = 2000;
 
-/// Where the cursor goes after a click: `[pointer] after`.
-///
-/// `Leave` by default: the arrows, a hover and a hold's drag all put the
-/// cursor somewhere on purpose, and putting it back would undo them.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Legacy `[pointer] after` values, accepted when reading existing configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum After {
+enum After {
     /// Back where it was before wayhint moved it, so the mouse is where
     /// you left it.
     Restore,
     /// Where wayhint put it: on the target, or where the arrows took it.
-    #[default]
     Leave,
 }
 
@@ -638,9 +661,8 @@ const HELP_KEY: KeyCode = KeyCode::from_evdev(53);
 
 /// Keys every mode reads itself, so no verb may take them, and how the
 /// message that says so lists them.
-const BUILT_IN: [KeyCode; 8] = [
+const BUILT_IN: [KeyCode; 7] = [
     KeyCode::BACKSPACE,
-    KeyCode::SPACE,
     KeyCode::ENTER,
     KeyCode::TAB,
     KeyCode::UP,
@@ -648,7 +670,7 @@ const BUILT_IN: [KeyCode; 8] = [
     KeyCode::LEFT,
     KeyCode::RIGHT,
 ];
-const BUILT_IN_NAMES: &str = "Backspace, Space, Enter, Tab and the arrows";
+const BUILT_IN_NAMES: &str = "Backspace, Enter, Tab and the arrows";
 
 /// Everything wayhint needs from the settings, checked.
 #[derive(Debug, PartialEq)]
@@ -660,6 +682,8 @@ pub struct Config {
     pub hint_auto_accept: bool,
     /// One focus hint per client window: `[hints] window_hint`.
     pub window_hint: bool,
+    /// Omit controls explicitly reported as fully transparent: `[hints] hide_hidden`.
+    pub hide_hidden: bool,
     /// The name of the layout the keys were decoded with ("English (US)"),
     /// for `wayhint config`.
     pub layout: String,
@@ -678,7 +702,14 @@ pub struct Config {
     /// Tags, in text mode, on the targets with no text to type:
     /// `[words] fallback_hints`.
     pub text_hints: bool,
-    pub after: After,
+    /// Search icon buttons by accessibility name: `[words] icon_names`.
+    pub icon_names: bool,
+    /// Return to the pre-command position after an action: `[pointer] restore_on_action`.
+    pub restore_on_action: bool,
+    /// Return to the launch position when the session ends: `[pointer] restore_on_exit`.
+    pub restore_on_exit: bool,
+    /// Move to the current text match before acting: `[pointer] move_on_select`.
+    pub move_on_select: bool,
     /// Px one arrow press moves the pointer: `[pointer] nudge_px`.
     pub nudge: i32,
     /// Wheel notches one scroll turns: `[pointer] scroll_steps`.
@@ -889,7 +920,7 @@ impl Verbs {
                 && (self.action_of(key).is_some() || self.is_repeat(key) || self.is_help(key)))
     }
 
-    /// The action a bare tag (or a bare `Space`) does.
+    /// The action a bare tag (or Enter with nothing typed) does.
     pub fn default_action(&self) -> Action {
         self.default
     }
@@ -922,8 +953,10 @@ impl Verbs {
             lines.push(format!("{label}\tthe last command again"));
         }
         for (key, what) in [
-            ("Space", "at the pointer"),
-            ("Enter", "confirm a completed tag or text match"),
+            (
+                "Enter",
+                "confirm a completed tag; with nothing typed, act at the pointer",
+            ),
             ("arrows", "move the pointer"),
             ("Backspace", "take back a key"),
         ] {
@@ -944,10 +977,16 @@ impl Verbs {
         for (action, _, label) in &self.keys {
             lines.push(format!("{label} text Enter\t{}", action.short()));
         }
+        if let Some((_, label)) = &self.repeat {
+            lines.push(format!("{label}\tthe last command again"));
+        }
         for (key, what) in [
             ("tag", "a control with no text"),
             ("Tab", "the next match, the pointer with it"),
-            ("arrows", "move the pointer from the match"),
+            (
+                "arrows",
+                "next match in that direction; with no query or match, move the pointer",
+            ),
             ("Enter", "where the pointer is, even with nothing typed"),
             ("Backspace", "take back a key"),
         ] {
@@ -1226,6 +1265,7 @@ impl Config {
         let alphabet = Alphabet::resolve(letters, &file.keys.aliases, layout, &verbs.taken())?;
         let hint_auto_accept = file.hints.auto_accept.unwrap_or(true);
         let window_hint = file.hints.window_hint.unwrap_or(true);
+        let hide_hidden = file.hints.hide_hidden.unwrap_or(true);
         let style = file.hints.resolve();
         style.validate()?;
         let starts = file.words.starts.resolve()?;
@@ -1252,11 +1292,18 @@ impl Config {
         if settle > SETTLE_MAX {
             bail!("[pointer] settle_ms = {settle}: give 0-{SETTLE_MAX} ms");
         }
+        let legacy_restore = file.pointer.after.map(|after| after == After::Restore);
+        if let (Some(restore), Some(legacy)) = (file.pointer.restore_on_action, legacy_restore)
+            && restore != legacy
+        {
+            bail!("[pointer] after and restore_on_action disagree; keep only restore_on_action");
+        }
         Ok(Self {
             alphabet,
             verbs,
             hint_auto_accept,
             window_hint,
+            hide_hidden,
             layout: layout.name().to_string(),
             style,
             marks,
@@ -1265,7 +1312,14 @@ impl Config {
             text_cursor: file.words.cursor,
             text_auto_accept: file.words.auto_accept,
             text_hints: file.words.hints.unwrap_or(true),
-            after: file.pointer.after,
+            icon_names: file.words.icon_names.unwrap_or(false),
+            restore_on_action: file
+                .pointer
+                .restore_on_action
+                .or(legacy_restore)
+                .unwrap_or(false),
+            restore_on_exit: file.pointer.restore_on_exit.unwrap_or(true),
+            move_on_select: file.pointer.move_on_select,
             nudge: nudge.into(),
             scroll,
             settle: Duration::from_millis(settle.into()),
@@ -1292,10 +1346,11 @@ impl Config {
             TextCursor::End => "end",
         };
         format!(
-            "\n[words]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nfallback_hints = {}   # tags on the targets with no text to type, in letters no word starts with\n",
+            "\n[words]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nfallback_hints = {}   # tags on the targets with no text to type, in letters no word starts with\nicon_names = {}   # search icon buttons by their accessibility names\n",
             self.text_auto_accept,
             crate::search::UNIQUE,
             self.text_hints,
+            self.icon_names,
         )
     }
 
@@ -1308,25 +1363,27 @@ impl Config {
         let (header, fields) = hints.split_once('\n').unwrap();
         let _ = writeln!(
             out,
-            "\n{header}\nauto_accept = {}\nwindow_hint = {}\n{fields}",
-            self.hint_auto_accept, self.window_hint
+            "\n{header}\nauto_accept = {}\nwindow_hint = {}\nhide_hidden = {}\n{fields}",
+            self.hint_auto_accept, self.window_hint, self.hide_hidden
         );
         out.push_str(&self.input.render());
         out.push_str(&self.info.render());
         out.push_str(&self.render_words());
         out.push_str(&self.marks.render());
-        let after = match self.after {
-            After::Restore => {
-                "\"restore\"   # the cursor goes back; \"leave\" keeps it where wayhint put it"
-            }
-            After::Leave => {
-                "\"leave\"   # the cursor stays where wayhint put it; \"restore\" puts it back"
-            }
-        };
         let _ = write!(
             out,
-            "\n[pointer]\nafter = {after}\nnudge_px = {}   # px one arrow press moves the pointer; held, it goes on, faster\n",
-            self.nudge
+            "\n[pointer]\nrestore_on_action = {}   # return to the pre-command cursor position after an action, except hover; defer during a hold\nnudge_px = {}   # px one arrow press moves the pointer; held, it goes on, faster\n",
+            self.restore_on_action, self.nudge
+        );
+        let _ = writeln!(
+            out,
+            "restore_on_exit = {}   # return to the cursor position saved at launch",
+            self.restore_on_exit
+        );
+        let _ = writeln!(
+            out,
+            "move_on_select = {}   # move the cursor when the current text match changes; false moves only when acting",
+            self.move_on_select
         );
         let _ = writeln!(
             out,
@@ -1581,7 +1638,59 @@ mod tests {
         assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Right));
         assert_eq!(config.verbs.action_of(key(51, true)), None, "< isn't ,");
         assert_eq!(labels(&config), "asdfghjkl", "nothing left out");
-        assert_eq!(config.after, After::Leave, "the arrows' moves stay");
+        assert!(!config.restore_on_action, "the arrows' moves stay");
+    }
+
+    #[test]
+    fn cursor_restoration_on_exit_defaults_on_and_is_independent_of_clicks() {
+        assert!(Config::parse("", &us()).unwrap().restore_on_exit);
+        for restore_on_action in [false, true] {
+            for restore in [true, false] {
+                let config = Config::parse(
+                    &format!("[pointer]\nrestore_on_action = {restore_on_action}\nrestore_on_exit = {restore}"),
+                    &us(),
+                )
+                .unwrap();
+                assert_eq!(config.restore_on_exit, restore);
+                assert_eq!(config.restore_on_action, restore_on_action);
+                assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+            }
+        }
+        assert!(Config::parse("[pointer]\nrestore_on_exit = 'true'", &us()).is_err());
+    }
+
+    #[test]
+    fn pointer_selection_movement_defaults_off_and_round_trips() {
+        assert!(!Config::parse("", &us()).unwrap().move_on_select);
+        for enabled in [false, true] {
+            let config =
+                Config::parse(&format!("[pointer]\nmove_on_select = {enabled}"), &us()).unwrap();
+            assert_eq!(config.move_on_select, enabled);
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        for key in ["move_on_select", "restore_on_action"] {
+            assert!(Config::parse(&format!("[pointer]\n{key} = 'true'"), &us()).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_pointer_after_renders_as_restore_on_action() {
+        for (after, restore) in [("leave", false), ("restore", true)] {
+            let legacy = format!("[pointer]\nafter = '{after}'");
+            let config = Config::parse(&legacy, &us()).unwrap();
+            assert_eq!(config.restore_on_action, restore);
+            assert!(!config.render().contains("\nafter ="));
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+            assert!(
+                Config::parse(&format!("{legacy}\nrestore_on_action = {restore}"), &us(),).is_ok()
+            );
+            let error = Config::parse(
+                &format!("{legacy}\nrestore_on_action = {}", !restore),
+                &us(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("disagree"));
+        }
     }
 
     #[test]
@@ -1589,7 +1698,7 @@ mod tests {
         let config = Config::parse(
             "[keys]\nalphabet = \"ehatincsulodypmgf\"\ndefault_action = \"right\"\nleft = \".\"\n\
              double = \"!\"\nmiddle = \"/\"\nhover = \"_\"\nback = \"home\"\nforward = \"End\"\n\
-             [pointer]\nafter = \"leave\"",
+             [pointer]\nrestore_on_action = false",
             &us(),
         )
         .unwrap();
@@ -1598,7 +1707,7 @@ mod tests {
         assert_eq!(config.verbs.action_of(key(12, true)), Some(Action::Hover));
         assert_eq!(config.verbs.action_of(key(102, false)), Some(Action::Back));
         assert_eq!(labels(&config), "ehatincsulodypmgf");
-        assert_eq!(config.after, After::Leave);
+        assert!(!config.restore_on_action);
     }
 
     #[test]
@@ -1626,6 +1735,35 @@ mod tests {
         assert_eq!(config.verbs.action_of(key(30, false)), None);
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.verbs, config.verbs);
+    }
+
+    #[test]
+    fn space_is_available_for_verbs_and_repeat() {
+        for command in Action::ALL.into_iter().map(Action::name).chain(["repeat"]) {
+            let config = Config::parse(&format!("[keys]\n{command} = \"Space\""), &us()).unwrap();
+            let space = key(57, false);
+            if command == "repeat" {
+                assert!(config.verbs.is_repeat(space));
+                assert!(
+                    config
+                        .verbs
+                        .legend()
+                        .contains("Space\tthe last command again")
+                );
+                assert!(
+                    config
+                        .verbs
+                        .text_legend()
+                        .contains("Space\tthe last command again")
+                );
+            } else {
+                assert_eq!(config.verbs.action_of(space).unwrap().name(), command);
+            }
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        let clash =
+            Config::parse("[keys]\nhover = \"Space\"\nrepeat = \"Space\"", &us()).unwrap_err();
+        assert!(format!("{clash:#}").contains("hover and repeat"));
     }
 
     #[test]
@@ -1715,6 +1853,18 @@ mod tests {
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
         }
+    }
+
+    #[test]
+    fn icon_names_default_off_and_round_trip() {
+        assert!(!Config::parse("", &us()).unwrap().icon_names);
+        for enabled in [true, false] {
+            let config = Config::parse(&format!("[words]\nicon_names = {enabled}"), &us()).unwrap();
+            assert_eq!(config.icon_names, enabled);
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.icon_names, enabled);
+        }
+        assert!(Config::parse("[words]\nicon_names = 1", &us()).is_err());
     }
 
     #[test]
@@ -2101,6 +2251,29 @@ direction = "{direction}"
     }
 
     #[test]
+    fn hidden_hint_filter_defaults_on_and_round_trips() {
+        assert!(Config::parse("", &us()).unwrap().hide_hidden);
+        let config = Config::parse("[hints]\nhide_hidden = false", &us()).unwrap();
+        assert!(!config.hide_hidden);
+        assert!(!Config::parse(&config.render(), &us()).unwrap().hide_hidden);
+    }
+
+    #[test]
+    fn hint_coverage_defaults_to_half_and_round_trips_valid_percentages() {
+        assert_eq!(Config::parse("", &us()).unwrap().style.max_cover, 50);
+        for percent in [0, 25, 50, 100] {
+            let text = format!("[hints]\nmax_cover = {percent}");
+            let config = Config::parse(&text, &us()).unwrap();
+            assert_eq!(config.style.max_cover, percent);
+            let again = Config::parse(&config.render(), &us()).unwrap();
+            assert_eq!(again.style.max_cover, percent);
+        }
+        for value in ["-1", "101", "256", "0.5"] {
+            assert!(Config::parse(&format!("[hints]\nmax_cover = {value}"), &us()).is_err());
+        }
+    }
+
+    #[test]
     fn text_input_inherits_tags_but_has_its_own_screen_position() {
         let config = Config::parse(
             "[hints]\nfont = 'serif'\nsize = 22\ntext = '#123456'\nposition = 'top-right'\noffset = [3, 4]",
@@ -2197,7 +2370,7 @@ offset = [-13, 17]
         assert_eq!(again.verbs, config.verbs);
         assert_eq!(again.style, config.style);
         assert_eq!(again.input, config.input);
-        assert_eq!(again.after, config.after);
+        assert_eq!(again.restore_on_action, config.restore_on_action);
         assert_eq!(again.nudge, 9);
     }
 
@@ -2361,7 +2534,7 @@ offset = [-13, 17]
         let config = Config::parse("[hints]\ntext = \"#123456\"", &us()).unwrap();
         assert_eq!(
             config.style.arrow.colors(&config.style),
-            (config.style.text, config.style.background)
+            (config.style.background, config.style.border)
         );
         let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.style, config.style);
@@ -2509,6 +2682,18 @@ offset = [-13, 17]
         .for_pixels();
         assert_eq!(overridden.text_end, None);
         assert_eq!(overridden.background_end, None);
+        for (mode, expected) in [("global", Gradient::Global), ("hint", Gradient::Hint)] {
+            let config = Config::parse(&format!("[hints]\ngradient = '{mode}'"), &us()).unwrap();
+            assert_eq!(config.style.gradient, expected);
+            assert_eq!(config.style.for_pixels().gradient, expected);
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        assert_eq!(
+            Config::parse("", &us()).unwrap().style.gradient,
+            Gradient::Hint
+        );
+        let invalid = Config::parse("[hints]\ngradient = 'screen'", &us()).unwrap_err();
+        assert!(format!("{invalid:#}").contains("screen"));
         for direction in [
             "left",
             "right",
