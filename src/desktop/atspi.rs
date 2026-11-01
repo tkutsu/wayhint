@@ -665,7 +665,7 @@ impl<'c> Walk<'c> {
     }
 
     /// `object`'s children, asked as plain D-Bus: atspi's proxy wants each
-    /// child's bus to be a unique name (`:1.42`), and GTK WebKit's page root
+    /// child's bus to be a unique name (`:1.42`), and the GTK web view's page root
     /// is in its web process under a well-known one
     /// (`org.webkit.app-….WebProcess-…`), which fails the whole reply.
     async fn children(&self, object: &ObjectId) -> Result<Vec<ObjectId>> {
@@ -989,7 +989,7 @@ impl<'c> Walk<'c> {
 /// - Showing: always go in.
 /// - Outside a document: go into what's visible, but not into a document
 ///   that isn't showing (Firefox's background tabs). Also go through a
-///   bridge: a node with no states at all, and its children. GTK WebKit
+///   bridge: a node with no states at all, and its children. The GTK web view
 ///   (Tauri apps) joins the page to the window through two of them, a
 ///   socket and the page process's root, and its scroll pane under them
 ///   isn't visible either (2026-11-01, webkit2gtk-4.1 2.54). A hidden
