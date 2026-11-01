@@ -803,6 +803,7 @@ impl Desktop {
             start,
             end,
             text,
+            whole,
         } = check;
         let (start, end) = (*start, *end);
         let window = target.window;
@@ -816,11 +817,11 @@ impl Desktop {
                 let now = now?;
                 ensure!(now == *text, "the text changed");
                 let origin = snapshot.windows[window].window.rect.origin();
-                let under = parts
-                    .iter()
-                    .flatten()
-                    .any(|part| part.offset(origin).contains(target.hit));
-                ensure!(under, "the text moved");
+                let parts = parts.concat();
+                ensure!(
+                    still_under(&parts, origin, target.hit, *whole),
+                    "the text moved"
+                );
                 return Ok(());
             }
             Place::Cells(cells) => {
@@ -841,6 +842,18 @@ impl Desktop {
         ensure!(now == *text, "the text changed");
         Ok(())
     }
+}
+
+/// Whether a match's characters, at `parts` as its app gives them now
+/// (window-relative, the window at `origin`), are still under `hit`. One
+/// placed on its object's own box (`whole`) has none to give while the app
+/// still gives none: the target's re-check, which comes next, asks that
+/// box instead.
+fn still_under(parts: &[Rect], origin: Point, hit: Point, whole: bool) -> bool {
+    if whole && parts.is_empty() {
+        return true;
+    }
+    parts.iter().any(|part| part.offset(origin).contains(hit))
 }
 
 /// Where `span` of `text` is, global: in an object, the `parts` its app
@@ -1102,6 +1115,27 @@ mod tests {
         geometry::{Point, Rect},
         pixels::Block,
     };
+
+    #[test]
+    fn a_match_on_its_objects_box_is_checked_by_that_box() {
+        let origin = Point::new(100, 50);
+        let hit = Point::new(130, 60);
+        // The app still gives no character boxes: the target's re-check
+        // asks the object's box.
+        assert!(still_under(&[], origin, hit, true));
+        assert!(!still_under(&[], origin, hit, false), "characters gone");
+        let there = Rect::new(20, 0, 20, 20);
+        let away = Rect::new(200, 0, 20, 20);
+        assert!(still_under(&[there], origin, hit, false));
+        assert!(
+            !still_under(&[away], origin, hit, false),
+            "scrolled off the hit"
+        );
+        assert!(
+            !still_under(&[away], origin, hit, true),
+            "boxes given now count"
+        );
+    }
 
     fn window(address: &str, rect: Rect) -> Window {
         Window {

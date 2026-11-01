@@ -91,6 +91,9 @@ pub struct Check {
     pub start: u32,
     pub end: u32,
     pub text: String,
+    /// The match was its object's own box ([`Match::whole`]): where its
+    /// characters are can't be asked, and the object's box is checked.
+    pub whole: bool,
 }
 
 /// A terminal pane's text laid out in its cells. A terminal has no
@@ -181,6 +184,9 @@ pub struct Match {
     pub parts: Vec<Rect>,
     /// The leading symbol was used as a verb rather than matched as text.
     pub verb: bool,
+    /// Its part is its text's own box: the app gave no character boxes
+    /// for this short text (see `visible`).
+    pub whole: bool,
 }
 
 impl Match {
@@ -478,7 +484,13 @@ impl Search {
                     .into_iter()
                     .filter(|part| shows(text.window, part.center()))
                     .collect::<Vec<_>>();
-                (!parts.is_empty()).then_some(Match { span, parts, verb })
+                let whole = boxes.is_empty();
+                (!parts.is_empty()).then_some(Match {
+                    span,
+                    parts,
+                    verb,
+                    whole,
+                })
             })
             .collect();
         matches.sort_by_key(|m| (m.point().y, m.point().x));
@@ -1000,6 +1012,10 @@ mod tests {
         search.update(&|_, at: Point| at.x != 90);
         let parts: Vec<&[Rect]> = search.matches().iter().map(|m| &m.parts[..]).collect();
         assert_eq!(parts, [&[label][..]], "only the label shows");
+        assert!(
+            search.matches()[0].whole,
+            "on its own box, for the re-check"
+        );
     }
 
     #[test]

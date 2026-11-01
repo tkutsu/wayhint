@@ -102,6 +102,13 @@ pub fn relabel_free(
     claim(&free_labels(kept.len(), size, free), kept)
 }
 
+/// Whether keys typed for the label `old` could go on to pick `new`: the
+/// two are the same, or one starts the other. A label new on its target
+/// that crosses an old one's path takes keys aimed elsewhere.
+pub fn crosses(old: &[usize], new: &[usize]) -> bool {
+    old.starts_with(new) || new.starts_with(old)
+}
+
 /// A label from `all` for each target: the one `kept` names if it's there
 /// and no target before took it, else the first still free.
 fn claim(all: &[Vec<usize>], kept: &[Option<&[usize]>]) -> Vec<Vec<usize>> {
@@ -285,11 +292,7 @@ impl Selector {
             .zip(&kept)
             .any(|(label, was)| *was != Some(label.as_slice()) && after(label) == 1);
         let misleads = labels.iter().zip(&kept).any(|(label, was)| {
-            *was != Some(label.as_slice())
-                && self
-                    .labels
-                    .iter()
-                    .any(|old| old.starts_with(label) || label.starts_with(old))
+            *was != Some(label.as_slice()) && self.labels.iter().any(|old| crosses(old, label))
         });
         self.labels = labels;
         let dropped = (!leads || instant) && !self.typed.is_empty();

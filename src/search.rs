@@ -30,9 +30,9 @@
 //! label is never a query, and what's typed is both until one of them
 //! wins ([`Hints`]).
 //!
-//! The text is read as text mode starts, and again whenever a refresh
-//! finds the windows changed while nothing is typed: the first key freezes
-//! what was read. Where a match is, the app is asked only for matches it
+//! The text is read as text mode starts, and again with each refresh
+//! while nothing is typed, kept if it and the windows are as they were:
+//! the first key freezes what was read. Where a match is, the app is asked only for matches it
 //! wasn't asked about before, and only once the keys typed so far are all
 //! in. The match is checked again before acting on it (see `run.rs`).
 
@@ -55,7 +55,7 @@ use crate::{
     snapshot::{Snapshot, Target},
     status::{Message, Status},
     style::{Input, Notice, StartMark},
-    text::{Check, Place, Search, Span},
+    text::{Check, Place, Search, Span, Text},
 };
 
 /// How many characters `[words] auto_accept` waits for before acting on
@@ -168,6 +168,19 @@ impl Hints {
     ) -> Option<usize> {
         self.typed(pressed, search)
             .filter(|_| enter || config.hint_auto_accept)
+    }
+
+    /// Whether a key typed for one of `before`'s tags could pick another
+    /// target among these: a label new on its target crosses an old one's
+    /// path (see `selection::crosses`). `survivors[i]` is the index target
+    /// `i` had before, if it was there.
+    fn misleads(&self, before: &Self, survivors: &[Option<usize>]) -> bool {
+        self.0.iter().any(|(now, label)| {
+            before
+                .0
+                .iter()
+                .any(|(was, old)| survivors[*now] != Some(*was) && selection::crosses(old, label))
+        })
     }
 
     /// Whether a label goes on from `pressed`.
@@ -344,8 +357,8 @@ impl Typing {
         }
     }
 
-    /// Scans the windows again, and if they changed, reads their text
-    /// again and draws it, a target found again keeping its tag. Whether
+    /// Scans the windows and reads their text again, and if either
+    /// changed, draws them, a target found again keeping its tag. Whether
     /// they changed; `None` from a source that never does.
     fn refresh(
         &mut self,
@@ -370,9 +383,13 @@ impl Typing {
             return Ok(None);
         };
         fresh.merge_nearby(config.merge_distance);
+        // The text is read every round too: a terminal or a label can
+        // change what it says with nothing on screen moving.
+        let texts = source.read_text(&fresh);
         let changed = fresh.targets != shown.targets
             || fresh.obstacles != shown.obstacles
-            || fresh.texts != shown.texts;
+            || fresh.texts != shown.texts
+            || texts != self.search.texts();
         if !changed {
             if slowed {
                 overlay.update(&self.draw(shown, config))?;
@@ -383,16 +400,12 @@ impl Typing {
         let before: HashMap<usize, Vec<usize>> = self.hints.0.iter().cloned().collect();
         *shown = fresh;
         overlay.set_layout(shown);
-        self.search = read(shown, source, config);
+        self.search = read(texts, shown, source, config);
         let kept = |i: usize| survivors[i].and_then(|was| before.get(&was).cloned());
         let hints = Hints::keeping(&self.search, shown, config, &kept);
-        // A label now on another target: a key typed for the old one
-        // during the scan must not land there.
-        let moved = hints.0.iter().any(|(now, label)| {
-            before
-                .iter()
-                .any(|(was, old)| old == label && survivors[*now] != Some(*was))
-        });
+        // A key typed for an old tag during the scan must not land on
+        // another target.
+        let moved = hints.misleads(&self.hints, &survivors);
         self.hints = hints;
         let frame = self.draw(shown, config);
         if moved {
@@ -449,7 +462,7 @@ fn keys(
     // Nothing shows while the text is read: no tag to type yet.
     let verb = selector.armed().map(Action::name);
     overlay.update(&frame(None, false, verb, holding, &config.input, None))?;
-    let search = read(shown, source, config);
+    let search = read(source.read_text(shown), shown, source, config);
     let mut now = Typing {
         hints: Hints::new(&search, shown, config),
         search,
@@ -725,11 +738,12 @@ fn unique(search: &Search) -> bool {
     query.chars().count() >= UNIQUE && search.matches().len() == 1
 }
 
-/// The windows' texts, and with `[words.first_character]`, where each word's first
-/// letter shows, asked of the apps now: the first letter typed then asks
-/// nothing. A text read from a name has no letters to ask about.
-fn read(shown: &Snapshot, source: &mut dyn Source, config: &Config) -> Search {
-    let mut search = Search::new(source.read_text(shown));
+/// The windows' `texts`, read from `shown`, and with `[words.first_character]`,
+/// where each word's first letter shows, asked of the apps now: the first
+/// letter typed then asks nothing. A text read from a name has no letters
+/// to ask about.
+fn read(texts: Vec<Text>, shown: &Snapshot, source: &mut dyn Source, config: &Config) -> Search {
+    let mut search = Search::new(texts);
     if config.marks.starts.mark == StartMark::Off {
         return search;
     }
@@ -800,6 +814,7 @@ fn choose(
         start: from,
         end,
         text: text.chars(from, end),
+        whole: found.whole,
     };
     let (object, role, editable, clips, check) = match text.place {
         Place::Object(index) => {
@@ -1666,6 +1681,26 @@ mod tests {
         let kept = |i: usize| [None, Some(vec![3]), Some(vec![2])][i].clone();
         let hints = Hints::keeping(&found, &shown, &config, &kept);
         assert_eq!(hints.0, [(1, vec![3]), (2, vec![2])]);
+    }
+
+    #[test]
+    fn a_refresh_drops_keys_a_new_label_could_take() {
+        let (a, s) = (0, 1);
+        let before = Hints(vec![(0, vec![a]), (1, vec![s])]);
+        // a's target split into aa and a new target's as: a queued a, s
+        // would pick the new one.
+        let split = Hints(vec![(0, vec![a, a]), (1, vec![s]), (2, vec![a, s])]);
+        assert!(split.misleads(&before, &[Some(0), Some(1), None]));
+        // The other way: aa's target left and a new one took a.
+        let before = Hints(vec![(0, vec![a, a]), (1, vec![a, s])]);
+        let shorter = Hints(vec![(1, vec![a, s]), (2, vec![a])]);
+        assert!(shorter.misleads(&before, &[None, Some(1), None]));
+        // Same labels on the same targets, one gone: keys land as aimed.
+        let kept = Hints(vec![(0, vec![a, s])]);
+        assert!(!kept.misleads(&before, &[Some(1)]));
+        // A new target under a fresh first letter crosses no path.
+        let fresh = Hints(vec![(0, vec![a, a]), (1, vec![a, s]), (2, vec![s])]);
+        assert!(!fresh.misleads(&before, &[Some(0), Some(1), None]));
     }
 
     #[test]
