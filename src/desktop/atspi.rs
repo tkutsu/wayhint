@@ -340,6 +340,8 @@ struct Pending {
     object: ObjectId,
     parent: Option<usize>,
     in_document: bool,
+    /// The parent reported no states at all: a bridge between processes.
+    bridged: bool,
 }
 
 impl<'c> Walk<'c> {
@@ -569,6 +571,7 @@ impl<'c> Walk<'c> {
             object: frame,
             parent: None,
             in_document: false,
+            bridged: false,
         }];
         while !level.is_empty() {
             if nodes.len() + level.len() > budget {
@@ -586,7 +589,7 @@ impl<'c> Walk<'c> {
             for result in results {
                 // An object that vanished mid-walk is normal (a tooltip
                 // closing); it's left out, and its children with it.
-                let Ok((node, children, in_document)) = result else {
+                let Ok((node, children, in_document, stateless)) = result else {
                     continue;
                 };
                 let parent = Some(nodes.len());
@@ -594,6 +597,7 @@ impl<'c> Walk<'c> {
                     object,
                     parent,
                     in_document,
+                    bridged: stateless,
                 }));
                 nodes.push(node);
             }
@@ -613,13 +617,15 @@ impl<'c> Walk<'c> {
         &self,
         pending: Pending,
         window: Rect,
-    ) -> Result<(Node, Vec<ObjectId>, bool)> {
+    ) -> Result<(Node, Vec<ObjectId>, bool, bool)> {
         let proxy: AccessibleProxy = self.proxy(&pending.object).await?;
         let (states, known) = tokio::join!(
             self.call(proxy.get_state()),
             self.known(&proxy, &pending.object)
         );
-        let (mut states, known) = (states_from(states?), known?);
+        let (states, known) = (states?, known?);
+        let stateless = states.is_empty();
+        let mut states = states_from(states);
         let (role, interfaces) = (known.role, known.interfaces);
         states.showing |= self.menu.is_some() && states.visible;
         let component = interfaces.contains(Interface::Component);
@@ -631,12 +637,16 @@ impl<'c> Walk<'c> {
         } else {
             None
         };
-        let children = if worth_entering(states, document, pending.in_document, bounds, window) {
-            self.call(proxy.get_children())
-                .await?
-                .iter()
-                .map(object_id)
-                .collect()
+        let bridge = stateless || pending.bridged;
+        let children = if worth_entering(
+            states,
+            document,
+            pending.in_document,
+            bridge,
+            bounds,
+            window,
+        ) {
+            self.children(&pending.object).await?
         } else {
             Vec::new()
         };
@@ -651,7 +661,32 @@ impl<'c> Walk<'c> {
             bounds,
             details: None,
         };
-        Ok((node, children, pending.in_document || document))
+        Ok((node, children, pending.in_document || document, stateless))
+    }
+
+    /// `object`'s children, asked as plain D-Bus: atspi's proxy wants each
+    /// child's bus to be a unique name (`:1.42`), and GTK WebKit's page root
+    /// is in its web process under a well-known one
+    /// (`org.webkit.app-….WebProcess-…`), which fails the whole reply.
+    async fn children(&self, object: &ObjectId) -> Result<Vec<ObjectId>> {
+        let reply = self
+            .call(self.conn.call_method(
+                Some(object.bus.as_str()),
+                object.path.as_str(),
+                Some("org.a11y.atspi.Accessible"),
+                "GetChildren",
+                &(),
+            ))
+            .await?;
+        let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
+            reply.body().deserialize()?;
+        Ok(children
+            .into_iter()
+            .map(|(bus, path)| ObjectId {
+                bus,
+                path: path.to_string(),
+            })
+            .collect())
     }
 
     /// `object`'s role and interfaces: as read before, else asked now.
@@ -953,7 +988,12 @@ impl<'c> Walk<'c> {
 ///
 /// - Showing: always go in.
 /// - Outside a document: go into what's visible, but not into a document
-///   that isn't showing (Firefox's background tabs).
+///   that isn't showing (Firefox's background tabs). Also go through a
+///   bridge: a node with no states at all, and its children. GTK WebKit
+///   (Tauri apps) joins the page to the window through two of them, a
+///   socket and the page process's root, and its scroll pane under them
+///   isn't visible either (2026-11-01, webkit2gtk-4.1 2.54). A hidden
+///   widget still says enabled or sensitive, so it stays out.
 /// - Inside a document: Firefox never marks a real page's containers
 ///   "showing", so go into what's visible and not wholly outside the
 ///   window. An empty box says nothing (YouTube's custom elements report
@@ -965,13 +1005,14 @@ fn worth_entering(
     states: States,
     document: bool,
     in_document: bool,
+    bridge: bool,
     bounds: Option<Rect>,
     window: Rect,
 ) -> bool {
     if states.showing {
         true
     } else if !in_document {
-        states.visible && !document
+        (states.visible || bridge) && !document
     } else {
         states.visible
             && bounds.is_none_or(|b| {
@@ -1085,24 +1126,53 @@ mod tests {
             states(true, true),
             false,
             false,
+            false,
             None,
             WINDOW
         ));
         assert!(
-            worth_entering(states(false, true), false, false, None, WINDOW),
+            worth_entering(states(false, true), false, false, false, None, WINDOW),
             "Firefox chrome containers"
         );
         assert!(
-            !worth_entering(states(false, true), true, false, None, WINDOW),
+            !worth_entering(states(false, true), true, false, false, None, WINDOW),
             "a background tab's document"
         );
         assert!(!worth_entering(
             states(false, false),
             false,
             false,
+            false,
             None,
             WINDOW
         ));
+    }
+
+    #[test]
+    fn walk_rule_through_webkit_bridges() {
+        let nothing = States::default();
+        assert!(
+            worth_entering(nothing, false, false, true, None, WINDOW),
+            "WebKitGTK's socket and page root report no states"
+        );
+        let scroll_pane = States {
+            enabled: true,
+            sensitive: true,
+            focusable: true,
+            ..States::default()
+        };
+        assert!(
+            worth_entering(scroll_pane, false, false, true, None, WINDOW),
+            "the page's scroll pane, under the bridge"
+        );
+        assert!(
+            !worth_entering(scroll_pane, false, false, false, None, WINDOW),
+            "a hidden widget elsewhere"
+        );
+        assert!(
+            !worth_entering(nothing, true, false, true, None, WINDOW),
+            "a document still has to be showing"
+        );
     }
 
     #[test]
@@ -1112,11 +1182,19 @@ mod tests {
             visible,
             false,
             true,
+            false,
             Some(Rect::new(10, 10, 100, 100)),
             WINDOW
         ));
         assert!(
-            worth_entering(visible, false, true, Some(Rect::new(0, 0, 0, 0)), WINDOW),
+            worth_entering(
+                visible,
+                false,
+                true,
+                false,
+                Some(Rect::new(0, 0, 0, 0)),
+                WINDOW
+            ),
             "empty box: look inside"
         );
         assert!(
@@ -1124,6 +1202,7 @@ mod tests {
                 visible,
                 false,
                 true,
+                false,
                 Some(Rect::new(0, 2000, 100, 100)),
                 WINDOW
             ),
