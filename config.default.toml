@@ -78,9 +78,12 @@
 # padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
 
 [words]
+# scripts = ["Latin"]  # Unicode writing systems that need no fallback hint. Default: ["Latin"].
+# For Greek too, use ["Latin", "Greek"]. Script codes such as "Latn" and "Grek" also work.
+# match_start = "word"  # Begin matching at word, line or sentence starts. Default: "word".
 # cursor = "center"  # Place the pointer at the start, center or end of the selected text match. Default: "center".
 # auto_accept = false  # Act on a unique text match after at least 3 typed characters. Default: false.
-# fallback_hints = true  # Show tags for targets without searchable text. Default: true.
+# fallback_hints = true  # Show tags for targets without text or with unlisted scripts. Default: true.
 # icon_names = false  # Search icon buttons by their accessibility names. Default: false.
 
 [words.matches]
@@ -105,7 +108,7 @@
 # padding = [1, 4]  # Selected match padding in logical pixels: [vertical, horizontal]. Default: inherit words.matches.padding.
 
 [words.first_character]
-# First letters are marked while no query is typed.
+# First letters at match_start boundaries are marked while no query is typed.
 # mark = "off"  # Mark word initials while the query is empty: off, underline, box or dot. Default: "off".
 # color = "#89b4faff"  # Fill color shared by underline, box and dot marks. Default: "#89b4faff".
 # color_end = "#89b4faff"  # Fill gradient end color; omit for a solid fill. Default: unset (solid words.first_character.color).

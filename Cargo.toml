@@ -27,6 +27,8 @@ tiny-skia = "0.11"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 toml = "1.1.8"
 unicode-normalization = "0.1.26"  # text mode: splits é into e and its accent, so the accent can be dropped
+unicode-script = "0.5"  # fallback hints for text outside the configured writing systems
+unicode-segmentation = "1"  # Unicode sentence boundaries for text matching
 wayland-scanner = "0.31"  # already in the tree through wayland: writes the client code for Hyprland's window export from its XML
 xkbcommon = { version = "0.8", default-features = false }
 zbus = { version = "5", default-features = false, features = ["tokio"] }

@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use unicode_script::Script;
 
 use crate::{
     action::Action,
@@ -29,6 +30,7 @@ use crate::{
         Arrow, Badge, Badges, Case, Color, Direction, Gradient, Info, Input, Look, Mark, Marks,
         Position, StartMark, Starts, Style,
     },
+    text::MatchStart,
 };
 
 /// The default config, every setting explained and commented out:
@@ -122,6 +124,9 @@ impl FileHints {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileWords {
+    /// Writing systems whose text needs no fallback hint; Latin by default.
+    scripts: Option<Vec<String>>,
+    match_start: MatchStart,
     cursor: TextCursor,
     /// Act on the only match left, without Enter.
     #[serde(alias = "pick_unique")]
@@ -138,6 +143,30 @@ struct FileWords {
     starts: FileStarts,
     /// `[input]`'s old name, from when it showed only the query.
     input: Option<FileInput>,
+}
+
+impl FileWords {
+    /// Decode Unicode script names before any keyboard grab.
+    fn scripts(&self) -> Result<Vec<Script>> {
+        let Some(names) = &self.scripts else {
+            return Ok(vec![Script::Latin]);
+        };
+        names
+            .iter()
+            .map(|name| {
+                Script::from_full_name(name)
+                    .or_else(|| Script::from_short_name(name))
+                    .filter(|script| {
+                        !matches!(script, Script::Common | Script::Inherited | Script::Unknown)
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "[words] scripts: {name:?} is not a writing system; use Unicode names such as Latin or Greek, or codes such as Latn or Grek"
+                        )
+                    })
+            })
+            .collect()
+    }
 }
 
 /// `[input]`: the box for what's typed, with the
@@ -495,6 +524,11 @@ pub fn icon_names(explicit: Option<&Path>) -> Result<bool> {
     Ok(unkeyed(explicit)?.words.icon_names.unwrap_or(false))
 }
 
+/// Text dumps use the run's matching boundaries without decoding key bindings.
+pub fn match_start(explicit: Option<&Path>) -> Result<MatchStart> {
+    Ok(unkeyed(explicit)?.words.match_start)
+}
+
 /// The file at `explicit`, else the default one if it's there, else all
 /// defaults: undecoded, since the keys need a keymap.
 fn unkeyed(explicit: Option<&Path>) -> Result<File> {
@@ -702,6 +736,10 @@ pub struct Config {
     /// Tags, in text mode, on the targets with no text to type:
     /// `[words] fallback_hints`.
     pub text_hints: bool,
+    /// Writing systems whose text needs no hint: `[words] scripts`.
+    pub text_scripts: Vec<Script>,
+    /// Boundaries where a query may begin: `[words] match_start`.
+    pub text_match_start: MatchStart,
     /// Search icon buttons by accessibility name: `[words] icon_names`.
     pub icon_names: bool,
     /// Return to the pre-command position after an action: `[pointer] restore_on_action`.
@@ -1266,6 +1304,7 @@ impl Config {
         let hint_auto_accept = file.hints.auto_accept.unwrap_or(true);
         let window_hint = file.hints.window_hint.unwrap_or(true);
         let hide_hidden = file.hints.hide_hidden.unwrap_or(true);
+        let text_scripts = file.words.scripts()?;
         let style = file.hints.resolve();
         style.validate()?;
         let starts = file.words.starts.resolve()?;
@@ -1312,6 +1351,8 @@ impl Config {
             text_cursor: file.words.cursor,
             text_auto_accept: file.words.auto_accept,
             text_hints: file.words.hints.unwrap_or(true),
+            text_scripts,
+            text_match_start: file.words.match_start,
             icon_names: file.words.icon_names.unwrap_or(false),
             restore_on_action: file
                 .pointer
@@ -1340,13 +1381,19 @@ impl Config {
 
     /// `[words]`'s own settings, for `wayhint config`.
     fn render_words(&self) -> String {
+        let scripts: Vec<_> = self.text_scripts.iter().map(|s| s.full_name()).collect();
+        let match_start = match self.text_match_start {
+            MatchStart::Word => "word",
+            MatchStart::Line => "line",
+            MatchStart::Sentence => "sentence",
+        };
         let cursor = match self.text_cursor {
             TextCursor::Start => "start",
             TextCursor::Center => "center",
             TextCursor::End => "end",
         };
         format!(
-            "\n[words]\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nfallback_hints = {}   # tags on the targets with no text to type, in letters no word starts with\nicon_names = {}   # search icon buttons by their accessibility names\n",
+            "\n[words]\nscripts = {scripts:?}   # writing systems that need no fallback hint\nmatch_start = \"{match_start}\"   # begin matching at word, line or sentence starts\ncursor = \"{cursor}\"   # start, center or end of the selected match\nauto_accept = {}   # act on the only match left, once {} characters are typed; false requires Enter\nfallback_hints = {}   # tags on the targets with no text to type, in letters no word starts with\nicon_names = {}   # search icon buttons by their accessibility names\n",
             self.text_auto_accept,
             crate::search::UNIQUE,
             self.text_hints,
@@ -1852,6 +1899,51 @@ mod tests {
             let config = Config::parse(text, &us()).unwrap();
             let again = Config::parse(&config.render(), &us()).unwrap();
             assert_eq!(again.pixels, config.pixels, "{text:?} reads back the same");
+        }
+    }
+
+    #[test]
+    fn word_scripts_default_to_latin_and_round_trip() {
+        assert_eq!(
+            Config::parse("", &us()).unwrap().text_scripts,
+            [Script::Latin]
+        );
+        for (scripts, expected) in [
+            ("[\"Latin\", \"Greek\"]", vec![Script::Latin, Script::Greek]),
+            ("[\"Latn\", \"Grek\"]", vec![Script::Latin, Script::Greek]),
+            ("[\"Cyrillic\"]", vec![Script::Cyrillic]),
+            ("[]", vec![]),
+        ] {
+            let config = Config::parse(&format!("[words]\nscripts = {scripts}"), &us()).unwrap();
+            assert_eq!(config.text_scripts, expected);
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        for name in ["English", "Greekk", "Common", "Inherited", "Unknown"] {
+            let error = Config::parse(&format!("[words]\nscripts = [{name:?}]"), &us())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("[words] scripts"), "{error}");
+        }
+        assert!(Config::parse("[words]\nscripts = \"Greek\"", &us()).is_err());
+    }
+
+    #[test]
+    fn match_starts_default_to_words_and_round_trip() {
+        assert_eq!(
+            Config::parse("", &us()).unwrap().text_match_start,
+            MatchStart::Word
+        );
+        for (name, expected) in [
+            ("word", MatchStart::Word),
+            ("line", MatchStart::Line),
+            ("sentence", MatchStart::Sentence),
+        ] {
+            let config = Config::parse(&format!("[words]\nmatch_start = {name:?}"), &us()).unwrap();
+            assert_eq!(config.text_match_start, expected);
+            assert_eq!(Config::parse(&config.render(), &us()).unwrap(), config);
+        }
+        for value in ["\"paragraph\"", "true", "3"] {
+            assert!(Config::parse(&format!("[words]\nmatch_start = {value}"), &us()).is_err());
         }
     }
 

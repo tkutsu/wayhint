@@ -22,7 +22,10 @@
 
 use std::{collections::HashMap, ops::Range};
 
+use serde::Deserialize;
 use unicode_normalization::char::{decompose_canonical, is_combining_mark};
+use unicode_script::{Script, UnicodeScript as _};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::geometry::{Point, Rect};
 
@@ -32,6 +35,49 @@ const SHORT: usize = 100;
 
 /// The smallest visible part of a match worth a highlight, in px.
 const MIN_SIZE: i32 = 2;
+
+/// Which text boundaries can begin a query: `[words] match_start`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchStart {
+    #[default]
+    Word,
+    Line,
+    Sentence,
+}
+
+impl MatchStart {
+    /// Keep each segment's first non-space character and first word, so
+    /// quoted text can be found with or without its opening punctuation.
+    fn offsets(self, text: &str) -> Vec<usize> {
+        let boundaries: Vec<_> = match self {
+            Self::Word => return Vec::new(),
+            Self::Line => std::iter::once(0)
+                .chain(text.char_indices().filter_map(|(at, c)| {
+                    matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+                        .then_some(at + c.len_utf8())
+                }))
+                .collect(),
+            Self::Sentence => text
+                .split_sentence_bound_indices()
+                .map(|(at, _)| at)
+                .collect(),
+        };
+        let mut starts = Vec::new();
+        for (i, &from) in boundaries.iter().enumerate() {
+            let end = boundaries.get(i + 1).copied().unwrap_or(text.len());
+            let segment = &text[from..end];
+            if let Some(first) = segment.find(|c: char| !c.is_whitespace() && !is_combining_mark(c))
+            {
+                starts.push(from + first);
+                if let Some(word) = segment.find(in_word).filter(|&word| word != first) {
+                    starts.push(from + word);
+                }
+            }
+        }
+        starts
+    }
+}
 
 /// One object's text, as read when text mode starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +99,16 @@ pub struct Text {
 }
 
 impl Text {
+    /// All letters must belong to an enabled writing system. Shared
+    /// punctuation, digits and combining accents don't require a script.
+    pub fn in_scripts(&self, scripts: &[Script]) -> bool {
+        self.content.chars().all(|c| {
+            !c.is_alphabetic()
+                || matches!(c.script(), Script::Common | Script::Inherited)
+                || scripts.contains(&c.script())
+        })
+    }
+
     /// Its characters `start..end`, counted from the start of the object.
     pub fn chars(&self, start: u32, end: u32) -> String {
         let skip = start.saturating_sub(self.start) as usize;
@@ -209,27 +265,40 @@ pub struct Folded {
     text: String,
     /// For each byte of `text`, the original character it came from.
     from: Vec<u32>,
-    /// Where each word starts in `text`, in bytes, first to last.
-    words: Vec<usize>,
+    /// Eligible starts in `text`, in bytes, first to last.
+    starts: Vec<usize>,
+    boundary: MatchStart,
 }
 
 impl Folded {
     /// `text` folded, lower case.
     pub fn new(text: &str) -> Self {
+        Self::with_start(text, MatchStart::Word)
+    }
+
+    /// Find boundaries in the original text before whitespace is folded.
+    fn with_start(text: &str, boundary: MatchStart) -> Self {
         let mut folded = Self {
             text: String::with_capacity(text.len()),
             from: Vec::with_capacity(text.len()),
-            words: Vec::new(),
+            starts: Vec::new(),
+            boundary,
         };
+        let offsets = boundary.offsets(text);
+        let mut offsets = offsets.into_iter().peekable();
         let mut after_space = false;
         // Words are found in the original, before accents go: `é` is one
         // word character, never a base letter and a separator.
         let mut word = false;
         // `zip(0..)` counts characters as `u32`, the width AT-SPI uses.
-        for (c, at) in text.chars().zip(0u32..) {
+        for ((byte, c), at) in text.char_indices().zip(0u32..) {
+            if offsets.peek() == Some(&byte) {
+                folded.starts.push(folded.text.len());
+                offsets.next();
+            }
             if in_word(c) {
-                if !word {
-                    folded.words.push(folded.text.len());
+                if !word && boundary == MatchStart::Word {
+                    folded.starts.push(folded.text.len());
                 }
                 word = true;
             } else if !(is_combining_mark(c) || word && matches!(c, '\'' | '’')) {
@@ -267,17 +336,20 @@ impl Folded {
         &self.text
     }
 
-    /// Where `query`, folded the same way, occurs from the start of a word:
+    /// Where `query`, folded the same way, occurs from an eligible start:
     /// character ranges of the original, first to last, none overlapping.
     /// `con` finds `contact` and `Control`, not `falcon`; it may go on
     /// into a phrase (`save fi`). A query that starts with something other
     /// than a word character (`--help`, `/home`) can't start inside a word,
-    /// so it's found anywhere. None for an empty query, which would match
+    /// so word mode finds it anywhere. Line and sentence modes restrict
+    /// punctuation queries to their starts too. None for an empty query, which would match
     /// between every two characters.
     pub fn find<'a>(&'a self, query: &'a str) -> impl Iterator<Item = Range<u32>> + 'a {
         let starts: Box<dyn Iterator<Item = usize>> = match query.chars().next() {
             None => Box::new(std::iter::empty()),
-            Some(c) if in_word(c) => Box::new(self.words.iter().copied()),
+            Some(c) if in_word(c) || self.boundary != MatchStart::Word => {
+                Box::new(self.starts.iter().copied())
+            }
             Some(_) => Box::new(self.text.match_indices(query).map(|(at, _)| at)),
         };
         let mut free = 0;
@@ -313,9 +385,18 @@ pub struct Search {
 }
 
 impl Search {
+    #[cfg(test)]
     pub fn new(texts: Vec<Text>) -> Self {
+        Self::with_start(texts, MatchStart::Word)
+    }
+
+    /// Apply the same boundaries to matches, fallback hints and markers.
+    pub fn with_start(texts: Vec<Text>, boundary: MatchStart) -> Self {
         Self {
-            folded: texts.iter().map(|t| Folded::new(&t.content)).collect(),
+            folded: texts
+                .iter()
+                .map(|t| Folded::with_start(&t.content, boundary))
+                .collect(),
             texts,
             query: String::new(),
             verb_prefix: false,
@@ -369,8 +450,8 @@ impl Search {
         popped
     }
 
-    /// Whether typing `typed` would find something: it starts a word of a
-    /// text. A tag's label that does can't be told apart
+    /// Whether typing `typed` would find something at an eligible start.
+    /// A tag's label that does can't be told apart
     /// from a query, so text mode never gives it to a tag.
     pub fn starts_a_word(&self, typed: &str) -> bool {
         let typed = Folded::new(typed);
@@ -426,7 +507,7 @@ impl Search {
         self.located.extend(spans.iter().copied().zip(boxes));
     }
 
-    /// The first character of every word: the spans a one-letter query
+    /// The first word character at each eligible start: the spans a one-letter query
     /// finds, so once located, typing that letter asks the app nothing.
     pub fn word_starts(&self) -> Vec<Span> {
         self.folded
@@ -434,13 +515,16 @@ impl Search {
             .zip(&self.texts)
             .enumerate()
             .flat_map(|(i, (text, read))| {
-                text.words.iter().map(move |&at| {
+                text.starts.iter().filter_map(move |&at| {
+                    if !text.text[at..].chars().next().is_some_and(in_word) {
+                        return None;
+                    }
                     let start = read.start + text.from[at];
-                    Span {
+                    Some(Span {
                         text: i,
                         start,
                         end: start + 1,
-                    }
+                    })
                 })
             })
             .collect()
@@ -591,7 +675,11 @@ mod tests {
     /// Where `query` is in `text`, folded as a search would fold both: the
     /// character ranges as `(start, end)`.
     fn find(text: &str, query: &str) -> Vec<(u32, u32)> {
-        let folded = Folded::new(text);
+        find_from(text, query, MatchStart::Word)
+    }
+
+    fn find_from(text: &str, query: &str, boundary: MatchStart) -> Vec<(u32, u32)> {
+        let folded = Folded::with_start(text, boundary);
         let query = Folded::new(query);
         folded
             .find(query.as_str())
@@ -657,6 +745,99 @@ mod tests {
     fn a_query_that_starts_with_punctuation_is_found_anywhere() {
         assert_eq!(find("run --help", "--help"), [(4, 10)]);
         assert_eq!(find("~/home", "/home"), [(1, 6)]);
+    }
+
+    #[test]
+    fn line_matching_uses_original_breaks_and_skips_indentation_and_quotes() {
+        let content = "Save file\r\n \t'Άλλο αρχείο'\n\nNext";
+        let find = |query| find_from(content, query, MatchStart::Line);
+        assert_eq!(find("save"), [(0, 4)]);
+        assert_eq!(find("file"), []);
+        assert_eq!(find("αλλο"), [(14, 18)]);
+        assert_eq!(find("'αλλο"), [(13, 18)]);
+        assert_eq!(find("αρχ"), []);
+        assert_eq!(find("next"), [(28, 32)]);
+        assert_eq!(
+            find_from("Save\n    file", "save fi", MatchStart::Line),
+            [(0, 11)],
+            "queries can cross lines"
+        );
+        for separator in ['\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+            assert_eq!(
+                find_from(&format!("Save{separator}Next"), "next", MatchStart::Line),
+                [(5, 9)]
+            );
+        }
+    }
+
+    #[test]
+    fn sentence_matching_uses_unicode_boundaries_and_original_character_offsets() {
+        let content = "Café noir. Άλλο εδώ! Third part? 保存。 Next.";
+        let find = |query| find_from(content, query, MatchStart::Sentence);
+        assert_eq!(find("cafe"), [(0, 4)]);
+        assert_eq!(find("αλλο"), [(11, 15)]);
+        assert_eq!(find("third"), [(21, 26)]);
+        assert_eq!(find("保存"), [(33, 35)]);
+        assert_eq!(find("next"), [(37, 41)]);
+        for query in ["noir", "εδω", "part", "存"] {
+            assert_eq!(find(query), [], "{query} is inside a sentence");
+        }
+        assert_eq!(
+            find_from("Value 3.14 stays. Next.", "14", MatchStart::Sentence),
+            [],
+            "a decimal point does not end a sentence"
+        );
+        assert_eq!(
+            find_from("First word. Next", "first word. ne", MatchStart::Sentence),
+            [(0, 14)],
+            "queries can cross sentences"
+        );
+    }
+
+    #[test]
+    fn punctuation_queries_respect_line_and_sentence_starts() {
+        assert_eq!(
+            find_from("run --help\n --help", "--help", MatchStart::Line),
+            [(12, 18)]
+        );
+        assert_eq!(
+            find_from("'First word.' 'Second word!'", "'sec", MatchStart::Sentence),
+            [(14, 18)]
+        );
+        for boundary in [MatchStart::Line, MatchStart::Sentence] {
+            assert_eq!(find_from("word /path", "/path", boundary), []);
+            assert_eq!(find_from("   \n\t\r\n", "", boundary), []);
+            assert_eq!(find_from("\u{301}Été", "ete", boundary), [(1, 4)]);
+        }
+    }
+
+    #[test]
+    fn selected_boundaries_apply_to_markers_and_literal_and_verb_queries() {
+        for (boundary, expected) in [
+            (MatchStart::Line, vec![41, 70]),
+            (MatchStart::Sentence, vec![41, 55, 70]),
+        ] {
+            let mut read = text(
+                "'Alpha beta.' '_Alpha more.'\n Alpha end",
+                Rect::new(0, 0, 600, 20),
+            );
+            read.start = 40;
+            let mut search = Search::with_start(vec![read], boundary);
+            let starts: Vec<_> = search.word_starts().iter().map(|span| span.start).collect();
+            assert_eq!(starts, expected);
+            assert!(!search.starts_a_word("beta"));
+            assert!(search.starts_a_word("alpha"));
+            assert!(search.starts_a_word("'alpha"));
+            search.push_verb('_');
+            for c in "alpha".chars() {
+                search.push(c);
+            }
+            let spans = search.spans();
+            let literal = spans.iter().filter(|(_, verb)| !verb).count();
+            let verbs = spans.iter().filter(|(_, verb)| *verb).count();
+            assert_eq!(literal, usize::from(boundary == MatchStart::Sentence));
+            assert_eq!(verbs, 2);
+        }
     }
 
     #[test]
