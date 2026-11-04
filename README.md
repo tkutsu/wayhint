@@ -146,6 +146,26 @@ button's name only when its screenshot appears to show letters. Set
 and pixel target detection still use them. The items of an open menu are
 searched by their names.
 
+Set `[words] match_start = "word"`, `"line"` or `"sentence"` to choose where
+matching can begin. The default, `"word"`, searches from any word start.
+`"line"` searches from the first word after each line break in the text;
+visually wrapped rows continue the same line. `"sentence"` searches from
+the first word of each Unicode sentence. Leading whitespace and opening
+punctuation can be skipped, or you can type the opening punctuation too.
+Each text object starts a new line and sentence. Queries can continue
+across word and line boundaries. First-character markers follow the
+selected setting.
+
+Standard mode relies on typing for Latin text by default, including accented
+letters. Targets whose text contains letters from another writing system
+also get hints. Add scripts you can type with `[words] scripts = ["Latin", "Greek"]`.
+The list replaces the default; Unicode script names and codes such as
+`"Grek"` are accepted. Mixed text gets a hint unless every script is listed.
+Numbers and punctuation need no extra script. This uses writing systems, so
+French and Spanish text count as `"Latin"` too. Text in every script remains
+searchable if you type it. These hints follow `[words] fallback_hints`;
+`--hints` still tags every control.
+
 Matches get yellow boxes, with the current match in orange, and the
 pointer moves onto the current match. Text is read when a round starts,
 and again whenever the windows change while nothing is typed. Once you type, it stays as read until the

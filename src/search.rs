@@ -24,9 +24,10 @@
 //!                 text that matches nothing: kept to edit, and named
 //! ```
 //!
-//! With `[words] fallback_hints`, the targets typing can't find keep a tag: those
-//! whose text wasn't read (an unnamed icon, a window read from pixels) or has no
-//! word. Their labels are ones no word on screen starts with, so a whole
+//! With `[words] fallback_hints`, targets that can't rely on typing keep a tag: those
+//! whose text wasn't read (an unnamed icon, a window read from pixels), has no
+//! word, or uses a script outside `[words] scripts`. Their labels are ones no
+//! searchable word starts with, so a whole
 //! label is never a query, and what's typed is both until one of them
 //! wins ([`Hints`]).
 //!
@@ -101,7 +102,7 @@ fn opens(label: &[usize], pressed: &[Option<usize>]) -> bool {
 }
 
 impl Hints {
-    /// Tags for `shown`'s targets that no text of `search` is on, in
+    /// Tags for targets without text in the configured writing systems, in
     /// labels no word of it starts with. None without `[words] fallback_hints`.
     fn new(search: &Search, shown: &Snapshot, config: &Config) -> Self {
         Self::keeping(search, shown, config, &|_| None)
@@ -118,11 +119,12 @@ impl Hints {
         if !config.text_hints {
             return Self(Vec::new());
         }
-        // A text with no word (an icon's glyph) can't be typed.
+        // A glyph or text outside the configured scripts needs a tag.
         let found: HashSet<_> = search
             .texts()
             .iter()
             .filter(|text| text.content.chars().any(char::is_alphanumeric))
+            .filter(|text| text.in_scripts(&config.text_scripts))
             .filter_map(|text| match text.place {
                 Place::Object(index) => shown.texts[index].owner.as_ref(),
                 Place::Cells(_) => None,
@@ -739,11 +741,11 @@ fn unique(search: &Search) -> bool {
 }
 
 /// The windows' `texts`, read from `shown`, and with `[words.first_character]`,
-/// where each word's first letter shows, asked of the apps now: the first
+/// where each eligible start's first letter shows, asked of the apps now: the first
 /// letter typed then asks nothing. A text read from a name has no letters
 /// to ask about.
 fn read(texts: Vec<Text>, shown: &Snapshot, source: &mut dyn Source, config: &Config) -> Search {
-    let mut search = Search::new(texts);
+    let mut search = Search::with_start(texts, config.text_match_start);
     if config.marks.starts.mark == StartMark::Off {
         return search;
     }
@@ -1591,6 +1593,49 @@ mod tests {
     }
 
     #[test]
+    fn standard_mode_uses_hints_for_scripts_that_are_not_enabled() {
+        for (label, script) in [
+            ("Save", None),
+            ("Café", None),
+            ("cafe\u{301}", None),
+            ("42", None),
+            ("Αποθήκευση", Some("Greek")),
+            ("Αποθήκευση 42", Some("Greek")),
+            ("Save Αποθήκευση", Some("Greek")),
+            ("Сохранить", Some("Cyrillic")),
+            ("保存", Some("Han")),
+            ("حفظ", Some("Arabic")),
+            ("カタカナー", Some("Katakana")),
+        ] {
+            for enable in [false, true] {
+                let extra = script
+                    .filter(|_| enable)
+                    .map_or(String::new(), |s| format!(", {s:?}"));
+                let settings = config(&format!("[words]\nscripts = [\"Latin\"{extra}]"));
+                let (shown, mut found) = buttons(label);
+                let hints = Hints::new(&found, &shown, &settings);
+                let tagged = hints.0.iter().find(|(i, _)| *i == 0);
+                assert_eq!(tagged.is_some(), script.is_some() && !enable, "{label}");
+                if let Some((_, hint)) = tagged {
+                    let pressed: Vec<_> = hint.iter().copied().map(Some).collect();
+                    for c in spell(hint, &settings).chars() {
+                        found.push(c);
+                    }
+                    assert_eq!(hints.choice(&pressed, &found, &settings, false), Some(0));
+                }
+                assert_eq!(
+                    Hints::new(&found, &shown, &config("[words]\nfallback_hints = false")).0,
+                    []
+                );
+                assert!(
+                    found.starts_a_word(label),
+                    "the hint preserves text matching"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hints_go_on_targets_with_no_text_in_letters_no_word_starts_with() {
         let (shown, found) = buttons("Save add");
         let hints = Hints::new(&found, &shown, &config(""));
@@ -1606,6 +1651,30 @@ mod tests {
         assert_eq!(tags[0].target, Some(shown.targets[1].hit));
         let off = Hints::new(&found, &shown, &config("[words]\nfallback_hints = false"));
         assert_eq!(off.0, Vec::<(usize, Vec<usize>)>::new());
+    }
+
+    #[test]
+    fn fallback_hints_can_use_letters_from_ineligible_word_starts() {
+        for mode in ["word", "line", "sentence"] {
+            let settings = config(&format!("[words]\nmatch_start = {mode:?}"));
+            let (shown, found) = buttons("Save add");
+            let mut found = Search::with_start(found.texts().to_vec(), settings.text_match_start);
+            let hints = Hints::new(&found, &shown, &settings);
+            assert!(
+                hints
+                    .0
+                    .iter()
+                    .all(|(_, label)| { !found.starts_a_word(&spell(label, &settings)) })
+            );
+            typed(&mut found, "a");
+            if mode == "word" {
+                assert!(found.has_query());
+                assert_eq!(hints.choice(&[Some(0)], &found, &settings, false), None);
+            } else {
+                assert!(!found.has_query());
+                assert_eq!(hints.choice(&[Some(0)], &found, &settings, false), Some(1));
+            }
+        }
     }
 
     #[test]
