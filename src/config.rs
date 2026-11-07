@@ -540,7 +540,23 @@ fn unkeyed(explicit: Option<&Path>) -> Result<File> {
     };
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("config {}", path.display()))
+    tables(&text).with_context(|| format!("config {}", path.display()))
+}
+
+/// The file's tables, undecoded. A key this build doesn't know is often
+/// one newer than it, so that error says how to tell.
+fn tables(text: &str) -> Result<File> {
+    toml::from_str(text).map_err(|e: toml::de::Error| {
+        if e.message().starts_with("unknown field") {
+            anyhow!(
+                "{}; fix its spelling, or rebuild wayhint if the key is newer than this build \
+                 (`wayhint config --default` lists the keys it knows)",
+                e.to_string().trim_end()
+            )
+        } else {
+            e.into()
+        }
+    })
 }
 
 /// Tags for windows with no accessibility tree, found in their pixels:
@@ -1287,7 +1303,7 @@ impl Config {
     /// Parses and validates config text. Separate from `load` so tests need
     /// no files.
     pub fn parse(text: &str, layout: &Layout) -> Result<Self> {
-        let file: File = toml::from_str(text)?;
+        let file = tables(text)?;
         let letters = Alphabet::decode_letters(file.keys.alphabet.as_deref(), layout)?;
         // The keys the file made tag keys, so default verbs can stay off
         // them. A broken alias is skipped here; `Alphabet::resolve` says why.
@@ -1582,6 +1598,21 @@ mod tests {
         let config = Config::parse("", &us()).unwrap();
         assert_eq!(labels(&config), "asdfghjkl");
         assert_eq!(config.layout, "English (US)");
+    }
+
+    #[test]
+    fn an_unknown_key_says_how_to_tell_a_typo_from_an_old_build() {
+        let err = format!(
+            "{:#}",
+            Config::parse("[words]\nnewer = 1", &us()).unwrap_err()
+        );
+        assert!(err.contains("unknown field `newer`"), "{err}");
+        assert!(err.ends_with("lists the keys it knows)"), "{err}");
+        let other = format!(
+            "{:#}",
+            Config::parse("[words]\nscripts = 1", &us()).unwrap_err()
+        );
+        assert!(!other.contains("rebuild"), "{other}");
     }
 
     #[test]

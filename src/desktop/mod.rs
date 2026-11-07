@@ -35,6 +35,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use futures::future;
+use smithay_client_toolkit::reexports::client::Connection;
 
 use self::{
     atspi::Bounds,
@@ -871,11 +872,22 @@ fn placed(snapshot: &Snapshot, text: &Text, span: &Span, parts: Vec<Rect>) -> Ve
     }
 }
 
+/// A connection to the compositor, from `WAYLAND_DISPLAY`.
+pub fn wayland() -> Result<Connection> {
+    Connection::connect_to_env().map_err(|e| {
+        anyhow!(
+            "can't reach the Wayland compositor ({e}): run wayhint inside your Hyprland \
+             session, where WAYLAND_DISPLAY is set"
+        )
+    })
+}
+
 /// wayhint's own directory in the user's runtime directory, made if it
 /// isn't there: only this user can read or change what's in it, and it's
 /// in memory.
 fn runtime_dir() -> Result<PathBuf> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR isn't set")?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR isn't set: run wayhint inside your desktop session")?;
     let dir = PathBuf::from(runtime).join("wayhint");
     fs::DirBuilder::new()
         .recursive(true)

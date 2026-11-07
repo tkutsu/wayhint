@@ -14,7 +14,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     time::Duration,
@@ -230,20 +230,35 @@ struct WireCursor {
 
 /// `.socket.sock` takes requests, `.socket2.sock` sends events.
 fn socket_path(socket: &str) -> Result<PathBuf> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is unset")?;
-    let instance = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
-        .context("HYPRLAND_INSTANCE_SIGNATURE is unset: is this running under Hyprland?")?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR is unset: run wayhint inside your desktop session")?;
+    let instance = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").context(
+        "HYPRLAND_INSTANCE_SIGNATURE is unset: wayhint runs on Hyprland only, so run it \
+         from inside a Hyprland session",
+    )?;
     Ok(PathBuf::from(runtime)
         .join("hypr")
         .join(instance)
         .join(socket))
 }
 
+/// Opens one of the sockets. A missing or refusing one belongs to a
+/// Hyprland that has quit: the environment came from before a restart.
+fn connect(socket: &str) -> Result<UnixStream> {
+    let path = socket_path(socket)?;
+    UnixStream::connect(&path).map_err(|e| match e.kind() {
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused => anyhow::anyhow!(
+            "no Hyprland at {} ({e}): HYPRLAND_INSTANCE_SIGNATURE names one that has quit; \
+             run wayhint from a terminal or keybind started since Hyprland last started",
+            path.display()
+        ),
+        _ => anyhow::Error::new(e).context(format!("Hyprland socket {}", path.display())),
+    })
+}
+
 /// Sends one command and returns the reply as Hyprland wrote it.
 fn send(command: &str) -> Result<String> {
-    let path = socket_path(".socket.sock")?;
-    let mut socket = UnixStream::connect(&path)
-        .with_context(|| format!("Hyprland socket {}", path.display()))?;
+    let mut socket = connect(".socket.sock")?;
     socket.set_read_timeout(Some(TIMEOUT))?;
     socket.set_write_timeout(Some(TIMEOUT))?;
     socket.write_all(command.as_bytes())?;
@@ -600,9 +615,7 @@ pub fn cursor() -> Result<Point> {
 /// happens, for as long as the connection stays open. Non-blocking, for an
 /// event loop to wait on.
 pub fn events() -> Result<UnixStream> {
-    let path = socket_path(".socket2.sock")?;
-    let socket = UnixStream::connect(&path)
-        .with_context(|| format!("Hyprland event socket {}", path.display()))?;
+    let socket = connect(".socket2.sock")?;
     socket.set_nonblocking(true)?;
     Ok(socket)
 }

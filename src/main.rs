@@ -51,7 +51,6 @@ use std::{path::Path, process::ExitCode};
 
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
-use smithay_client_toolkit::reexports::client::Connection;
 
 use crate::{
     cli::{Cli, Command},
@@ -162,7 +161,7 @@ fn overlay_from(config: &Config, path: &Path) -> Result<()> {
                 snapshot.monitor
             )
         })?;
-    let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+    let conn = desktop::wayland()?;
     let mut overlay = Overlay::new(
         &conn,
         &config.style,

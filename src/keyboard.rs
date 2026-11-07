@@ -57,6 +57,7 @@ use smithay_client_toolkit::reexports::{
 
 use crate::{
     action::Mods,
+    desktop,
     keys::KeyCode,
     pointer::{Quiet, now},
 };
@@ -205,7 +206,7 @@ impl Drop for Keyboard {
 /// file. A `wl_keyboard` is sent its keymap as soon as it's made, so this
 /// needs no window and no focus, and runs before any grab.
 pub fn seat_keymap() -> Result<String> {
-    let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+    let conn = desktop::wayland()?;
     let (globals, mut queue) = registry_queue_init::<SeatKeymap>(&conn)?;
     let qh = queue.handle();
     let seat: WlSeat = globals.bind(&qh, 1..=9, ())?;
