@@ -371,7 +371,8 @@ impl Dispatch2<ZwpInputMethodV2, State> for ImeEvents {
         // Fall back to keyboard focus for the rest of the run.
         if let zwp_input_method_v2::Event::Unavailable = event {
             desktop::warn(
-                "wayhint: another input method holds the keyboard; taking focus instead (open menus will close)",
+                "wayhint: another input method (fcitx or IBus) holds the keyboard, so wayhint \
+                 takes focus instead and open menus close; quit it to keep them open",
             );
             state.release_keys();
             state.input_methods = None;

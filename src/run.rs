@@ -154,7 +154,7 @@ pub fn run(
         .context("no monitor has focus")?;
     let outputs = Rect::bounding(monitors.iter().map(|m| m.rect)).context("no monitors")?;
 
-    let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+    let conn = desktop::wayland()?;
     // The overlay comes first: it blocks SIGINT and SIGTERM for this thread
     // (they become events), and the threads started after it inherit that.
     let mut overlay = Overlay::new(
@@ -828,7 +828,7 @@ fn group_warnings(
 pub fn click_at(at: Point, action: Action) -> Result<()> {
     let monitors = desktop::monitors()?;
     let outputs = Rect::bounding(monitors.iter().map(|m| m.rect)).context("no monitors")?;
-    let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+    let conn = desktop::wayland()?;
     let mut pointer = Pointer::new(&conn, outputs, crate::config::SCROLL)?;
     let back = desktop::cursor().ok().filter(|_| action.restores());
     let result = pointer.act(action, at).and_then(|()| match back {

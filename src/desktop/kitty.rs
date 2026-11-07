@@ -240,9 +240,12 @@ fn kitten() -> Result<PathBuf> {
 /// Runs the kitten at `kitten` through the remote control at `address`
 /// (`unix:/path` or `unix:@abstract`) and returns what it said.
 fn ask(address: &str, kitten: &std::path::Path, args: &[&str], until: Instant) -> Result<String> {
-    let path = address
-        .strip_prefix("unix:")
-        .with_context(|| format!("only unix sockets are supported, not {address}"))?;
+    let path = address.strip_prefix("unix:").with_context(|| {
+        format!(
+            "kitty listens on {address}, and wayhint reads only unix sockets: set \
+             `listen_on unix:${{XDG_RUNTIME_DIR}}/kitty-{{kitty_pid}}.sock` in kitty.conf"
+        )
+    })?;
     let socket = match path.strip_prefix('@') {
         Some(name) => SocketAddr::from_abstract_name(name)?,
         None => SocketAddr::from_pathname(path)?,

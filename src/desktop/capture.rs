@@ -116,7 +116,7 @@ impl Camera {
     /// `registry_queue_init`, which waits on its roundtrip for as long as
     /// the compositor takes.
     pub fn connect(until: Instant) -> Result<Self> {
-        let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
+        let conn = super::wayland()?;
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());

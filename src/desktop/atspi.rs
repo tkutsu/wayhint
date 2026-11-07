@@ -110,10 +110,19 @@ struct Known {
 impl Scanner {
     /// Connects to the accessibility bus (found through the session bus's
     /// `org.a11y.Bus`).
+    ///
+    /// A running launcher can still refuse: a second one, started under a
+    /// private session bus (`dbus-run-session`), takes over the socket's
+    /// path and dies, and the first keeps a socket no one can reach. A
+    /// restart fixes that and a stopped launcher alike.
     pub async fn connect() -> Result<Self> {
-        let a11y = AccessibilityConnection::new()
-            .await
-            .context("connecting to the accessibility bus (is at-spi-bus-launcher running?)")?;
+        let a11y = AccessibilityConnection::new().await.map_err(|e| {
+            anyhow::anyhow!(
+                "can't reach the accessibility bus ({e}): run \
+                 `systemctl --user restart at-spi-dbus-bus.service` (from at-spi2-core), \
+                 then reopen the apps you want tagged"
+            )
+        })?;
         Ok(Self {
             a11y,
             known: RefCell::default(),

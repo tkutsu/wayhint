@@ -15,10 +15,10 @@ pub fn load(pattern: &str, size: f32) -> Result<fontdue::Font> {
     let output = Command::new("fc-match")
         .args(["--format", "%{file}\n%{index}", pattern])
         .output()
-        .context("running fc-match (fontconfig) to find the [hints] font")?;
+        .context("running fc-match to find fonts: install fontconfig")?;
     if !output.status.success() {
         bail!(
-            "fc-match {pattern:?} failed: {}",
+            "fc-match {pattern:?} failed ({}): give a font `fc-list` shows",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

@@ -8,7 +8,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Result, bail};
-use smithay_client_toolkit::reexports::client::{Connection, globals::registry_queue_init};
+use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 
 use crate::{
     config::{self, Config},
@@ -103,11 +103,7 @@ pub fn run(config: Result<Config>, explicit: Option<&Path>) -> Result<()> {
     wayland(&mut checks, &monitors);
     checks.push(match Desktop::connect() {
         Ok(_) => Check::new(Mark::Ok, "accessibility bus", "connected"),
-        Err(e) => Check::new(
-            Mark::Fail,
-            "accessibility bus",
-            format!("{e:#}; is at-spi2-core installed and running?"),
-        ),
+        Err(e) => Check::new(Mark::Fail, "accessibility bus", format!("{e:#}")),
     });
     if let Some(config) = &config {
         fonts(&mut checks, config);
@@ -144,11 +140,7 @@ fn hyprland(checks: &mut Vec<Check>) -> Vec<Monitor> {
             monitors
         }
         Err(e) => {
-            checks.push(Check::new(
-                Mark::Fail,
-                "Hyprland",
-                format!("{e:#}; wayhint runs on Hyprland only"),
-            ));
+            checks.push(Check::new(Mark::Fail, "Hyprland", format!("{e:#}")));
             Vec::new()
         }
     }
@@ -157,9 +149,7 @@ fn hyprland(checks: &mut Vec<Check>) -> Vec<Monitor> {
 /// The Wayland protocols a run binds. A viewporter only matters on a
 /// monitor with a fractional scale.
 fn wayland(checks: &mut Vec<Check>, monitors: &[Monitor]) {
-    let globals = Connection::connect_to_env()
-        .map_err(anyhow::Error::from)
-        .and_then(|conn| Ok(registry_queue_init::<Quiet>(&conn)?.0));
+    let globals = desktop::wayland().and_then(|conn| Ok(registry_queue_init::<Quiet>(&conn)?.0));
     let globals = match globals {
         Ok(globals) => globals.contents().clone_list(),
         Err(e) => {

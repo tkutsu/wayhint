@@ -30,8 +30,10 @@ const HANDOVER: Duration = Duration::from_secs(3);
 /// Linux abstract sockets disappear when their owner exits, so a crash
 /// cannot leave a stale socket file that blocks the next launch.
 pub fn start_or_stop(text: bool) -> Result<Option<UnixDatagram>> {
-    let runtime = env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-    let display = env::var_os("WAYLAND_DISPLAY").context("WAYLAND_DISPLAY is not set")?;
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR is not set: run wayhint inside your desktop session")?;
+    let display = env::var_os("WAYLAND_DISPLAY")
+        .context("WAYLAND_DISPLAY is not set: run wayhint inside your Hyprland session")?;
     let mut name = b"wayhint:".to_vec();
     name.extend_from_slice(runtime.as_encoded_bytes());
     name.push(b':');
