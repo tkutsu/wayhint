@@ -24,7 +24,7 @@ use unicode_script::Script;
 
 use crate::{
     action::Action,
-    keys::{self, HOME_ROW, Key, KeyCode, Layout},
+    keys::{self, DEFAULT_ALPHABET, Key, KeyCode, Layout},
     pixels::Detector,
     style::{
         Arrow, Badge, Badges, Case, Color, Direction, Gradient, Info, Input, Look, Mark, Marks,
@@ -174,8 +174,8 @@ impl FileWords {
 }
 
 /// `[input]`: the box for what's typed, with the
-/// query's decorations. Its font, radius and shadow inherit `[hints]`;
-/// colors, size, padding and screen position have their own defaults.
+/// query's decorations. Its font and shadow inherit `[hints]`;
+/// colors, size, radius, padding and screen position have their own defaults.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
@@ -674,9 +674,8 @@ struct FilePointer {
 
 /// How far one arrow press moves the pointer, in px, unless the file says.
 const NUDGE: u16 = 10;
-/// How many wheel notches a scroll turns, unless the file says: about half
-/// a page in most apps.
-pub const SCROLL: u16 = 5;
+/// How many wheel notches a scroll turns, unless the file says.
+pub const SCROLL: u16 = 2;
 /// How long the app gets to react to a click before the rescan, in ms,
 /// unless the file says: a menu's opening animation is mostly done by
 /// then. What the app changes later, the next refresh picks up.
@@ -705,26 +704,22 @@ pub enum TextCursor {
     End,
 }
 
-/// The verbs' default keys, as positions, so they sit in the same place on
-/// every layout, as the home row does. None types a letter, so text mode
-/// reads them too, before any text. On US: `,` `/` `.` for right, middle
-/// and double, under the right hand; `'` for hover and `;` for hold beside
-/// the home row; `[` and `]` for back and forward; Page Up and Page Down
-/// for the wheel. Left has none: a bare tag left-clicks.
-const DEFAULT_VERBS: [(Action, Option<KeyCode>); 10] = [
-    (Action::Left, None),
-    (Action::Right, Some(KeyCode::from_evdev(51))),
-    (Action::Middle, Some(KeyCode::from_evdev(53))),
-    (Action::Double, Some(KeyCode::from_evdev(52))),
-    (Action::Hover, Some(KeyCode::from_evdev(40))),
-    (Action::Back, Some(KeyCode::HOME)),
-    (Action::Forward, Some(KeyCode::END)),
-    (Action::ScrollUp, Some(KeyCode::PAGE_UP)),
-    (Action::ScrollDown, Some(KeyCode::PAGE_DOWN)),
-    (Action::Hold, Some(KeyCode::from_evdev(39))),
+/// Default shortcuts by position on the first layout. Capitals leave
+/// their lowercase letters available for hints and text.
+const DEFAULT_VERBS: [(Action, Option<KeyCode>, bool); 10] = [
+    (Action::Left, None, false),
+    (Action::Right, Some(KeyCode::from_evdev(19)), true),
+    (Action::Middle, Some(KeyCode::from_evdev(50)), true),
+    (Action::Double, Some(KeyCode::from_evdev(32)), true),
+    (Action::Hover, Some(KeyCode::from_evdev(24)), true),
+    (Action::Back, Some(KeyCode::from_evdev(102)), false),
+    (Action::Forward, Some(KeyCode::from_evdev(107)), false),
+    (Action::ScrollUp, Some(KeyCode::from_evdev(104)), false),
+    (Action::ScrollDown, Some(KeyCode::from_evdev(109)), false),
+    (Action::Hold, Some(KeyCode::from_evdev(35)), true),
 ];
 
-/// The help key's default is Shift on this position: `?` on US.
+/// The help key is unshifted `/` on US.
 const HELP_KEY: KeyCode = KeyCode::from_evdev(53);
 
 /// Keys every mode reads itself, so no verb may take them, and how the
@@ -855,7 +850,7 @@ impl Alphabet {
             })
     }
 
-    /// Decodes `[keys] alphabet`, or the default home row, and checks no
+    /// Decodes `[keys] alphabet`, or the default key positions, and checks no
     /// key is in it twice.
     fn decode_letters(written: Option<&str>, layout: &Layout) -> Result<Vec<Letter>> {
         let letters: Vec<Letter> = match written {
@@ -864,20 +859,11 @@ impl Alphabet {
                 .map(|ch| decode_unshifted(ch, layout).map(|code| Letter { code, label: ch }))
                 .collect::<Result<Vec<_>>>()
                 .context("[keys] alphabet")?,
-            // Defaults are positions; draw them as this layout prints them.
-            // Every Latin layout types a character on each of them.
-            None => HOME_ROW
+            // Defaults are positions; omit dead keys that cannot label a tag.
+            None => DEFAULT_ALPHABET
                 .iter()
-                .map(|&code| {
-                    let label = layout.char_at(code).with_context(|| {
-                        format!(
-                            "layout {}: a home row key types nothing; set [keys] alphabet",
-                            layout.name()
-                        )
-                    })?;
-                    Ok(Letter { code, label })
-                })
-                .collect::<Result<_>>()?,
+                .filter_map(|&code| layout.char_at(code).map(|label| Letter { code, label }))
+                .collect(),
         };
         for (i, letter) in letters.iter().enumerate() {
             if let Some(earlier) = letters[..i].iter().find(|l| l.code == letter.code) {
@@ -1085,9 +1071,8 @@ impl Verbs {
     /// built in, not another command's. A written key takes its letter out
     /// of the alphabet. Then each command the file leaves out gets its
     /// default key, unless that's one of `tag_keys` (the alphabet's letters,
-    /// yours or the home row, and aliases) or a key the file gave another
-    /// command. Defaults that type letters or digits on this layout are
-    /// left unbound too, so every bound verb works in text mode.
+    /// written or default, and aliases) or a key the file gave another
+    /// command. Capital defaults keep their unshifted letters available for tags.
     fn resolve(file: &FileKeys, layout: &Layout, tag_keys: &[KeyCode]) -> Result<Self> {
         let text = file.close.as_deref().unwrap_or("Esc");
         let key = decode_key(text, layout).context("[keys] close")?;
@@ -1119,36 +1104,37 @@ impl Verbs {
         {
             verbs.help = Some(verbs.written("help", text, layout)?);
         }
-        for (action, default) in DEFAULT_VERBS {
+        for (action, default, shift) in DEFAULT_VERBS {
             if file.verb(action).is_some() || action == verbs.default {
                 continue;
             }
             let Some(code) = default else { continue };
-            let (key, label) = default_key(action.name(), code, layout)?;
-            if !is_verb_key(&label) || verbs.taken_by(code, tag_keys) {
+            let (key, label) = default_key(action.name(), Key { code, shift }, layout)?;
+            if !is_verb_key(&label) || verbs.taken_by(key, tag_keys) {
                 verbs.unbound.push((action, label));
             } else {
                 verbs.keys.push((action, key, label));
             }
         }
-        // Help's default is Shift on its spot: `?` on US. It gives way to a
-        // command on exactly that key; a tag letter there keeps its own,
-        // unshifted.
-        if file.help.is_none()
-            && let Some(label) = layout.shifted_char_at(HELP_KEY)
-        {
-            let key = Key {
-                code: HELP_KEY,
-                shift: true,
-            };
-            let commands = verbs.keys.iter().map(|v| v.1);
-            let mut commands = commands
-                .chain(verbs.repeat.iter().map(|v| v.0))
-                .chain([verbs.close.0]);
-            if commands.any(|k| k == key) {
-                verbs.help_unbound = Some(label.into());
+        if file.repeat.is_none() {
+            let key = decode_key("Space", layout)?;
+            if !verbs.taken_by(key, tag_keys) {
+                verbs.repeat = Some((key, "Space".into()));
+            }
+        }
+        if file.help.is_none() {
+            let (key, label) = default_key(
+                "help",
+                Key {
+                    code: HELP_KEY,
+                    shift: false,
+                },
+                layout,
+            )?;
+            if !is_verb_key(&label) || verbs.taken_by(key, tag_keys) {
+                verbs.help_unbound = Some(label);
             } else {
-                verbs.help = Some((key, label.into()));
+                verbs.help = Some((key, label));
             }
         }
         // In `Action::ALL`'s order, however they were bound, so the same
@@ -1187,14 +1173,13 @@ impl Verbs {
         Ok((key, label))
     }
 
-    /// Whether a default key at `code` must give way: it's a tag key, or a
-    /// command already has it. The help key counts only as exactly that
-    /// key: a `?` written for it leaves middle its `/`.
-    fn taken_by(&self, code: KeyCode, tag_keys: &[KeyCode]) -> bool {
-        let unshifted = Key { code, shift: false };
-        tag_keys.contains(&code)
-            || self.is_help(unshifted)
-            || self.taken().iter().any(|t| t.0 == code && t.1 != "help")
+    /// Written commands take priority over defaults; shifted keys keep their tags.
+    fn taken_by(&self, key: Key, tag_keys: &[KeyCode]) -> bool {
+        (!key.shift && tag_keys.contains(&key.code))
+            || self.keys.iter().any(|(_, bound, _)| *bound == key)
+            || self.is_repeat(key)
+            || self.is_help(key)
+            || self.close.0 == key
     }
 
     /// The help key's line in `[keys]`, for `wayhint config`.
@@ -1204,7 +1189,9 @@ impl Verbs {
                 format!("help = {}   # every key and what it does\n", quote(label))
             }
             (None, Some(label)) => {
-                format!("# help has no key: its default, {label:?}, is another command's key\n")
+                format!(
+                    "# help has no key: its default, {label:?}, is unavailable on this layout or taken by another command\n"
+                )
             }
             (None, None) => "help = false   # no key legend\n".into(),
         }
@@ -1260,20 +1247,27 @@ fn is_verb_key(text: &str) -> bool {
         )
 }
 
-/// `command`'s default key, at `code`, and how it's printed: a named key by
+/// `command`'s default key, at its position, and how it's printed: a named key by
 /// its name (`PageUp`), else the character this layout types there, which
 /// every Latin layout has.
-fn default_key(command: &str, code: KeyCode, layout: &Layout) -> Result<(Key, String)> {
-    let label = keys::name_of(code)
+fn default_key(command: &str, key: Key, layout: &Layout) -> Result<(Key, String)> {
+    let label = keys::name_of(key.code)
         .map(String::from)
-        .or_else(|| layout.char_at(code).map(String::from))
+        .or_else(|| {
+            if key.shift {
+                layout.shifted_char_at(key.code)
+            } else {
+                layout.char_at(key.code)
+            }
+            .map(String::from)
+        })
         .with_context(|| {
             format!(
                 "[keys] {command}: its default key types nothing on layout {}; give it a key",
                 layout.name()
             )
         })?;
-    Ok((Key { code, shift: false }, label))
+    Ok((key, label))
 }
 
 /// A config key string that must be exactly one character.
@@ -1393,7 +1387,7 @@ impl Config {
                 .restore_on_action
                 .or(legacy_restore)
                 .unwrap_or(false),
-            restore_on_exit: file.pointer.restore_on_exit.unwrap_or(true),
+            restore_on_exit: file.pointer.restore_on_exit.unwrap_or(false),
             move_on_select: file.pointer.move_on_select,
             nudge: nudge.into(),
             scroll,
@@ -1614,7 +1608,7 @@ mod tests {
     #[test]
     fn empty_file_is_all_defaults() {
         let config = Config::parse("", &us()).unwrap();
-        assert_eq!(labels(&config), "asdfghjkl");
+        assert_eq!(labels(&config), "ehatincsulodypmgfxwbvqkzj");
         assert_eq!(config.layout, "English (US)");
     }
 
@@ -1728,18 +1722,27 @@ mod tests {
     }
 
     #[test]
-    fn default_verbs_type_no_letters() {
+    fn default_verbs_use_capitals_without_taking_hint_letters() {
         let config = Config::parse("", &us()).unwrap();
         assert_eq!(config.verbs.default_action(), Action::Left);
-        assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Right));
-        assert_eq!(config.verbs.action_of(key(51, true)), None, "< isn't ,");
-        assert_eq!(labels(&config), "asdfghjkl", "nothing left out");
+        assert_eq!(config.verbs.action_of(key(19, true)), Some(Action::Right));
+        assert_eq!(
+            config.verbs.action_of(key(19, false)),
+            None,
+            "r stays a hint letter"
+        );
+        assert!(config.verbs.is_repeat(key(57, false)));
+        assert_eq!(
+            labels(&config),
+            "ehatincsulodypmgfxwbvqkzj",
+            "nothing left out"
+        );
         assert!(!config.restore_on_action, "the arrows' moves stay");
     }
 
     #[test]
-    fn cursor_restoration_on_exit_defaults_on_and_is_independent_of_clicks() {
-        assert!(Config::parse("", &us()).unwrap().restore_on_exit);
+    fn cursor_restoration_on_exit_defaults_off_and_is_independent_of_clicks() {
+        assert!(!Config::parse("", &us()).unwrap().restore_on_exit);
         for restore_on_action in [false, true] {
             for restore in [true, false] {
                 let config = Config::parse(
@@ -1863,16 +1866,12 @@ mod tests {
     }
 
     #[test]
-    fn a_default_verb_key_gives_way_to_written_letters() {
-        // An alphabet with `;` in it: hold loses its default instead of
-        // taking a letter.
+    fn capital_defaults_keep_their_lowercase_hint_letters() {
         let config = Config::parse("[keys]\nalphabet = \"asdfghjkl;\"", &us()).unwrap();
         assert_eq!(labels(&config), "asdfghjkl;");
-        assert_eq!(config.verbs.action_of(key(39, false)), None);
-        assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Right));
-        let rendered = config.render();
-        assert!(rendered.contains("# hold has no key: its default, \";\", is one of your"));
-        let again = Config::parse(&rendered, &us()).unwrap();
+        assert_eq!(config.verbs.action_of(key(35, true)), Some(Action::Hold));
+        assert_eq!(config.verbs.action_of(key(35, false)), None);
+        let again = Config::parse(&config.render(), &us()).unwrap();
         assert_eq!(again.verbs, config.verbs);
     }
 
@@ -2460,7 +2459,7 @@ direction = "{direction}"
     #[test]
     fn input_autohide_and_message_size_round_trip_independently() {
         let default = Config::parse("", &us()).unwrap();
-        assert_eq!(default.input.autohide, Duration::from_secs(3));
+        assert!(default.input.autohide.is_zero());
         let mine = Config::parse(
             "[input]\nsize = 24\nautohide = 0\n[messages]\nsize = 12",
             &us(),
@@ -2489,12 +2488,14 @@ direction = "{direction}"
         ).unwrap();
         let look = &config.input.style;
         assert_eq!(look.font, "serif");
-        assert!((look.size - 13.0).abs() < f32::EPSILON);
+        assert!((look.size - 18.0).abs() < f32::EPSILON);
         assert_eq!(look.text, Color::rgba(0xe8, 0xdc, 0xc4, 0xff));
-        assert_eq!(look.background, Color::rgba(0x1e, 0x1e, 0x2e, 0xa8));
-        assert_eq!(look.padding, [5.0, 8.0]);
-        assert_eq!(look.position, Position::Top);
-        assert_eq!(look.offset, [0, 40]);
+        assert_eq!(look.background, Color::rgba(0x11, 0x11, 0x11, 0x90));
+        assert_eq!(look.padding, [6.0, 9.0]);
+        assert_eq!(look.radius, 12.0);
+        assert_eq!(look.border_width, 1.0);
+        assert_eq!(look.position, Position::Center);
+        assert_eq!(look.offset, [0, 0]);
         assert!(config.input.prefix.is_empty() && config.input.suffix.is_empty());
     }
 
@@ -2601,9 +2602,8 @@ offset = [-13, 17]
 
     #[test]
     fn defaults_read_back_the_same_on_latin_layouts() {
-        // wayhint supports Latin layouts only (2026-10-23). These move the
-        // home row and the verb keys the most: on AZERTY hold's `;` is `m`,
-        // and a dead key there (`^` on `[`) once failed a default.
+        // Defaults follow physical positions; rendered bindings must retain
+        // both their layout-specific labels and Shift on every readback.
         for (name, variant) in [
             ("us", ""),
             ("us", "dvorak"),
@@ -2620,7 +2620,7 @@ offset = [-13, 17]
                     .keys
                     .iter()
                     .all(|(_, _, label)| is_verb_key(label)),
-                "{name}({variant}): every default verb must be a symbol or a named key"
+                "{name}({variant}): every default verb must be a capital, symbol or named key"
             );
             let rendered = config.render();
             let again = Config::parse(&rendered, &layout)
@@ -2629,8 +2629,7 @@ offset = [-13, 17]
             assert_eq!(again.verbs, config.verbs, "{name}({variant})");
         }
         let config = Config::parse("", &Layout::named("fr", "")).unwrap();
-        assert_eq!(config.verbs.label(Action::Hold), None, "AZERTY types m");
-        assert!(config.render().contains("is not a symbol on this layout"));
+        assert_eq!(config.verbs.label(Action::Hold), Some("H"));
     }
 
     #[test]
@@ -2677,7 +2676,7 @@ offset = [-13, 17]
     }
 
     #[test]
-    fn the_new_verbs_default_to_page_keys_and_semicolon() {
+    fn scrolling_and_hold_use_the_personal_defaults() {
         let config = Config::parse("", &us()).unwrap();
         let verbs = &config.verbs;
         assert_eq!(
@@ -2686,8 +2685,8 @@ offset = [-13, 17]
             "PageUp"
         );
         assert_eq!(verbs.action_of(key(109, false)), Some(Action::ScrollDown));
-        assert_eq!(verbs.action_of(key(39, false)), Some(Action::Hold), ";");
-        assert_eq!(config.scroll, 5);
+        assert_eq!(verbs.action_of(key(35, true)), Some(Action::Hold), "H");
+        assert_eq!(config.scroll, 2);
         let mine = Config::parse(
             "[keys]\nscroll_up = \"PgUp\"\nscroll_down = \"pagedown\"\nhold = \"_\"\n[pointer]\nscroll_steps = 3",
             &us(),
@@ -2703,16 +2702,13 @@ offset = [-13, 17]
 
     #[test]
     fn a_default_key_gives_way_to_a_key_the_file_writes() {
-        // Right's default is `,`, middle's `/`. Before 2026-10-26 a written
-        // `hover = "r"` failed (right's default was `r` then): "right and
-        // hover are both r".
-        let config = Config::parse("[keys]\nhover = \",\"\nback = \"/\"", &us()).unwrap();
-        assert_eq!(config.verbs.action_of(key(51, false)), Some(Action::Hover));
+        let config = Config::parse("[keys]\nhover = \"R\"\nback = \"M\"", &us()).unwrap();
+        assert_eq!(config.verbs.action_of(key(19, true)), Some(Action::Hover));
         assert_eq!(config.verbs.label(Action::Right), None);
         assert_eq!(config.verbs.label(Action::Middle), None);
         let rendered = config.render();
         assert!(
-            rendered.contains("# right has no key: its default, \",\", is one of your tag letters or another command's key"),
+            rendered.contains("# right has no key: its default, \"R\""),
             "{rendered}"
         );
         let again = Config::parse(&rendered, &us()).unwrap();
@@ -2989,39 +2985,34 @@ offset = [-13, 17]
     }
 
     #[test]
-    fn help_is_shift_on_slash_unless_that_is_taken() {
+    fn help_uses_slash_unless_that_is_taken() {
         let config = Config::parse("", &us()).unwrap();
-        let middle = Some(Action::Middle);
-        assert!(config.verbs.is_help(key(53, true)), "?");
+        assert!(config.verbs.is_help(key(53, false)), "/");
+        assert!(!config.verbs.is_help(key(53, true)));
+        assert_eq!(config.verbs.action_of(key(50, true)), Some(Action::Middle));
         assert_eq!(
-            config.verbs.action_of(key(53, false)),
-            middle,
-            "/ stays middle's"
+            Config::parse(&config.render(), &us()).unwrap().verbs,
+            config.verbs
         );
-        let again = Config::parse(&config.render(), &us()).unwrap();
-        assert_eq!(again.verbs, config.verbs);
-        // Written as "?", it still leaves middle its default `/`.
         let written = Config::parse("[keys]\nhelp = \"?\"", &us()).unwrap();
-        assert_eq!(written.verbs.action_of(key(53, false)), middle);
+        assert!(written.verbs.is_help(key(53, true)));
         let none = Config::parse("[keys]\nhelp = false", &us()).unwrap();
-        assert!(!none.verbs.is_help(key(53, true)));
-        // `/` as a tag letter keeps it, unshifted, and help its `?`.
+        assert!(!none.verbs.is_help(key(53, false)));
         let letter = Config::parse("[keys]\nalphabet = \"asdf/\"", &us()).unwrap();
-        assert!(letter.verbs.is_help(key(53, true)));
+        assert!(!letter.verbs.is_help(key(53, false)));
         assert_eq!(labels(&letter), "asdf/");
         assert_eq!(
             Config::parse(&letter.render(), &us()).unwrap().verbs,
             letter.verbs
         );
-        // A command on exactly `?` takes it.
-        let taken = Config::parse("[keys]\nhover = \"?\"", &us()).unwrap();
-        assert!(!taken.verbs.is_help(key(53, true)));
+        let taken = Config::parse("[keys]\nhover = \"/\"", &us()).unwrap();
+        assert!(!taken.verbs.is_help(key(53, false)));
         let rendered = taken.render();
         assert!(rendered.contains("# help has no key"), "{rendered}");
         assert_eq!(Config::parse(&rendered, &us()).unwrap().verbs, taken.verbs);
         let legend = config.verbs.legend();
         assert!(legend.starts_with("tag\tleft click\n"), "{legend}");
-        assert!(legend.contains(", tag\tright click"), "{legend}");
+        assert!(legend.contains("R tag\tright click"), "{legend}");
     }
 
     #[test]

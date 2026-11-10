@@ -699,26 +699,27 @@ pub struct Input {
 }
 
 impl Input {
-    /// A dark input box near the top, with the hints' font.
+    /// A centered dark input box, with the hints' font and shadow.
     pub fn new(tags: &Style) -> Self {
         Self {
             visible: true,
             hints: true,
-            autohide: Duration::from_secs(3),
+            autohide: Duration::ZERO,
             prefix: String::new(),
             suffix: String::new(),
             placeholder: String::new(),
             style: Style {
-                size: 13.0,
+                size: 18.0,
                 text: Color::rgba(0xe8, 0xdc, 0xc4, 0xff),
                 dimmed: Color::rgba(0xe8, 0xdc, 0xc4, 0x66),
                 verb: Color::rgba(0xfa, 0xb3, 0x87, 0xff),
-                background: Color::rgba(0x1e, 0x1e, 0x2e, 0xa8),
-                border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
-                border_width: 0.0,
-                padding: [5.0, 8.0],
-                position: Position::Top,
-                offset: [0, 40],
+                background: Color::rgba(0x11, 0x11, 0x11, 0x90),
+                border: Color::rgba(0x80, 0x80, 0x80, 0x90),
+                border_width: 1.0,
+                radius: 12.0,
+                padding: [6.0, 9.0],
+                position: Position::Center,
+                offset: [0, 0],
                 ..tags.clone()
             },
         }

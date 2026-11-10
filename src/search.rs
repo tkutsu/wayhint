@@ -1829,7 +1829,7 @@ mod tests {
     fn the_key_list_says_how_text_mode_works() {
         let legend = config("").verbs.text_legend();
         assert!(legend.starts_with("text Enter\tleft click\n"), "{legend}");
-        assert!(legend.contains(", text Enter\tright click"), "{legend}");
+        assert!(legend.contains("R text Enter\tright click"), "{legend}");
         assert!(legend.ends_with("Esc\tleave"), "{legend}");
     }
 }

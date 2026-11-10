@@ -841,10 +841,14 @@ mod tests {
             };
             input_of(key, Mods::NONE, &config)
         };
-        assert_eq!(input(57, false), None, "unbound Space does nothing");
+        assert_eq!(
+            input(57, false),
+            Some(Input::Repeat),
+            "Space repeats by default"
+        );
         assert_eq!(input(28, true), Some(Input::Confirm(Mods::NONE)));
         assert_eq!(
-            input(51, false),
+            input(19, true),
             Some(Input::Verb(Action::Right, Mods::NONE))
         );
         assert_eq!(
@@ -854,7 +858,7 @@ mod tests {
         assert_eq!(input(12, false), None, "- alone is nothing");
         assert_eq!(
             input(30, true),
-            Some(Input::Letter(0, Mods::NONE)),
+            Some(Input::Letter(2, Mods::NONE)),
             "Shift on a is still a, and no Shift-click"
         );
         assert_eq!(input(105, false), None, "an arrow is no input");
@@ -1184,7 +1188,7 @@ mod tests {
         };
         let frame = frame(&selector, &config, &scene, &Said::Nothing);
         assert_eq!(frame.tags.len(), 1);
-        assert_eq!((frame.tags[0].text.as_str(), frame.tags[0].typed), ("A", 1));
+        assert_eq!((frame.tags[0].text.as_str(), frame.tags[0].typed), ("E", 1));
         assert_eq!(frame.tags[0].target, Some(targets[0].hit));
     }
 

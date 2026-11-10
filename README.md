@@ -21,22 +21,23 @@ at scale 1; other monitor arrangements are untested.
 
 Real Wayhint overlays across Chromium, Dolphin, Neovim and Qalculate!.
 The workspace uses a fresh browser profile, system files and sample
-documentation, with Wayhint's default styling.
+documentation, with Wayhint's default styling: yellow gradient hints with
+borders and soft shadows. Click either preview to watch the WebM.
 
 Type `doc` to find matching text across the browser, file manager and
 editor. Teal boxes mark matches, with a stronger fill on the current one.
 Use `Tab` to choose one, then `Enter` to click.
 
-![Wayhint typing doc and cycling through matches across Chromium, Dolphin and Neovim, with Calculator alongside](docs/images/text-search.gif)
+[![Wayhint finding doc across Chromium, Dolphin and Neovim, with Calculator alongside](docs/images/text-search.png)](docs/images/text-search.webm)
 
-[Full-resolution screenshot](docs/images/text-search.png)
+[Watch text search (WebM)](docs/images/text-search.webm) | [Full-resolution screenshot](docs/images/text-search.png)
 
 Launch `wayhint --hints` to label every control, including icon buttons.
 Type a label to click its target.
 
-![Wayhint narrowing keyboard hints as letters are typed, then restoring them with Backspace](docs/images/keyboard-hints.gif)
+[![Wayhint showing yellow keyboard hints across four apps](docs/images/keyboard-hints.png)](docs/images/keyboard-hints.webm)
 
-[Full-resolution screenshot](docs/images/keyboard-hints.png)
+[Watch keyboard hints (WebM)](docs/images/keyboard-hints.webm) | [Full-resolution screenshot](docs/images/keyboard-hints.png)
 
 ## Requirements
 
@@ -201,7 +202,7 @@ skips the action if it changed.
 | A complete hint | Act on a control without searchable text. |
 | `Backspace` | Edit the query; with it empty, cancel the armed verb. |
 | `Ctrl` or `Alt` held on `Enter` | Apply that modifier to the click. |
-| `?` | With nothing typed, list the keys. |
+| `/` | With nothing typed, list the keys. |
 | `Esc` | Exit, or release a held mouse button first. |
 
 Hints use letters that no searchable word starts with. Typing therefore
@@ -213,7 +214,7 @@ each.
 ### Verbs
 
 A verb changes the next action. In text mode, type its key before the
-query: `.save Enter` double-clicks "save". Named keys work at any point.
+query: `Dsave Enter` double-clicks "save". Named keys work at any point.
 In hints-only mode, a verb can come anywhere before the hint's last letter.
 
 Verb bindings accept capitals such as `R`, symbols such as `,`, `.`, `"`
@@ -225,13 +226,14 @@ a lowercase letter. `default_action` chooses the action for a bare tag.
 | Default key | Action |
 |---|---|
 | No verb | Left click. |
-| `,` | Right click. |
-| `/` | Middle click. |
-| `.` | Double click. |
-| `'` | Hover, leaving the pointer there. |
+| `R` | Right click. |
+| `M` | Middle click. |
+| `D` | Double click. |
+| `O` | Hover, leaving the pointer there. |
 | `Home`, `End` | Mouse back, forward. |
-| `PageUp`, `PageDown` | Immediately scroll the focused window up, down by five notches. |
-| `;` | Hold the left button; the next target releases it there to drag. |
+| `PageUp`, `PageDown` | Immediately scroll the focused window up, down by two notches. |
+| `H` | Hold the left button; the next target releases it there to drag. |
+| `Space` | Repeat the last command on its target. |
 
 Named or capital scroll keys act immediately in either mode, without a
 hint or `Enter`. In text mode, a symbol bound to scroll follows the same
@@ -242,7 +244,7 @@ repeats the last command on its target. In text mode, it repeats only when
 the query is empty; otherwise its character becomes part of the query.
 The close key releases a hold in place.
 These defaults describe a US layout. Keys are matched by position using
-your first keyboard layout; a default that produces a letter or digit on
+your first keyboard layout; a default that produces a lowercase letter or digit on
 that layout stays unbound. `wayhint config` shows the actual bindings.
 
 With nothing typed, just a verb, or no text match, the arrows move the
@@ -259,7 +261,7 @@ the selection changes through typing, Tab or arrows. In hints-only mode,
 confirms a completed hint. An incomplete hint does nothing on Enter.
 Space can be bound to a verb, for example `hover = "Space"` under `[keys]`.
 With Space bound to repeat, it inserts a space into a nonempty text query.
-An unbound Space always types a space. `?` shows the key legend.
+An unbound Space always types a space. `/` shows the key legend.
 Hold `Ctrl` or `Alt` on the hint's last letter to apply it, or on `Enter`
 when confirmation is on. Shift is never held through a click.
 
@@ -281,7 +283,7 @@ A small example:
 [keys]
 hover = '"'
 hold = "_"
-repeat = "R"
+repeat = "Q"
 
 [hints]
 size = 10
@@ -295,9 +297,9 @@ auto_accept = true     # act on a unique match after 3 characters
 scroll_steps = 2
 ```
 
-Wayhint saves the cursor position at launch and returns it there when the
-session ends. Set `[pointer] restore_on_exit = false` to leave it where it
-ended up. Set `[pointer] restore_on_action = true` to return it to its
+Wayhint leaves the cursor where it ended up. Set
+`[pointer] restore_on_exit = true` to return it to its launch position when
+the session ends. Set `[pointer] restore_on_action = true` to return it to its
 pre-command position after each action while the session is running.
 This leaves hover in place and defers restoration during a hold until
 release. The default is `false`. The old `after = "restore"` and
@@ -311,7 +313,8 @@ by default; enable `[pixels] terminal_hint = true` to show them as well
 (with a bottom-left fallback when the cursor cannot be read).
 
 Keep only your overrides. Omitted settings use defaults. The input uses a
-dark box at the top, inheriting the hints' font, radius and shadow.
+centered, translucent dark box with 18 px text and rounded corners,
+inheriting the hints' font and shadow.
 Match boxes inherit the hints' radius, with their own colors and padding.
 `[words.matches.current]` uses a stronger teal fill and outline. Other match
 settings and an explicitly set match border are inherited. An explicit
