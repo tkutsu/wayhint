@@ -90,6 +90,11 @@ impl Typist {
         self.press(code, u32::from(shift), locks)
     }
 
+    /// Modifier and other non-repeating keys must not replace a held letter.
+    pub fn repeats(&self, code: KeyCode) -> bool {
+        self.state.get_keymap().key_repeats(code.to_xkb())
+    }
+
     /// Forgets a dead key waiting for the next.
     pub fn reset(&mut self) {
         if let Some(compose) = &mut self.compose {

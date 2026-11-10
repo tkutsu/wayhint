@@ -1,6 +1,6 @@
 //! Drawing tags into a pixel buffer, in software.
 //!
-//! `tiny-skia` paints the boxes (crisp rounded rectangles) into a
+//! `tiny-skia` paints the boxes (antialiased rounded rectangles) into a
 //! `Pixmap`; `fontdue` rasterizes each letter into a coverage map (how much
 //! of each pixel the glyph covers, 0-255), which becomes a small coloured
 //! pixmap drawn on top. No GPU: a frame is a few dozen small shapes, and a
@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use tiny_skia::{
-    BlendMode, FillRule, GradientStop, IntRect, LinearGradient, Mask, MaskType, Paint, Path,
-    PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Rect, SpreadMode, Stroke, Transform,
+    BlendMode, FillRule, GradientStop, IntRect, LinearGradient, Mask, Paint, Path, PathBuilder,
+    Pixmap, PixmapPaint, PremultipliedColorU8, Rect, SpreadMode, Stroke, Transform,
 };
 
 use crate::{
@@ -151,7 +151,8 @@ pub struct Painter {
     /// Tags found in pixels: `[hints.pixels]`.
     pixels: TextPainter,
     input: TextPainter,
-    /// The messages' icons: `[messages] icon_font`, at the input box's size.
+    messages: TextPainter,
+    /// The messages' icons: `[messages] icon_font`, at the message size.
     icons: TextPainter,
     marks: Marks,
     /// The messages' icons and colours.
@@ -295,14 +296,20 @@ impl Painter {
         info: &Info,
         scale: f32,
     ) -> Result<Self> {
+        let messages = Style {
+            size: info.size,
+            padding: [5.0, 8.0],
+            ..input.clone()
+        };
         let icons = Style {
             font: info.icon_font.clone(),
-            ..input.clone()
+            ..messages.clone()
         };
         Ok(Self {
             tags: TextPainter::new(style, scale)?,
             pixels: TextPainter::new(&style.for_pixels(), scale)?,
             input: TextPainter::new(input, scale)?,
+            messages: TextPainter::new(&messages, scale)?,
             icons: TextPainter::new(&icons, scale)?,
             marks: *marks,
             info: info.clone(),
@@ -341,9 +348,9 @@ impl Painter {
         self.shared.clear();
     }
 
-    /// Rows and columns share an outward side. One obstruction is tolerated;
-    /// two make the entire line try the remaining sides in default order.
-    #[allow(clippy::cast_precision_loss)]
+    /// Rows and columns share an outward side. One control obstruction is
+    /// tolerated; hint collisions move the whole line to another side.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn line_sides(
         &self,
         frame: &Frame,
@@ -420,14 +427,18 @@ impl Painter {
                 continue;
             }
             let side = std::iter::once(preferred)
+                // A header blocked above should stay a row below its controls.
+                .chain((preferred == Side::Above).then_some(Side::Below))
                 .chain(Side::ORDER)
                 .find(|&side| {
                     side == Side::Center
                         || line.iter().all(|&(i, control)| {
                             let rect = self.side_rect(&frame.tags[i], control, side, area);
+                            let drawn = self.side_footprint(&frame.tags[i], control, side, area);
                             rect.intersect(bounds[i]) == Some(rect)
+                                && drawn.intersect(bounds[i]) == Some(drawn)
                                 && occupied.iter().all(|&other| {
-                                    !placement::overlaps(rect, other, self.tags.style.max_cover)
+                                    !placement::overlaps(drawn, other, self.tags.style.max_cover)
                                 })
                         }) && line
                             .iter()
@@ -447,10 +458,27 @@ impl Painter {
                 .unwrap();
             for (i, control) in line {
                 sides[i] = Some(side);
-                occupied.push(self.side_rect(&frame.tags[i], control, side, area));
+                occupied.push(self.side_footprint(&frame.tags[i], control, side, area));
             }
         }
         sides
+    }
+
+    /// Shared rows reserve the bubble's rendered position, including its shift.
+    fn side_footprint(&self, tag: &Tag, control: BoxRect, side: Side, area: (f32, f32)) -> BoxRect {
+        let rect = padded(self.side_rect(tag, control, side, area), [0.0, 0.0]).unwrap();
+        let (rect, _) = shift_tag(
+            rect,
+            self.look(tag).style.radius,
+            control_edge(rect, control),
+        );
+        let rect = rect.round_out().unwrap();
+        BoxRect::new(
+            rect.x(),
+            rect.y(),
+            i32::try_from(rect.width()).unwrap(),
+            i32::try_from(rect.height()).unwrap(),
+        )
     }
 
     /// The final candidate includes the configured offset before clearance is checked.
@@ -691,18 +719,7 @@ impl Painter {
             let rect = place(tag.at, tag.position, look.size(&tag.text), area).unwrap();
             let control = tag.control.filter(|r| at == r.center());
             let to = if let Some(control) = control {
-                let Some(target) = padded(control, [0.0, 0.0]) else {
-                    continue;
-                };
-                // Centered fallbacks and clamped hints need no arrow inside a control.
-                if rect.intersect(&target).is_some() {
-                    continue;
-                }
-                let middle = (
-                    rect.x() + rect.width() / 2.0,
-                    rect.y() + rect.height() / 2.0,
-                );
-                let Some(edge) = nearest_edge(target, 0.0, middle) else {
+                let Some(edge) = control_edge(rect, control) else {
                     continue;
                 };
                 edge
@@ -738,28 +755,68 @@ impl Painter {
         if rows.is_empty() {
             return;
         }
-        let style = &self.input.style;
+        let typed = usize::from(frame.status.line().is_some());
+        let painter = if typed == 0 {
+            &self.messages
+        } else {
+            &self.input
+        };
+        let style = &painter.style;
         let [x, y] = style.offset;
         let at = style
             .position
             .on(BoxRect::new(0, 0, w as i32, h as i32))
             .offset(Point::new(x, y));
-        let Some(rect) = place(at, style.position, self.input.size_of(&rows), (w, h)) else {
+        let size = if typed == 0 {
+            self.messages.size_of(&rows)
+        } else {
+            let (width, height) = self.input.size_of(&rows[..typed]);
+            let (message_width, message_height) = self.messages.size_of(&rows[typed..]);
+            (
+                width.max(
+                    message_width - 2.0 * self.messages.style.padding[1] + 2.0 * style.padding[1],
+                ),
+                height + message_height - 2.0 * self.messages.style.padding[0],
+            )
+        };
+        let Some(rect) = place(at, style.position, size, (w, h)) else {
             return;
         };
-        self.input
-            .draw(pixmap, rect, &rows, Some(&mut self.icons), false, None);
+        if typed == 0 {
+            self.messages
+                .draw(pixmap, rect, &rows, Some(&mut self.icons), false, None);
+        } else {
+            let [pad_y, pad_x] = style.padding;
+            self.input.draw(pixmap, rect, &[], None, false, None);
+            self.input.draw_rows(
+                pixmap,
+                (rect.left() + pad_x, rect.top() + pad_y),
+                &rows[..typed],
+                None,
+                None,
+            );
+            self.messages.draw_rows(
+                pixmap,
+                (
+                    rect.left() + pad_x,
+                    rect.top() + pad_y + self.input.line_height,
+                ),
+                &rows[typed..],
+                Some(&mut self.icons),
+                None,
+            );
+        }
     }
 
     /// The input box's lines: what's typed, then the message, wrapped
     /// within a screen `width` wide.
     fn rows(&self, frame: &Frame, width: f32) -> Vec<Row> {
-        let text = &self.input;
+        let text = &self.messages;
         let mut rows = Vec::new();
         let mut typed = 0.0;
         if let Some((line, dimmed)) = frame.status.line() {
-            typed = text.width(&line);
-            rows.push(text.row(&line, frame.status.verb_len(), dimmed));
+            typed = self.input.width(&line);
+            rows.push(self.input.row(&line, frame.status.verb_len(), dimmed));
         }
         if let Some(Message {
             kind,
@@ -770,7 +827,12 @@ impl Painter {
             // An icon the font doesn't have would be a box: none instead.
             let icon = Some(&badge.icon).filter(|i| !i.is_empty() && self.icons.has(i));
             let indent = icon.map_or(0.0, |i| self.icons.width(i) + text.style.size * 0.4);
-            let screen = width - 2.0 * (EDGE + text.style.padding[1]);
+            let padding = if frame.status.line().is_some() {
+                self.input.style.padding[1]
+            } else {
+                text.style.padding[1]
+            };
+            let screen = width - 2.0 * (EDGE + padding);
             let room = screen.min(typed.max(MESSAGE_WIDTH * text.style.size)) - indent;
             let lines = if message.contains('\t') {
                 message.split('\n').map(str::to_owned).collect()
@@ -1013,21 +1075,12 @@ impl TextPainter {
         pixmap: &mut Pixmap,
         tag: &Tag,
         area: (f32, f32),
-        mut toward: Option<(f32, f32)>,
+        toward: Option<(f32, f32)>,
     ) {
         let row = self.row(&tag.text, tag.verb, tag.typed);
         let size = self.size_of(std::slice::from_ref(&row));
-        if let Some(mut rect) = place(tag.at, tag.position, size, area) {
-            // Move the whole bubble toward its target, preserving the attached arrow.
-            if let Some(to) = toward
-                && let Some(from) = nearest_edge(rect, self.style.radius, to)
-            {
-                let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-                let distance = dx.hypot(dy);
-                let (dx, dy) = (4.0 * dx / distance, 4.0 * dy / distance);
-                rect = Rect::from_xywh(rect.x() + dx, rect.y() + dy, size.0, size.1).unwrap();
-                toward = Some((to.0 + dx, to.1 + dy));
-            }
+        if let Some(rect) = place(tag.at, tag.position, size, area) {
+            let (rect, toward) = shift_tag(rect, self.style.radius, toward);
             self.draw(pixmap, rect, &[row], None, true, toward);
         }
     }
@@ -1041,7 +1094,7 @@ impl TextPainter {
         pixmap: &mut Pixmap,
         rect: Rect,
         rows: &[Row],
-        mut icons: Option<&mut Self>,
+        icons: Option<&mut Self>,
         gradients: bool,
         toward: Option<(f32, f32)>,
     ) {
@@ -1054,18 +1107,18 @@ impl TextPainter {
             Gradient::Global => Rect::from_xywh(0.0, 0.0, area.0, area.1).unwrap(),
             Gradient::Hint => rect,
         };
-        let background = crisp(gradient_in(
+        let background = gradient_in(
             style.background,
             style.background_end.filter(|_| gradients),
             style.background_direction,
             bounds,
-        ));
+        );
         let text = style.text_end.filter(|_| gradients).map(|end| {
             let mut paint = gradient_in(style.text, Some(end), style.text_direction, bounds);
             paint.shader.transform(scaled);
             paint
         });
-        paint_shadow(pixmap, rect, style.radius, style.shadow, scaled);
+        paint_shadow(pixmap, rect, style, scaled);
         let pointer =
             toward.and_then(|to| Pointer::new(rect, style.radius, to, style.arrow.length));
         if let Some(pointer) = pointer {
@@ -1088,11 +1141,27 @@ impl TextPainter {
             );
         }
         let [pad_y, pad_x] = style.padding;
-        let (verb, dimmed) = (style.verb, style.dimmed);
+        self.draw_rows(
+            pixmap,
+            (rect.left() + pad_x, rect.top() + pad_y),
+            rows,
+            icons,
+            text.as_ref(),
+        );
+    }
+
+    /// Draw rows without a background so a box can contain multiple text sizes.
+    fn draw_rows(
+        &mut self,
+        pixmap: &mut Pixmap,
+        (left, mut top): (f32, f32),
+        rows: &[Row],
+        mut icons: Option<&mut Self>,
+        text: Option<&Paint<'_>>,
+    ) {
+        let (verb, dimmed) = (self.style.verb, self.style.dimmed);
         let (columns, gap) = (self.columns(rows), self.gap());
-        let mut top = rect.top() + pad_y;
         for row in rows {
-            let left = rect.left() + pad_x;
             let baseline = top + self.ascent;
             if let (Some(icon), Some(icons)) = (&row.icon, icons.as_deref_mut()) {
                 let mut pen = left;
@@ -1110,7 +1179,7 @@ impl TextPainter {
                     } else if index < row.dimmed {
                         (dimmed, None)
                     } else {
-                        (row.color, text.as_ref())
+                        (row.color, text)
                     };
                     pen += self.letter(pixmap, (pen, baseline), letter, color, gradient);
                     index += 1;
@@ -1279,26 +1348,63 @@ fn paint_box(pixmap: &mut Pixmap, rect: Rect, look: &Mark, transform: Transform,
     paint_box_fill(pixmap, rect, look, transform, &fill);
 }
 
-/// A small soft shadow, offset down by two logical pixels, under a tag or input box.
-fn paint_shadow(pixmap: &mut Pixmap, rect: Rect, radius: f32, color: Color, transform: Transform) {
+/// Draw the configured shadow outside the box, keeping translucent fills uniform.
+#[allow(clippy::cast_precision_loss)] // logical offsets and physical screen coordinates fit an f32
+fn paint_shadow(pixmap: &mut Pixmap, rect: Rect, style: &Style, transform: Transform) {
+    let color = style.shadow;
     if color.a == 0 {
         return;
     }
+    let [dx, dy] = style.shadow_offset.map(|value| value as f32);
+    let size = style.shadow_size;
+    let Some(area) = Rect::from_ltrb(
+        rect.left() + dx - size,
+        rect.top() + dy - size,
+        rect.right() + dx + size,
+        rect.bottom() + dy + size,
+    )
+    .and_then(|r| r.transform(transform))
+    .and_then(|r| r.round_out())
+    .zip(IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height()))
+    .and_then(|(r, screen)| r.intersect(&screen)) else {
+        return;
+    };
+    let Some(mut layer) = Pixmap::new(area.width(), area.height()) else {
+        return;
+    };
+    let Some(mut outside) = Mask::new(area.width(), area.height()) else {
+        return;
+    };
+    let transform = transform.post_translate(-area.left() as f32, -area.top() as f32);
+    if let Some(shape) = rounded_rect(rect, style.radius) {
+        outside.fill_path(&shape, FillRule::Winding, true, transform);
+    }
+    outside.invert();
     for (spread, divisor) in [(3.0, 16), (2.0, 8), (1.0, 4), (0.0, 2)] {
+        let spread = spread * style.shadow_size / 3.0;
         let shadow = Rect::from_ltrb(
-            rect.left() - spread,
-            rect.top() + 2.0 - spread,
-            rect.right() + spread,
-            rect.bottom() + 2.0 + spread,
+            rect.left() + dx - spread,
+            rect.top() + dy - spread,
+            rect.right() + dx + spread,
+            rect.bottom() + dy + spread,
         );
-        if let Some(path) = shadow.and_then(|r| rounded_rect(r, radius + spread)) {
+        if let Some(path) = shadow.and_then(|r| rounded_rect(r, style.radius + spread)) {
             let fill = paint(Color {
                 a: color.a / divisor,
                 ..color
             });
-            pixmap.fill_path(&path, &fill, FillRule::Winding, transform, None);
+            layer.fill_path(&path, &fill, FillRule::Winding, transform, None);
         }
     }
+    layer.apply_mask(&outside);
+    pixmap.draw_pixmap(
+        area.left(),
+        area.top(),
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Fill a box with a solid colour or gradient, keeping its border solid.
@@ -1337,6 +1443,37 @@ fn paint_box_fill(
 #[allow(clippy::cast_precision_loss)] // screen coordinates are far below 2^24
 fn centre(at: Point) -> (f32, f32) {
     (at.x as f32 + 0.5, at.y as f32 + 0.5)
+}
+
+/// Centered or clamped hints omit arrows through their own control.
+fn control_edge(rect: Rect, control: BoxRect) -> Option<(f32, f32)> {
+    let target = padded(control, [0.0, 0.0])?;
+    if rect.intersect(&target).is_some() {
+        return None;
+    }
+    nearest_edge(
+        target,
+        0.0,
+        (
+            rect.x() + rect.width() / 2.0,
+            rect.y() + rect.height() / 2.0,
+        ),
+    )
+}
+
+/// Move the bubble and attached arrow together, for both placement and painting.
+fn shift_tag(rect: Rect, radius: f32, toward: Option<(f32, f32)>) -> (Rect, Option<(f32, f32)>) {
+    if let Some(to) = toward
+        && let Some(from) = nearest_edge(rect, radius, to)
+    {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let distance = dx.hypot(dy);
+        let (dx, dy) = (4.0 * dx / distance, 4.0 * dy / distance);
+        let rect =
+            Rect::from_xywh(rect.x() + dx, rect.y() + dy, rect.width(), rect.height()).unwrap();
+        return (rect, Some((to.0 + dx, to.1 + dy)));
+    }
+    (rect, toward)
 }
 
 /// The closest point on a rounded tag's outline. A target inside the tag
@@ -1429,7 +1566,8 @@ impl Pointer {
     }
 }
 
-/// Outline the rasterized silhouette so angled tips and corners cannot expose fill.
+/// Draw an inward geometric border, then smooth the shared box/pointer silhouette once.
+#[allow(clippy::cast_precision_loss)] // local buffer dimensions fit an f32
 fn paint_bubble(
     pixmap: &mut Pixmap,
     rect: Rect,
@@ -1444,6 +1582,16 @@ fn paint_bubble(
     let Some(area) = shape
         .bounds()
         .transform(transform)
+        // Round edges independently: tiny-skia's round_out rounds the size,
+        // which can clip the last row or column at a fractional origin.
+        .and_then(|r| {
+            Rect::from_ltrb(
+                r.left().floor(),
+                r.top().floor(),
+                r.right().ceil(),
+                r.bottom().ceil(),
+            )
+        })
         .and_then(|r| r.round_out())
         .zip(IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height()))
         .and_then(|(r, screen)| r.intersect(&screen))
@@ -1453,30 +1601,27 @@ fn paint_bubble(
     let Some(mut layer) = Pixmap::new(area.width(), area.height()) else {
         return;
     };
-    #[allow(clippy::cast_precision_loss)] // physical screen coordinates fit an f32
     let transform = transform.post_translate(-area.left() as f32, -area.top() as f32);
-    layer.fill_path(
-        &shape,
-        &crisp(paint(Color::rgba(255, 255, 255, 255))),
-        FillRule::Winding,
-        transform,
-        None,
-    );
-    let mask = Mask::from_pixmap(layer.as_ref(), MaskType::Alpha);
-    layer.fill(tiny_skia::Color::TRANSPARENT);
-    layer.fill_path(&shape, fill, FillRule::Winding, transform, None);
-    let (a, b) = pointer.base(rect);
-    let mut edge = PathBuilder::new();
-    edge.move_to(a.0, a.1);
-    edge.line_to(pointer.tip.0, pointer.tip.1);
-    edge.line_to(b.0, b.1);
-    let edge = edge.finish().unwrap();
-    if let Some(color) = style.arrow.color {
-        let mut fill = crisp(paint(color));
-        fill.blend_mode = BlendMode::Source;
-        layer.fill_path(&edge, &fill, FillRule::Winding, transform, Some(&mask));
-    }
+    let mut mask = Mask::new(area.width(), area.height()).unwrap();
+    mask.fill_path(&shape, FillRule::Winding, true, transform);
+    let bounds = Rect::from_xywh(0.0, 0.0, area.width() as f32, area.height() as f32).unwrap();
+    let mut background = fill.clone();
+    background.shader.transform(transform);
+    layer.fill_rect(bounds, &background, Transform::identity(), None);
     let body = rect.transform(transform).unwrap();
+    if let Some(color) = style.arrow.color {
+        let mut outside = Mask::new(area.width(), area.height()).unwrap();
+        let mut path = PathBuilder::new();
+        path.push_rect(body);
+        outside.fill_path(
+            &path.finish().unwrap(),
+            FillRule::Winding,
+            false,
+            Transform::identity(),
+        );
+        outside.invert();
+        replace_masked(&mut layer, &outside, color);
+    }
     for (outside, width, color) in [
         (false, style.border_width, style.border),
         (
@@ -1488,10 +1633,17 @@ fn paint_bubble(
         if width <= 0.0 {
             continue;
         }
-        let mut border = pixel_border(&mask, width * transform.sx);
+        let stroke = Stroke {
+            width: width * 2.0,
+            ..Stroke::default()
+        };
+        let Some(rim) = shape.stroke(&stroke, transform.sx) else {
+            continue;
+        };
+        let mut border = Mask::new(area.width(), area.height()).unwrap();
+        border.fill_path(&rim, FillRule::Winding, true, transform);
         for y in 0..area.height() {
             for x in 0..area.width() {
-                #[allow(clippy::cast_precision_loss)] // local label dimensions fit an f32
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
                 let in_body = px >= body.left()
                     && px < body.right()
@@ -1502,9 +1654,9 @@ fn paint_bubble(
                 }
             }
         }
-        let paint = crisp(paint(color));
-        layer.fill_path(&shape, &paint, FillRule::Winding, transform, Some(&border));
+        replace_masked(&mut layer, &border, color);
     }
+    layer.apply_mask(&mask);
     pixmap.draw_pixmap(
         area.left(),
         area.top(),
@@ -1515,38 +1667,26 @@ fn paint_bubble(
     );
 }
 
-/// Pixel distance from the silhouette's exterior, with a complete rim at every angle.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // validated physical border widths
-fn pixel_border(mask: &Mask, width: f32) -> Mask {
-    let (w, h) = (mask.width() as usize, mask.height() as usize);
-    let mut distance: Vec<u32> = mask
-        .data()
-        .iter()
-        .map(|&p| if p == 0 { 0 } else { u32::MAX / 2 })
-        .collect();
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let left = if x == 0 { 0 } else { distance[i - 1] };
-            let above = if y == 0 { 0 } else { distance[i - w] };
-            distance[i] = distance[i].min(left.min(above) + 1);
+/// Replace covered pixels without adding opacity to translucent fills or borders.
+fn replace_masked(layer: &mut Pixmap, mask: &Mask, color: Color) {
+    let color = tiny_skia::ColorU8::from_rgba(color.r, color.g, color.b, color.a).premultiply();
+    for (pixel, &cover) in layer.pixels_mut().iter_mut().zip(mask.data()) {
+        if cover == 0 {
+            continue;
         }
+        let mix = |source, destination| {
+            let value = u16::from(source) * u16::from(cover)
+                + u16::from(destination) * u16::from(255 - cover);
+            u8::try_from((value + 127) / 255).unwrap()
+        };
+        *pixel = PremultipliedColorU8::from_rgba(
+            mix(color.red(), pixel.red()),
+            mix(color.green(), pixel.green()),
+            mix(color.blue(), pixel.blue()),
+            mix(color.alpha(), pixel.alpha()),
+        )
+        .unwrap();
     }
-    for y in (0..h).rev() {
-        for x in (0..w).rev() {
-            let i = y * w + x;
-            let right = if x + 1 == w { 0 } else { distance[i + 1] };
-            let below = if y + 1 == h { 0 } else { distance[i + w] };
-            distance[i] = distance[i].min(right.min(below) + 1);
-        }
-    }
-    let mut border = mask.clone();
-    for (cover, distance) in border.data_mut().iter_mut().zip(distance) {
-        if distance > width.round() as u32 {
-            *cover = 0;
-        }
-    }
-    border
 }
 
 /// A rectangle with rounded corners, as a path. Each corner is a cubic
@@ -1642,7 +1782,7 @@ fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
     let shift =
         Transform::from_scale(scale, scale).post_translate(-area.left() as f32, -area.top() as f32);
     for part in parts {
-        let mut paint = crisp(paint(part.color));
+        let mut paint = paint(part.color);
         paint.blend_mode = BlendMode::Source;
         match part.width {
             Some(width) => {
@@ -1663,12 +1803,6 @@ fn paint_layer(pixmap: &mut Pixmap, parts: &[Part], scale: f32) {
         Transform::identity(),
         None,
     );
-}
-
-/// Give small boxes and arrows solid pixel coverage; text and shadows stay smoothed.
-fn crisp(mut paint: Paint<'_>) -> Paint<'_> {
-    paint.anti_alias = false;
-    paint
 }
 
 fn paint(color: Color) -> Paint<'static> {
@@ -2147,6 +2281,29 @@ offset = [20, 20]
     }
 
     #[test]
+    fn match_count_uses_the_message_row_and_its_visibility() {
+        let painter = boxed([10, 10]);
+        let input = crate::style::Input::new(&Style::default());
+        let status = Status::text(None, false, Some("save"), Some((1, 3)), &input);
+        let mut frame = Frame {
+            status: status.clone(),
+            ..Frame::default()
+        };
+        let rows = painter.rows(&frame, 800.0);
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["save", "match 1 of 3"]
+        );
+        assert_eq!(rows[1].color, painter.info.badges.info.color);
+        frame.status = status.visible(false, true);
+        assert_eq!(painter.rows(&frame, 800.0)[0].text, "match 1 of 3");
+        frame.status = status.visible(true, false);
+        let rows = painter.rows(&frame, 800.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "save");
+    }
+
+    #[test]
     fn an_empty_placeholder_hides_the_box_until_input_or_a_message() {
         let style = Style::default();
         let input = crate::style::Input {
@@ -2413,6 +2570,147 @@ offset = [20, 20]
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn translucent_input_fill_is_even_inside_the_border_while_the_outer_shadow_remains() {
+        let config = crate::config::Config::parse(
+            "[input]\nbackground = '#11111170'\nborder_width = 1\nradius = 12\nshadow = '#00000040'",
+            &crate::keys::Layout::named("us", ""),
+        ).unwrap();
+        for scale in [1.0, 1.25, 2.0] {
+            let style = &config.input.style;
+            let mut pixmap = Pixmap::new(320, 240).unwrap();
+            let rect = Rect::from_xywh(30.0, 30.0, 80.0, 40.0).unwrap();
+            let mut text = TextPainter::new(style, scale).unwrap();
+            text.draw(&mut pixmap, rect, &[], None, false, None);
+            let x = (70.0 * scale).round() as u32;
+            for y in [31.5, 33.0, 50.0, 67.0] {
+                let y = (y * scale).round() as u32;
+                assert_eq!(
+                    pixmap.pixel(x, y).unwrap().alpha(),
+                    style.background.a,
+                    "shadow must not darken the translucent fill at scale {scale}, y={y}"
+                );
+            }
+            let y = (72.0 * scale).round() as u32;
+            assert!(
+                pixmap.pixel(x, y).unwrap().alpha() > 0,
+                "lower shadow is retained at scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_offset_and_size_control_extent_and_can_remove_the_top_fringe() {
+        let config = crate::config::Config::parse(
+            "[input]\nshadow = '#00000040'\nshadow_offset = [0, 4]\nshadow_size = 3\nradius = 8",
+            &crate::keys::Layout::named("us", ""),
+        )
+        .unwrap();
+        let rect = Rect::from_xywh(30.0, 30.0, 80.0, 40.0).unwrap();
+        let render = |style: &Style| {
+            let mut pixmap = Pixmap::new(160, 200).unwrap();
+            paint_shadow(&mut pixmap, rect, style, Transform::identity());
+            pixmap
+        };
+        let style = &config.input.style;
+        let down = render(style);
+        let mut original = style.clone();
+        original.shadow_offset = [0, 2];
+        let original = render(&original);
+        assert!(
+            original.pixel(70, 29).unwrap().alpha() > 0,
+            "the old shadow has a one-pixel top fringe"
+        );
+        assert!(
+            down.pixels()[..30 * 160].iter().all(|p| p.alpha() == 0),
+            "no shadow above the input"
+        );
+        assert!(
+            down.pixel(70, 72).unwrap().alpha() > 0,
+            "the lower shadow remains"
+        );
+        let separated = Style {
+            shadow_offset: [0, 70],
+            ..style.clone()
+        };
+        let base = render(&separated);
+        let shifted = render(&Style {
+            shadow_offset: [7, 63],
+            ..separated.clone()
+        });
+        let a = bounds(&base, |p| p.alpha() > 0);
+        let b = bounds(&shifted, |p| p.alpha() > 0);
+        assert_eq!(b, [a[0] + 7, a[1] - 7, a[2] + 7, a[3] - 7]);
+        let larger = render(&Style {
+            shadow_size: 8.0,
+            ..separated.clone()
+        });
+        let b = bounds(&larger, |p| p.alpha() > 0);
+        assert!(b[0] < a[0] && b[1] < a[1] && b[2] > a[2] && b[3] > a[3]);
+        let hard = render(&Style {
+            shadow_size: 0.0,
+            ..separated
+        });
+        let b = bounds(&hard, |p| p.alpha() > 0);
+        assert_eq!((b[2] - b[0], b[3] - b[1]), (80, 40));
+    }
+
+    #[test]
+    fn messages_keep_their_own_size_beside_large_input_and_when_shown_alone() {
+        let config = crate::config::Config::parse(
+            "[input]\nsize = 30\npadding = [12, 18]\nposition = 'top-left'\noffset = [10, 10]\n[messages]\nsize = 12",
+            &crate::keys::Layout::named("us", ""),
+        ).unwrap();
+        let mut painter = Painter::new(
+            &config.style,
+            &config.marks,
+            &config.input.style,
+            &config.info,
+            1.0,
+        )
+        .unwrap();
+        let mut pixmap = Pixmap::new(800, 200).unwrap();
+        let status = Status {
+            info: Some(Message::new(Notice::NoMatch, "MMMM")),
+            ..Status::plain("MMMM")
+        };
+        painter.paint(
+            &mut pixmap,
+            &Frame {
+                status: status.clone(),
+                ..Frame::default()
+            },
+        );
+        let ink = |color: Color| {
+            bounds(&pixmap, |p| {
+                p.alpha() == 255
+                    && p.red() == color.r
+                    && p.green() == color.g
+                    && p.blue() == color.b
+            })
+        };
+        let typed = ink(config.input.style.text);
+        let message = ink(config.info.badges.no_match.color);
+        assert!(message[1] > typed[3], "message follows the large query");
+        assert!(
+            message[3] - message[1] < typed[3] - typed[1],
+            "message glyphs stay small"
+        );
+        painter.paint(
+            &mut pixmap,
+            &Frame {
+                status: status.visible(false, true),
+                ..Frame::default()
+            },
+        );
+        let shown = bounds(&pixmap, |p| p.alpha() > 0);
+        assert!(
+            shown[3] - shown[1] < 40,
+            "message-only box uses compact padding: {shown:?}"
+        );
+    }
+
+    #[test]
     fn the_input_box_has_what_is_typed_then_the_message() {
         let mut painter = boxed([10, 10]);
         let red = Info::default().badges.no_match.color;
@@ -2455,7 +2753,7 @@ offset = [20, 20]
         painter.paint(&mut narrow, &long);
         let shown = bounds(&narrow, |p| p.alpha() > 0);
         assert!(shown[2] <= 160 - 2, "inside the screen: {shown:?}");
-        let (_, two) = painter.input.size_of(&painter.rows(&long, 160.0));
+        let (_, two) = painter.messages.size_of(&painter.rows(&long, 160.0));
         assert_eq!(painter.rows(&long, 160.0).len(), 2);
         #[allow(clippy::cast_possible_truncation)]
         let height = two as i32;
@@ -2468,6 +2766,7 @@ offset = [20, 20]
         let badges = Info::default().badges;
         let mut icons = Vec::new();
         for (notice, badge) in [
+            (Notice::Info, &badges.info),
             (Notice::Scanning, &badges.scanning),
             (Notice::NoTargets, &badges.no_targets),
             (Notice::NoMatch, &badges.no_match),
@@ -2551,9 +2850,9 @@ offset = [20, 20]
         painter.paint(&mut pixmap, &frame);
         // Each line ends in the same letter, in the same column: the same
         // right edge, though "a" is far shorter than "longer".
-        let pad = painter.input.style.padding[0];
+        let pad = painter.messages.style.padding[0];
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let split = (10.0 + pad + painter.input.line_height).round() as u32;
+        let split = (10.0 + pad + painter.messages.line_height).round() as u32;
         let right = |rows: std::ops::Range<u32>| {
             let mut band = Pixmap::new(400, rows.end - rows.start).unwrap();
             band.draw_pixmap(
@@ -2699,7 +2998,10 @@ offset = [20, 20]
     #[test]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn default_arrow_is_filled_and_connected_to_its_hint() {
-        let style = Style::default();
+        let style = Style {
+            text: Color::rgba(0, 0, 0, 0),
+            ..Style::default()
+        };
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 2.0).unwrap();
         let mut frame = Frame::default();
@@ -2853,7 +3155,7 @@ offset = [20, 20]
     }
 
     #[test]
-    fn hint_edges_and_arrows_have_crisp_pixel_coverage() {
+    fn hint_edges_and_arrows_have_antialiased_coverage() {
         let style = Style {
             shadow: Color::rgba(0, 0, 0, 0),
             ..Style::default()
@@ -2877,8 +3179,8 @@ offset = [20, 20]
                 );
                 assert!(map.pixels().iter().any(|p| p.alpha() == 255));
                 assert!(
-                    map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 255)),
-                    "no partially covered corner or arrow pixels at {scale}x toward {toward:?}"
+                    map.pixels().iter().any(|p| matches!(p.alpha(), 1..=254)),
+                    "smooth corner and arrow edges at {scale}x toward {toward:?}"
                 );
             }
             let parts = Painter::arrow((20.5, 20.5), (70.5, 35.5), &style);
@@ -2886,37 +3188,43 @@ offset = [20, 20]
             paint_layer(&mut map, &parts, scale);
             assert!(map.pixels().iter().any(|p| p.alpha() == 255));
             assert!(
-                map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 255)),
-                "standalone arrows also have solid coverage at {scale}x"
+                map.pixels().iter().any(|p| matches!(p.alpha(), 1..=254)),
+                "standalone arrows also have smooth edges at {scale}x"
             );
         }
     }
 
     #[test]
-    fn crisp_hint_coverage_preserves_configured_transparency() {
+    fn antialiased_hint_coverage_preserves_configured_transparency() {
         let mut style = Style {
             background: Color::rgba(255, 255, 194, 128),
             background_end: None,
-            border_width: 0.0,
+            border: Color::rgba(0, 0, 0, 128),
             shadow: Color::rgba(0, 0, 0, 0),
             ..Style::default()
         };
-        style.arrow.outline_width = 0.0;
-        for color in [None, Some(Color::rgba(255, 0, 0, 128))] {
-            style.arrow.color = color;
-            let mut painter = TextPainter::new(&style, 1.0).unwrap();
-            let mut map = Pixmap::new(100, 80).unwrap();
-            painter.paint_tag(
-                &mut map,
-                &gradient_tag(20, 20, "   "),
-                (100.0, 80.0),
-                Some((0.5, 25.5)),
-            );
-            assert!(map.pixels().iter().any(|p| p.alpha() == 128));
-            assert!(
-                map.pixels().iter().all(|p| matches!(p.alpha(), 0 | 128)),
-                "crisp edges keep the configured alpha, including custom arrow colours"
-            );
+        for width in [0.0, 1.0] {
+            style.border_width = width;
+            style.arrow.outline_width = width;
+            for scale in [1.0, 1.25, 2.0] {
+                for color in [None, Some(Color::rgba(255, 0, 0, 128))] {
+                    style.arrow.color = color;
+                    let mut painter = TextPainter::new(&style, scale).unwrap();
+                    let mut map = Pixmap::new(200, 160).unwrap();
+                    painter.paint_tag(
+                        &mut map,
+                        &gradient_tag(20, 20, "   "),
+                        (100.0, 80.0),
+                        Some((0.5, 25.5)),
+                    );
+                    assert!(map.pixels().iter().any(|p| p.alpha() == 128));
+                    assert!(
+                        map.pixels().iter().all(|p| p.alpha() <= 128),
+                        "smoothing keeps fill and border alpha at {scale}x, width {width}, colour {color:?}"
+                    );
+                    assert!(map.pixels().iter().any(|p| matches!(p.alpha(), 1..=127)));
+                }
+            }
         }
     }
 
@@ -3064,9 +3372,13 @@ mod collision_tests {
     const AREA: BoxRect = BoxRect::new(0, 0, 400, 300);
     const BUTTON: BoxRect = BoxRect::new(100, 100, 60, 20);
 
-    /// A painter over `AREA`, one window, with these controls.
+    /// A painter over `AREA`, with fixed label dimensions for the collision fixtures.
     fn among(controls: &[BoxRect]) -> Painter {
-        let style = Style::default();
+        let style = Style {
+            size: 13.0,
+            padding: [1.0, 4.0],
+            ..Style::default()
+        };
         let mut painter =
             Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
         painter.set_space(AREA, &[], vec![(AREA, AREA)], controls.to_vec());
@@ -3170,6 +3482,7 @@ mod collision_tests {
             marks.starts.mark = mark;
             marks.starts.thickness = 6.0;
             marks.starts.look.background = blue;
+            marks.starts.look.border_width = 0.0;
             let mut painter = Painter::new(&style, &marks, &style, &Info::default(), 1.0).unwrap();
             let mut pixmap = Pixmap::new(60, 60).unwrap();
             let frame = Frame {
@@ -3381,7 +3694,7 @@ mod collision_tests {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn hint_and_arrow_keep_their_shape_when_shifted_at_each_scale() {
         for scale in [1.0, 1.25, 2.0] {
-            for (dx, dy) in [(4, 0), (-4, 0), (0, 4), (0, -4)] {
+            for (dx, dy) in [(4_i16, 0_i16), (-4, 0), (0, 4), (0, -4)] {
                 let style = Style::default();
                 let mut painter = TextPainter::new(&style, scale).unwrap();
                 let mut tag = auto_tag(BUTTON, "EA");
@@ -3390,8 +3703,8 @@ mod collision_tests {
                 let area = (400.0, 300.0);
                 let rect = place(tag.at, tag.position, painter.size(&tag.text), area).unwrap();
                 let to = (
-                    rect.x() + rect.width() / 2.0 + dx as f32 * 25.0,
-                    rect.y() + rect.height() / 2.0 + dy as f32 * 25.0,
+                    rect.x() + rect.width() / 2.0 + f32::from(dx) * 25.0,
+                    rect.y() + rect.height() / 2.0 + f32::from(dy) * 25.0,
                 );
                 let mut original =
                     Pixmap::new((area.0 * scale) as u32, (area.1 * scale) as u32).unwrap();
@@ -3399,13 +3712,16 @@ mod collision_tests {
                 let row = painter.row(&tag.text, tag.verb, tag.typed);
                 painter.draw(&mut original, rect, &[row], None, true, Some(to));
                 painter.paint_tag(&mut shifted, &tag, area, Some(to));
-                let (dx, dy) = ((dx as f32 * scale) as i32, (dy as f32 * scale) as i32);
+                let (dx, dy) = (
+                    (f32::from(dx) * scale) as i32,
+                    (f32::from(dy) * scale) as i32,
+                );
                 for y in 0..original.height() {
                     for x in 0..original.width() {
                         let before = original.pixel(x, y).unwrap();
                         let after = shifted
                             .pixel(x.wrapping_add_signed(dx), y.wrapping_add_signed(dy))
-                            .map_or(0, |p| p.alpha());
+                            .map_or(0, PremultipliedColorU8::alpha);
                         assert_eq!(before.alpha(), after, "shape at {scale}x, ({dx}, {dy})");
                     }
                 }
@@ -3490,6 +3806,53 @@ mod collision_tests {
                 .collect();
             assert!(!placement::overlaps(boxes[0], boxes[1], max_cover));
         }
+    }
+
+    #[test]
+    fn shared_page_header_moves_below_browser_hints_before_the_visual_shift() {
+        let screen = BoxRect::new(0, 0, 2560, 1440);
+        let window = BoxRect::new(8, 38, 2095, 1394);
+        let controls = [
+            BoxRect::new(1950, 46, 20, 20),
+            BoxRect::new(1970, 46, 20, 20),
+            BoxRect::new(1999, 38, 32, 36),
+            BoxRect::new(2033, 42, 32, 28),
+            BoxRect::new(2067, 38, 36, 36),
+            BoxRect::new(1922, 82, 103, 40), // Create
+            BoxRect::new(2033, 85, 54, 34),  // Account
+        ];
+        let style = Style {
+            size: 11.0,
+            padding: [1.0, 3.0],
+            ..Style::default()
+        };
+        let mut painter =
+            Painter::new(&style, &Marks::new(&style), &style, &Info::default(), 1.0).unwrap();
+        painter.set_space(screen, &[], vec![(window, window)], controls.to_vec());
+        let frame = Frame {
+            tags: controls
+                .iter()
+                .enumerate()
+                .map(|(i, &r)| auto_tag(r, if i == 6 { "HM" } else { "HP" }))
+                .collect(),
+            ..Frame::default()
+        };
+        let arranged = painter.arrange(&frame, (2560.0, 1440.0));
+        for i in [5, 6] {
+            assert_eq!(
+                arranged.tags[i].at.y,
+                controls[i].bottom() + BESIDE,
+                "the whole header row must use the free side below"
+            );
+        }
+        let filtered = Frame {
+            tags: vec![frame.tags[6].clone()],
+            ..Frame::default()
+        };
+        assert_eq!(
+            painter.arrange(&filtered, (2560.0, 1440.0)).tags[0].at,
+            arranged.tags[6].at
+        );
     }
 
     #[test]
@@ -3934,6 +4297,7 @@ mod collision_tests {
     fn production_painter_separates_sidebar_row_and_close() {
         let style = Style {
             size: 11.0,
+            padding: [1.0, 4.0],
             offset: [3, 3],
             max_cover: 0,
             ..Style::default()

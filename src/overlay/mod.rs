@@ -18,6 +18,7 @@
 //! goes through the same cleanup, and Hyprland's events a third, for a run
 //! to follow workspace changes.
 
+mod autohide;
 mod draw;
 mod font;
 mod gate;
@@ -135,6 +136,9 @@ pub struct Overlay {
     /// `[input] visible` and `[messages] visible`: which of the input box's
     /// lines the overlay draws.
     visible: (bool, bool),
+    autohide: autohide::Autohide,
+    /// The current local frame, retained for timeout-only redraws.
+    frame: Frame,
     /// Only while taking keys: keyboard-driven motion must stay visible.
     cursor_visibility: Option<desktop::CursorVisibility>,
 }
@@ -183,6 +187,7 @@ impl Overlay {
             gate: gate::KeyGate::default(),
             seen: gate::Seen::default(),
             holds: hold::Holds::default(),
+            repeat: hold::Repeat::default(),
             passthrough: None,
             held: Mods::NONE,
             pressed: 0,
@@ -260,6 +265,8 @@ impl Overlay {
             monitor: monitor.clone(),
             feed: None,
             visible: (input.visible, info.visible),
+            autohide: autohide::Autohide::new(input.autohide),
+            frame: Frame::default(),
             cursor_visibility: None,
         };
         overlay.clear()?;
@@ -389,12 +396,14 @@ impl Overlay {
             }
         }
         self.state.holds.clear();
+        self.state.repeat.clear();
         self.state.typist = Some(typist);
         Ok(())
     }
 
     /// Back to keys by position, as tags read them.
     pub fn stop_typing(&mut self) {
+        self.state.repeat.clear();
         self.state.typist = None;
     }
 
@@ -479,6 +488,7 @@ impl Overlay {
         if let Some(feed) = &mut self.feed {
             feed.send(&frame.status);
         }
+        self.autohide.observe(&frame.status, Instant::now());
         let origin = self.monitor.rect.origin();
         let shift = Point::new(-origin.x, -origin.y);
         let to_local = |p: Point| p.offset(shift);
@@ -513,7 +523,20 @@ impl Overlay {
             starts: frame.starts.iter().map(|r| r.offset(shift)).collect(),
             status: frame.status.visible(self.visible.0, self.visible.1),
         };
-        self.painter.paint(&mut self.pixmap, &local);
+        self.frame = local;
+        self.present_frame()
+    }
+
+    /// Apply transient visibility only to the drawing, preserving the query and feed.
+    fn present_frame(&mut self) -> Result<()> {
+        let segments = self
+            .autohide
+            .hidden
+            .then(|| std::mem::take(&mut self.frame.status.segments));
+        self.painter.paint(&mut self.pixmap, &self.frame);
+        if let Some(segments) = segments {
+            self.frame.status.segments = segments;
+        }
         self.state.present(&self.pixmap)?;
         self.conn.flush()?;
         Ok(())
@@ -531,7 +554,9 @@ impl Overlay {
         if let Some(feed) = &mut self.feed {
             feed.send(&Status::default());
         }
-        self.painter.paint(&mut self.pixmap, &Frame::default());
+        self.frame = Frame::default();
+        self.autohide.observe(&Status::default(), Instant::now());
+        self.painter.paint(&mut self.pixmap, &self.frame);
         self.state.present(&self.pixmap)?;
         self.new_tags();
         self.conn.flush()?;
@@ -547,10 +572,11 @@ impl Overlay {
             .events
             .retain(|e| !matches!(e, Event::Key(..) | Event::Held(..) | Event::Typed(..)));
         self.state.holds.clear();
+        self.state.repeat.clear();
         self.state.gate.redrawn()
     }
 
-    /// Waits for an event or a held arrow's tick, until `until` if given:
+    /// Waits for an event or a held key's tick, until `until` if given:
     /// `None` when that time comes first.
     pub fn next_event(&mut self, until: Option<Instant>) -> Result<Option<Event>> {
         // A pointer roundtrip may already have read releases into Wayland's
@@ -558,15 +584,32 @@ impl Overlay {
         self.event_loop
             .dispatch(Some(Duration::ZERO), &mut self.state)?;
         loop {
+            let now = Instant::now();
+            if self.autohide.expire(now) {
+                self.present_frame()?;
+            }
             if let Some(event) = self.state.events.pop_front() {
+                if matches!(event, Event::Key(..) | Event::Typed(..)) && self.autohide.reveal(now) {
+                    self.present_frame()?;
+                }
                 return Ok(Some(event));
             }
-            let now = Instant::now();
             if until.is_some_and(|until| until <= now) {
                 return Ok(None);
             }
+            if let Some(event) = self.state.repeat_due(now) {
+                if self.autohide.reveal(now) {
+                    self.present_frame()?;
+                }
+                return Ok(Some(event));
+            }
             let tick = self.state.holds.next();
-            let wake = until.into_iter().chain(tick).min();
+            let wake = until
+                .into_iter()
+                .chain(tick)
+                .chain(self.state.repeat.next())
+                .chain(self.autohide.until)
+                .min();
             let wait = wake.map(|at| at.saturating_duration_since(now));
             self.event_loop.dispatch(wait, &mut self.state)?;
             if let Some((direction, ticks)) = self.state.holds.due(Instant::now()) {

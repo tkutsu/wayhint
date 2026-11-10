@@ -199,7 +199,7 @@ fn icons(info: &Info) -> Check {
         Err(e) => return Check::new(Mark::Warn, what, format!("{e:#}; icons are left out")),
     };
     let b = &info.badges;
-    let missing = [&b.scanning, &b.no_targets, &b.no_match, &b.help]
+    let missing = [&b.info, &b.scanning, &b.no_targets, &b.no_match, &b.help]
         .iter()
         .flat_map(|badge| badge.icon.chars())
         .filter(|&c| font.lookup_glyph_index(c) == 0)

@@ -58,20 +58,10 @@ pub enum Pick {
 enum Said {
     #[default]
     Nothing,
-    /// A letter that no tag goes on with, named until the time given.
-    Missed(String, Instant),
+    /// A letter that no tag goes on with, named until the next meaningful input.
+    Missed(String),
     /// Every key and what it does, until the next key that means something.
     Help,
-}
-
-impl Said {
-    /// When a passing message goes.
-    const fn until(&self) -> Option<Instant> {
-        match self {
-            Self::Missed(_, until) => Some(*until),
-            _ => None,
-        }
-    }
 }
 
 /// The message the second line shows while a scan is slow.
@@ -156,7 +146,7 @@ pub trait Mouse {
 /// is where it's let go, and the close key lets go where it is.
 ///
 /// The input box's second line says `no targets` while nothing has a tag,
-/// names a letter no tag goes on with for `[messages] duration`, and shows
+/// names a letter no tag goes on with until the next meaningful input, and shows
 /// every key while the help key has it up (see [`Said`]).
 #[allow(clippy::too_many_lines)] // one loop over the keys: its arms read best together
 pub fn pick(
@@ -208,13 +198,8 @@ pub fn pick(
     let next = |every: Option<Duration>| every.map(|every| Instant::now() + every);
     let mut due = next(every);
     loop {
-        let wake = due.into_iter().chain(said.until()).min();
-        let Some(event) = overlay.next_event(wake)? else {
+        let Some(event) = overlay.next_event(due)? else {
             let now = Instant::now();
-            if said.until().is_some_and(|until| until <= now) {
-                said = Said::Nothing;
-                overlay.update(&tags(&selector, shown, &said))?;
-            }
             if due.is_none_or(|due| due > now) {
                 continue;
             }
@@ -337,21 +322,12 @@ pub fn pick(
             Step::Picked { index, act } => return Ok(Pick::Target { index, act }),
             Step::Here(act) => return Ok(Pick::Here { act }),
             Step::Repeat => return Ok(Pick::Repeat),
-            // The letter is dropped, and named for `[messages] duration`.
+            // The letter is dropped; the message stays until the next meaningful input.
             Step::Ignored => {
-                if let Input::Letter(letter, _) = input
+                if let Input::Letter(_, _) = input
                     && config.info.no_match
                 {
-                    let letters = config.alphabet.letters();
-                    let case = config.style.case;
-                    let typed: String = before
-                        .typed()
-                        .iter()
-                        .chain([&letter])
-                        .map(|&i| case.of(letters[i].label))
-                        .collect();
-                    let until = Instant::now() + config.info.duration;
-                    said = Said::Missed(format!("no tag starts with {typed}"), until);
+                    said = Said::Missed("no matching hint".into());
                 }
                 overlay.update(&tags(&selector, shown, &said))?;
             }
@@ -534,7 +510,7 @@ fn frame(selector: &Selector, config: &Config, scene: &Scene, said: &Said) -> Fr
         .collect();
     let info = match said {
         Said::Help => Some(Message::new(Notice::Help, config.verbs.legend())),
-        Said::Missed(message, _) => Some(Message::new(Notice::NoMatch, message.clone())),
+        Said::Missed(message) => Some(Message::new(Notice::NoMatch, message.clone())),
         Said::Nothing if scene.targets.is_empty() && config.info.no_targets => {
             Some(Message::new(Notice::NoTargets, "no targets"))
         }
@@ -1228,10 +1204,10 @@ mod tests {
             Some(Message::new(Notice::NoTargets, "no targets"))
         );
         assert_eq!(info(&targets, &Said::Nothing), None);
-        let missed = Said::Missed("no tag starts with Q".into(), Instant::now());
+        let missed = Said::Missed("no matching hint".into());
         assert_eq!(
             info(&[], &missed),
-            Some(Message::new(Notice::NoMatch, "no tag starts with Q")),
+            Some(Message::new(Notice::NoMatch, "no matching hint")),
             "a miss beats no targets"
         );
         let help = info(&targets, &Said::Help).unwrap();
