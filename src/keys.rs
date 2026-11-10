@@ -136,18 +136,33 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// above `q`.
 const MAIN_BLOCK: [std::ops::RangeInclusive<u32>; 4] = [2..=13, 16..=27, 30..=41, 43..=53];
 
-/// The home row, `asdfghjkl` on US: the default alphabet, as positions, so
-/// it's the home row on every layout (`qsdfghjkl` printed on AZERTY).
-pub const HOME_ROW: [KeyCode; 9] = [
-    KeyCode(30),
-    KeyCode(31),
-    KeyCode(32),
-    KeyCode(33),
-    KeyCode(34),
+/// Default hint positions, ordered from easiest to hardest to press.
+pub const DEFAULT_ALPHABET: [KeyCode; 25] = [
+    KeyCode(18),
     KeyCode(35),
-    KeyCode(36),
-    KeyCode(37),
+    KeyCode(30),
+    KeyCode(20),
+    KeyCode(23),
+    KeyCode(49),
+    KeyCode(46),
+    KeyCode(31),
+    KeyCode(22),
     KeyCode(38),
+    KeyCode(24),
+    KeyCode(32),
+    KeyCode(21),
+    KeyCode(25),
+    KeyCode(50),
+    KeyCode(34),
+    KeyCode(33),
+    KeyCode(45),
+    KeyCode(17),
+    KeyCode(48),
+    KeyCode(47),
+    KeyCode(16),
+    KeyCode(37),
+    KeyCode(44),
+    KeyCode(36),
 ];
 
 fn main_block() -> impl Iterator<Item = KeyCode> {
@@ -321,12 +336,5 @@ mod tests {
             Some("PageDown"),
             "printed by the long name"
         );
-    }
-
-    #[test]
-    fn home_row_reads_asdfghjkl_on_us() {
-        let us = Layout::named("us", "");
-        let printed: String = HOME_ROW.iter().filter_map(|&k| us.char_at(k)).collect();
-        assert_eq!(printed, "asdfghjkl");
     }
 }
