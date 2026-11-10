@@ -232,8 +232,6 @@ struct Typing {
     pressed: Vec<Option<usize>>,
     /// The query changed since the matches were found.
     stale: bool,
-    /// What was typed that matched nothing, and until when it's named.
-    missed: Option<(String, Instant)>,
     /// The help key has every key listed under the input box.
     help: bool,
     /// A hold keeps a button down: the input box says `drop`.
@@ -336,9 +334,15 @@ impl Typing {
     fn draw(&self, shown: &Snapshot, config: &Config) -> Frame {
         let info = if self.help {
             Some(Message::new(Notice::Help, config.verbs.text_legend()))
+        } else if config.info.no_match
+            && !self.stale
+            && !self.search.query().is_empty()
+            && self.search.matches().is_empty()
+            && !self.hints.open(&self.pressed)
+        {
+            Some(Message::new(Notice::NoMatch, "no matching text"))
         } else {
-            let missed = self.missed.as_ref();
-            missed.map(|m| Message::new(Notice::NoMatch, m.0.clone()))
+            None
         };
         let tags = self
             .hints
@@ -472,7 +476,6 @@ fn keys(
         literal: None,
         pressed: Vec::new(),
         stale: false,
-        missed: None,
         help: false,
         holding,
         jumped: None,
@@ -487,16 +490,8 @@ fn keys(
     loop {
         // Only while nothing is typed: a key freezes what was read.
         let refresh = due.filter(|_| now.idle());
-        let wake = refresh
-            .into_iter()
-            .chain(now.missed.as_ref().map(|m| m.1))
-            .min();
-        let Some(event) = overlay.next_event(wake)? else {
+        let Some(event) = overlay.next_event(refresh)? else {
             let at = Instant::now();
-            if now.missed.as_ref().is_some_and(|m| m.1 <= at) {
-                now.missed = None;
-                overlay.update(&now.draw(shown, config))?;
-            }
             if refresh.is_some_and(|due| due <= at) {
                 // A scan holds up the keys, so none while an arrow is
                 // held: the pointer would freeze mid-move.
@@ -667,18 +662,6 @@ fn keys(
         if now.stale && (!edit || !overlay.has_events()?) {
             find(&mut now.search, shown, source);
             now.stale = false;
-            // A character that leaves nothing to match stays typed, to
-            // edit or take back; the info line names the query.
-            if config.info.no_match
-                && key.code != KeyCode::BACKSPACE
-                && !now.search.query().is_empty()
-                && now.search.matches().is_empty()
-                && !now.hints.open(&now.pressed)
-            {
-                let until = Instant::now() + config.info.duration;
-                let said = format!("no text has \"{}\"", now.search.query());
-                now.missed = Some((said, until));
-            }
             // Typed into one match, not backed into it. An Enter that
             // comes after the typing acts below, with its own Ctrl and
             // Alt.
@@ -855,11 +838,11 @@ fn choose(
 /// What text mode shows: every match's lines, the current one's marked,
 /// and the input box; with no query, each word's first letter marked if
 /// `[words.first_character]` says. `search` is `None` while the text is being read, and
-/// `stale` while the query's matches are being found: the box shows `...`
-/// for the count then, and nothing is marked. The box names the armed
+/// `stale` while the query's matches are being found: the info line says so,
+/// and nothing is marked. The box names the armed
 /// `verb`, or `drop` while `holding`, dimmed, before the query; with no
 /// query yet, it shows `[input] placeholder`, dimmed too. Under it, `info`
-/// says what was typed that matched nothing, or lists the keys.
+/// reports no match or lists the keys, taking priority over the match count.
 fn frame(
     search: Option<&Search>,
     stale: bool,
@@ -868,16 +851,14 @@ fn frame(
     input: &Input,
     info: Option<Message>,
 ) -> Frame {
-    let status = Status {
-        info,
-        ..Status::text(
-            verb,
-            holding,
-            search.map(Search::query),
-            search.filter(|_| !stale).map(Search::position),
-            input,
-        )
-    };
+    let mut status = Status::text(
+        verb,
+        holding,
+        search.map(Search::query),
+        search.filter(|_| !stale).map(Search::position),
+        input,
+    );
+    status.info = info.or(status.info);
     let search = search.filter(|_| !stale);
     let current = search.and_then(Search::current).map(|m| m.span);
     let highlights = search
@@ -976,7 +957,10 @@ mod tests {
     fn the_tags_go_and_the_pill_says_what_is_typed() {
         let loading = frame(None, false, None);
         assert!(loading.tags.is_empty(), "target tags are hidden");
-        assert_eq!(loading.status.line().unwrap().0, "text ...");
+        assert!(
+            loading.status.line().is_none(),
+            "empty placeholder stays hidden"
+        );
         let mut found = search(&["contact", "control"]);
         let pill = |found: &Search, stale| {
             frame(Some(found), stale, Some("double"))
@@ -984,16 +968,37 @@ mod tests {
                 .line()
                 .unwrap()
         };
-        assert_eq!(pill(&found, false).0, "double text");
-        assert_eq!(
-            pill(&found, false).1,
-            "double text".len(),
-            "the placeholder is dimmed"
-        );
-        typed(&mut found, "con");
-        assert_eq!(pill(&found, false).0, "double con  1/2");
+        assert_eq!(pill(&found, false).0, "double ");
         assert_eq!(pill(&found, false).1, "double ".len(), "the verb is dimmed");
-        assert_eq!(pill(&found, true).0, "double con  ...", "being found");
+        typed(&mut found, "con");
+        assert_eq!(pill(&found, false).0, "double con");
+        assert_eq!(pill(&found, false).1, "double ".len(), "the verb is dimmed");
+        assert_eq!(
+            pill(&found, true).0,
+            "double con",
+            "count stays off the input line"
+        );
+        assert_eq!(
+            frame(Some(&found), false, None).status.info,
+            Some(Message::new(Notice::Info, "match 1 of 2"))
+        );
+        let input = Input::new(&Style::default());
+        for kind in [Notice::Help, Notice::NoMatch, Notice::Scanning] {
+            let message = Message::new(kind, "message");
+            let shown = super::frame(
+                Some(&found),
+                false,
+                None,
+                false,
+                &input,
+                Some(message.clone()),
+            );
+            assert_eq!(
+                shown.status.info,
+                Some(message),
+                "messages take priority over counts"
+            );
+        }
     }
 
     #[test]
@@ -1011,8 +1016,8 @@ mod tests {
                 .line()
                 .unwrap()
         };
-        assert_eq!(display(false).0, "double find [αλλ]  1/2");
-        assert_eq!(display(true).0, "double find [αλλ]  ...");
+        assert_eq!(display(false).0, "double find [αλλ]");
+        assert_eq!(display(true).0, "double find [αλλ]");
         assert_eq!(display(false).1, 7, "only the armed verb is dimmed");
         assert_eq!(found.query(), "αλλ", "decorations are display only");
         let empty = Input {
@@ -1022,7 +1027,7 @@ mod tests {
         let waiting = super::frame(Some(&search(&["x"])), false, None, false, &empty, None);
         assert_eq!(waiting.status.line().unwrap().0, "find…");
         let reading = super::frame(None, false, None, false, &empty, None);
-        assert_eq!(reading.status.line().unwrap().0, "find… ...");
+        assert_eq!(reading.status.line().unwrap().0, "find…");
     }
 
     #[test]
@@ -1304,7 +1309,6 @@ mod tests {
             literal: None,
             pressed: Vec::new(),
             stale: false,
-            missed: None,
             help: false,
             holding: false,
             jumped: None,
@@ -1314,6 +1318,56 @@ mod tests {
     }
 
     #[test]
+    fn no_match_message_follows_the_query_until_it_is_corrected() {
+        let (shown, mut now) = typing("save", Action::Left);
+        let mut config = config("");
+        typed(&mut now.search, "sxyz");
+        now.pressed = vec![None; 4];
+        let message = Some(Message::new(Notice::NoMatch, "no matching text"));
+        assert_eq!(now.draw(&shown, &config).status.info, message);
+
+        assert!(now.backspace());
+        typed(&mut now.search, "");
+        assert_eq!(now.draw(&shown, &config).status.info, message);
+        assert!(now.backspace());
+        assert!(now.backspace());
+        typed(&mut now.search, "");
+        assert_eq!(
+            now.draw(&shown, &config).status.info,
+            Some(Message::new(Notice::Info, "1 match"))
+        );
+        assert!(now.backspace());
+        typed(&mut now.search, "");
+        assert_eq!(now.draw(&shown, &config).status.info, None);
+
+        typed(&mut now.search, "x");
+        now.pressed.push(None);
+        now.stale = true;
+        assert_eq!(
+            now.draw(&shown, &config).status.info,
+            Some(Message::new(Notice::Info, "finding matches")),
+            "still finding matches"
+        );
+        now.stale = false;
+        now.hints = Hints(vec![(0, vec![0, 1])]);
+        now.pressed = vec![Some(0)];
+        assert_eq!(
+            now.draw(&shown, &config).status.info,
+            Some(Message::new(Notice::Info, "0 matches")),
+            "a fallback hint still matches"
+        );
+        now.pressed = vec![None];
+        assert_eq!(now.draw(&shown, &config).status.info, message);
+        config.info.no_match = false;
+        assert_eq!(
+            now.draw(&shown, &config).status.info,
+            Some(Message::new(Notice::Info, "0 matches")),
+            "no-match warnings can be disabled"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One input sequence exercises pending-match navigation.
     fn arrows_select_pending_matches_and_move_the_pointer_only_when_enabled() -> Result<()> {
         struct Located;
         impl Source for Located {
@@ -1561,7 +1615,6 @@ mod tests {
             literal: None,
             pressed: Vec::new(),
             stale: false,
-            missed: None,
             help: false,
             holding: false,
             jumped: None,

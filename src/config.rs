@@ -74,6 +74,8 @@ struct FileHints {
     background_direction: Option<Direction>,
     border: Option<Color>,
     shadow: Option<Color>,
+    shadow_offset: Option<[i32; 2]>,
+    shadow_size: Option<f32>,
     border_width: Option<f32>,
     radius: Option<f32>,
     padding: Option<[f32; 2]>,
@@ -107,6 +109,8 @@ impl FileHints {
                 .unwrap_or(base.background_direction),
             border: self.border.unwrap_or(base.border),
             shadow: self.shadow.unwrap_or(base.shadow),
+            shadow_offset: self.shadow_offset.unwrap_or(base.shadow_offset),
+            shadow_size: self.shadow_size.unwrap_or(base.shadow_size),
             border_width: self.border_width.unwrap_or(base.border_width),
             radius: self.radius.unwrap_or(base.radius),
             padding: self.padding.unwrap_or(base.padding),
@@ -170,12 +174,13 @@ impl FileWords {
 }
 
 /// `[input]`: the box for what's typed, with the
-/// query's decorations. Unset look fields come from the tags' `[hints]`,
-/// with the box's own spot on the screen.
+/// query's decorations. Its font, radius and shadow inherit `[hints]`;
+/// colors, size, padding and screen position have their own defaults.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileInput {
     visible: Option<bool>,
+    autohide: Option<u32>,
     #[serde(rename = "show_typed_hints")]
     hints: Option<bool>,
     placeholder: Option<String>,
@@ -190,6 +195,8 @@ struct FileInput {
     background: Option<Color>,
     border: Option<Color>,
     shadow: Option<Color>,
+    shadow_offset: Option<[i32; 2]>,
+    shadow_size: Option<f32>,
     border_width: Option<f32>,
     radius: Option<f32>,
     padding: Option<[f32; 2]>,
@@ -198,8 +205,7 @@ struct FileInput {
 }
 
 impl FileInput {
-    /// Inherit the tags' look, with screen positioning instead of a
-    /// target. `table` is the name the file used.
+    /// Resolve overrides against the dark input style. `table` names the file table.
     fn resolve(self, tags: &Style, table: &str) -> Result<Input> {
         let base = Input::new(tags);
         let style = Style {
@@ -211,6 +217,8 @@ impl FileInput {
             background: self.background.unwrap_or(base.style.background),
             border: self.border.unwrap_or(base.style.border),
             shadow: self.shadow.unwrap_or(base.style.shadow),
+            shadow_offset: self.shadow_offset.unwrap_or(base.style.shadow_offset),
+            shadow_size: self.shadow_size.unwrap_or(base.style.shadow_size),
             border_width: self.border_width.unwrap_or(base.style.border_width),
             radius: self.radius.unwrap_or(base.style.radius),
             padding: self.padding.unwrap_or(base.style.padding),
@@ -235,6 +243,9 @@ impl FileInput {
         }
         Ok(Input {
             visible: self.visible.unwrap_or(base.visible),
+            autohide: self
+                .autohide
+                .map_or(base.autohide, |s| Duration::from_secs(s.into())),
             hints: self.hints.unwrap_or(base.hints),
             prefix: self.prefix,
             suffix: self.suffix,
@@ -250,6 +261,7 @@ impl FileInput {
 #[serde(default, deny_unknown_fields)]
 struct FileInfo {
     visible: Option<bool>,
+    size: Option<f32>,
     scanning: Option<bool>,
     no_targets: Option<bool>,
     no_match: Option<bool>,
@@ -257,6 +269,8 @@ struct FileInfo {
     #[serde(rename = "duration_ms")]
     duration: Option<u32>,
     icon_font: Option<String>,
+    info_icon: Option<String>,
+    info_color: Option<Color>,
     scanning_icon: Option<String>,
     scanning_color: Option<Color>,
     no_targets_icon: Option<String>,
@@ -273,6 +287,10 @@ const DURATION: u32 = 10_000;
 impl FileInfo {
     fn resolve(self) -> Result<Info> {
         let base = Info::default();
+        let size = self.size.unwrap_or(base.size);
+        if !(4.0..=200.0).contains(&size) {
+            bail!("[messages] size: {size} px is outside 4-200");
+        }
         let duration = match self.duration {
             Some(ms) if !(1..=DURATION).contains(&ms) => {
                 bail!("[messages] duration_ms = {ms}: give 1-{DURATION} ms")
@@ -297,12 +315,14 @@ impl FileInfo {
         let b = base.badges;
         Ok(Info {
             visible: self.visible.unwrap_or(base.visible),
+            size,
             scanning: self.scanning.unwrap_or(base.scanning),
             no_targets: self.no_targets.unwrap_or(base.no_targets),
             no_match: self.no_match.unwrap_or(base.no_match),
             duration,
             icon_font,
             badges: Badges {
+                info: badge("info", self.info_icon, self.info_color, b.info)?,
                 scanning: badge(
                     "scanning",
                     self.scanning_icon,
@@ -329,8 +349,8 @@ impl FileInfo {
 
 /// `[words.matches]`, every match's mark, with `[words.matches.current]` inside
 /// it for the selected match's. Unset fields take the defaults (see
-/// [`Mark::new`]); unset current ones come from every match's mark, in
-/// orange ([`Mark::for_current`]).
+/// [`Mark::new`]); the current mark has a stronger teal fill and outline
+/// ([`Mark::for_current`]).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileMarks {
@@ -393,9 +413,7 @@ impl FileStarts {
 }
 
 impl FileMarks {
-    /// The marks, with whatever the file leaves out filled in: radius and
-    /// padding from the tags' `style`. The words' first letters' are
-    /// `starts`.
+    /// Resolve the teal marks, inheriting the tags' radius. `starts` marks initials.
     fn resolve(&self, style: &Style, starts: Starts) -> Result<Marks> {
         let base = Mark::new(style);
         let all = Mark {
@@ -409,20 +427,20 @@ impl FileMarks {
             radius: self.radius.unwrap_or(base.radius),
             padding: self.padding.unwrap_or(base.padding),
         };
-        let orange = all.for_current();
+        let selected = all.for_current();
         let c = &self.current;
         let current = Mark {
-            background: c.background.unwrap_or(orange.background),
+            background: c.background.unwrap_or(selected.background),
             background_end: c
                 .background_end
-                .or(orange.background_end.filter(|_| c.background.is_none())),
+                .or(selected.background_end.filter(|_| c.background.is_none())),
             background_direction: c
                 .background_direction
-                .unwrap_or(orange.background_direction),
-            border: c.border.unwrap_or(orange.border),
-            border_width: c.border_width.unwrap_or(orange.border_width),
-            radius: c.radius.unwrap_or(orange.radius),
-            padding: c.padding.unwrap_or(orange.padding),
+                .unwrap_or(selected.background_direction),
+            border: c.border.or(self.border).unwrap_or(selected.border),
+            border_width: c.border_width.unwrap_or(selected.border_width),
+            radius: c.radius.unwrap_or(selected.radius),
+            padding: c.padding.unwrap_or(selected.padding),
         };
         all.validate("words.matches")?;
         current.validate("words.matches.current")?;
@@ -2181,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn text_marks_are_yellow_and_orange_unless_set() {
+    fn text_marks_use_teal_defaults_and_preserve_overrides() {
         let config = Config::parse("[hints]\nborder_width = 2\nradius = 3", &us()).unwrap();
         let base = Mark::new(&config.style);
         assert_eq!(config.marks.all, base);
@@ -2191,8 +2209,8 @@ mod tests {
             "the tags' radius"
         );
         assert!(
-            config.marks.all.border_width.abs() < f32::EPSILON,
-            "but no border"
+            (config.marks.all.border_width - 1.0).abs() < f32::EPSILON,
+            "the match has its own border width"
         );
         let set = Config::parse(
             "[words.style]\nbackground = \"#e8dcc440\"\npadding = [1, 2]\n\
@@ -2206,8 +2224,8 @@ mod tests {
         );
         assert_eq!(
             set.marks.current.background,
-            Color::rgba(0xff, 0x96, 0x32, 0x80),
-            "orange, whatever every match's is"
+            Color::rgba(0x94, 0xe2, 0xd5, 0x88),
+            "a stronger teal fill, whatever every match's is"
         );
         assert_eq!(
             set.marks.current.padding,
@@ -2215,6 +2233,8 @@ mod tests {
             "every match's padding"
         );
         assert!((set.marks.current.border_width - 3.0).abs() < f32::EPSILON);
+        let custom = Config::parse("[words.matches]\nborder = '#123456'", &us()).unwrap();
+        assert_eq!(custom.marks.current.border, custom.marks.all.border);
         let again = Config::parse(&set.render(), &us()).unwrap();
         assert_eq!(again.marks, set.marks);
         let err = |text: &str| format!("{:#}", Config::parse(text, &us()).unwrap_err());
@@ -2397,15 +2417,84 @@ direction = "{direction}"
     }
 
     #[test]
-    fn text_input_inherits_tags_but_has_its_own_screen_position() {
+    fn shadow_geometry_inherits_overrides_and_round_trips() {
+        let config = Config::parse(
+            "[hints]\nshadow_offset = [-2, 5]\nshadow_size = 6\n[hints.pixels]\nshadow_offset = [4, -3]\nshadow_size = 2\n[input]\nshadow_offset = [0, 4]\nshadow_size = 3",
+            &us(),
+        ).unwrap();
+        assert_eq!(config.style.shadow_offset, [-2, 5]);
+        assert_eq!(config.style.shadow_size, 6.0);
+        assert_eq!(config.style.for_pixels().shadow_offset, [4, -3]);
+        assert_eq!(config.style.for_pixels().shadow_size, 2.0);
+        assert_eq!(config.input.style.shadow_offset, [0, 4]);
+        assert_eq!(config.input.style.shadow_size, 3.0);
+        let inherited =
+            Config::parse("[hints]\nshadow_offset = [-2, 5]\nshadow_size = 6", &us()).unwrap();
+        assert_eq!(inherited.input.style.shadow_offset, [-2, 5]);
+        assert_eq!(inherited.input.style.shadow_size, 6.0);
+        assert_eq!(inherited.style.for_pixels().shadow_offset, [-2, 5]);
+        assert_eq!(inherited.style.for_pixels().shadow_size, 6.0);
+        let again = Config::parse(&config.render(), &us()).unwrap();
+        assert_eq!(again.style, config.style);
+        assert_eq!(again.input, config.input);
+        for table in ["hints", "hints.pixels", "input"] {
+            for (field, name) in [
+                ("shadow_offset = [501, 0]", "shadow_offset"),
+                ("shadow_offset = [0, -501]", "shadow_offset"),
+                ("shadow_size = -1", "shadow_size"),
+                ("shadow_size = nan", "shadow_size"),
+                ("shadow_size = inf", "shadow_size"),
+                ("shadow_size = 101", "shadow_size"),
+            ] {
+                let error = Config::parse(&format!("[{table}]\n{field}"), &us()).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(&format!("[{table}] {name}")),
+                    "{error:#}"
+                );
+            }
+        }
+        let zero = Config::parse("[input]\nshadow_size = 0", &us()).unwrap();
+        assert_eq!(zero.input.style.shadow_size, 0.0);
+    }
+
+    #[test]
+    fn input_autohide_and_message_size_round_trip_independently() {
+        let default = Config::parse("", &us()).unwrap();
+        assert_eq!(default.input.autohide, Duration::from_secs(3));
+        let mine = Config::parse(
+            "[input]\nsize = 24\nautohide = 0\n[messages]\nsize = 12",
+            &us(),
+        )
+        .unwrap();
+        assert!(mine.input.autohide.is_zero());
+        assert_eq!(mine.info.size, 12.0);
+        let again = Config::parse(&mine.render(), &us()).unwrap();
+        assert_eq!(again.input, mine.input);
+        assert_eq!(again.info, mine.info);
+        for file in [
+            "[input]\nautohide = -1",
+            "[input]\nautohide = 1.5",
+            "[messages]\nsize = nan",
+            "[messages]\nsize = 0",
+        ] {
+            assert!(Config::parse(file, &us()).is_err(), "{file}");
+        }
+    }
+
+    #[test]
+    fn text_input_has_its_own_theme_and_inherits_the_hint_font() {
         let config = Config::parse(
             "[hints]\nfont = 'serif'\nsize = 22\ntext = '#123456'\nposition = 'top-right'\noffset = [3, 4]",
             &us(),
         ).unwrap();
-        let mut look = config.style.clone();
-        look.position = Position::Bottom;
-        look.offset = [0, -48];
-        assert_eq!(config.input.style, look);
+        let look = &config.input.style;
+        assert_eq!(look.font, "serif");
+        assert!((look.size - 13.0).abs() < f32::EPSILON);
+        assert_eq!(look.text, Color::rgba(0xe8, 0xdc, 0xc4, 0xff));
+        assert_eq!(look.background, Color::rgba(0x1e, 0x1e, 0x2e, 0xa8));
+        assert_eq!(look.padding, [5.0, 8.0]);
+        assert_eq!(look.position, Position::Top);
+        assert_eq!(look.offset, [0, 40]);
         assert!(config.input.prefix.is_empty() && config.input.suffix.is_empty());
     }
 
@@ -2717,13 +2806,18 @@ offset = [-13, 17]
         assert!(info.scanning && info.no_targets && info.no_match);
         assert_eq!(info.duration, Duration::from_millis(2000));
         let mine = Config::parse(
-            "[messages]\nscanning = false\nno_match = false\nduration_ms = 400\nno_match_color = \"#000\"",
+            "[messages]\nscanning = false\nno_match = false\nduration_ms = 400\nno_match_color = \"#000\"\ninfo_icon = \"\"\ninfo_color = \"#123456\"",
             &us(),
         )
         .unwrap();
         assert!(!mine.info.scanning && mine.info.no_targets && !mine.info.no_match);
         assert_eq!(mine.info.duration, Duration::from_millis(400));
         assert_eq!(mine.info.badges.no_match.color, Color::rgba(0, 0, 0, 0xff));
+        assert_eq!(mine.info.badges.info.icon, "");
+        assert_eq!(
+            mine.info.badges.info.color,
+            Color::rgba(0x12, 0x34, 0x56, 0xff)
+        );
         assert_eq!(mine.info.badges.help, info.badges.help);
         let again = Config::parse(&mine.render(), &us()).unwrap();
         assert_eq!(again.info, mine.info);
@@ -2952,8 +3046,8 @@ offset = [-13, 17]
     }
 
     #[test]
-    fn the_placeholder_is_text_unless_set() {
-        assert_eq!(Config::parse("", &us()).unwrap().input.placeholder, "text");
+    fn the_placeholder_is_empty_unless_set() {
+        assert_eq!(Config::parse("", &us()).unwrap().input.placeholder, "");
         let config = Config::parse("[words.input]\nplaceholder = \"find…\"", &us()).unwrap();
         assert_eq!(config.input.placeholder, "find…");
         let again = Config::parse(&config.render(), &us()).unwrap();

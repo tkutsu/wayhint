@@ -62,8 +62,6 @@ pub enum Role {
     /// `[input] prefix` and `suffix`, around the query.
     Prefix,
     Suffix,
-    /// `  1/3` after the query, or `...` while it's being found.
-    MatchCount,
 }
 
 /// Which match is current, from 1, of how many: both `None` while the
@@ -132,9 +130,9 @@ impl Status {
     }
 
     /// Text mode: `drop` while `holding`, else the armed `verb`, dimmed,
-    /// then the `query` between `[input] prefix` and `suffix`, and its
-    /// `position`, the current match and how many there are; `None` while
-    /// they're being found. With nothing typed, `[input] placeholder`,
+    /// then the `query` between `[input] prefix` and `suffix`. Its
+    /// `position` goes in the info line; `None` while matches are being
+    /// found. With nothing typed, `[input] placeholder`,
     /// dimmed. `query` is `None` while the windows' text is being read.
     pub fn text(
         verb: Option<&'static str>,
@@ -158,7 +156,6 @@ impl Status {
             None => {
                 if !input.placeholder.is_empty() {
                     segments.push(Segment::new(Role::Placeholder, &input.placeholder, true));
-                    segments.push(Segment::new(Role::MatchCount, " ...", true));
                 }
                 Some(pending)
             }
@@ -180,8 +177,6 @@ impl Status {
                         .filter(|(_, text)| !text.is_empty())
                         .map(|(role, text)| Segment::new(role, text, false)),
                 );
-                let count = position.map_or_else(|| "...".into(), |(at, of)| format!("{at}/{of}"));
-                segments.push(Segment::new(Role::MatchCount, format!("  {count}"), false));
                 Some(position.map_or(pending, |(at, of)| Matches {
                     current: Some(at),
                     total: Some(of),
@@ -196,7 +191,15 @@ impl Status {
             holding,
             segments,
             matches,
-            ..Self::default()
+            info: query.filter(|query| !query.is_empty()).map(|_| {
+                let text = match position {
+                    None => "finding matches".into(),
+                    Some((_, 0)) => "0 matches".into(),
+                    Some((1, 1)) => "1 match".into(),
+                    Some((at, of)) => format!("match {at} of {of}"),
+                };
+                Message::new(Notice::Info, text)
+            }),
         }
     }
 
@@ -331,12 +334,14 @@ mod tests {
     #[test]
     fn text_mode_reads_then_counts() {
         let input = Input {
+            placeholder: "text".into(),
             prefix: "find [".into(),
             suffix: "]".into(),
             ..Input::new(&Style::default())
         };
         let reading = Status::text(Some("double"), false, None, None, &input);
-        assert_eq!(reading.line(), Some(("double text ...".into(), 15)));
+        assert_eq!(reading.line(), Some(("double text".into(), 11)));
+        assert_eq!(reading.info, None, "nothing typed yet");
         assert!(reading.matches.unwrap().pending);
         let holding = Status::text(Some("double"), true, Some(""), None, &input);
         assert_eq!(
@@ -356,10 +361,10 @@ mod tests {
                 (Role::Prefix, "find [", false),
                 (Role::Query, "αλλ", false),
                 (Role::Suffix, "]", false),
-                (Role::MatchCount, "  1/2", false),
             ]
         );
         assert_eq!(found.input, "αλλ", "decorations are display only");
+        assert_eq!(found.info, Some(Message::new(Notice::Info, "match 1 of 2")));
         assert_eq!(
             found.matches,
             Some(Matches {
@@ -369,7 +374,11 @@ mod tests {
             })
         );
         let finding = Status::text(None, false, Some("αλλ"), None, &input);
-        assert_eq!(finding.line().unwrap().0, "find [αλλ]  ...");
+        assert_eq!(finding.line().unwrap().0, "find [αλλ]");
+        assert_eq!(
+            finding.info,
+            Some(Message::new(Notice::Info, "finding matches"))
+        );
         assert_eq!(
             finding.matches,
             Some(Matches {
@@ -388,12 +397,15 @@ mod tests {
         );
         assert_eq!(
             roles(&plain),
-            [
-                (Role::Query, "x", false),
-                (Role::MatchCount, "  0/0", false)
-            ],
+            [(Role::Query, "x", false)],
             "no empty decorations"
         );
+        assert_eq!(plain.info, Some(Message::new(Notice::Info, "0 matches")));
+        let single = Status::text(None, false, Some("x"), Some((1, 1)), &input);
+        assert_eq!(single.info, Some(Message::new(Notice::Info, "1 match")));
+        let json = serde_json::to_value(&found).unwrap();
+        assert_eq!(json["info"]["kind"], "info");
+        assert_eq!(json["matches"]["total"], 2);
         for status in [reading, empty, found, finding, plain] {
             assert!(dimmed_first(&status), "{status:?}");
         }
@@ -402,7 +414,7 @@ mod tests {
     #[test]
     fn hiding_a_line_keeps_the_rest() {
         let status = Status {
-            info: Some(Message::new(Notice::NoMatch, "no tag starts with Q")),
+            info: Some(Message::new(Notice::NoMatch, "no matching hint")),
             ..Status::tags("A".into(), Some("right"), false, true)
         };
         assert_eq!(status.visible(true, true), status);

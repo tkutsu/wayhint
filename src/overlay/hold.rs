@@ -1,5 +1,5 @@
-//! Arrows held down, sharing one movement clock. Pure: the time comes in
-//! as an argument.
+//! Held keys: arrows share one movement clock; text uses the compositor's
+//! repeat settings. Pure: the time comes in as an argument.
 //!
 //! An arrow acts as it goes down, like a key repeat: then again every
 //! `EVERY` once it has been down for `DELAY`, until it's let go. The input
@@ -15,6 +15,53 @@ use crate::{geometry::Point, keys::KeyCode};
 const DELAY: Duration = Duration::from_millis(250);
 /// How often a held arrow ticks after that.
 const EVERY: Duration = Duration::from_millis(25);
+
+/// The latest held text key, using the compositor's repeat settings.
+#[derive(Debug, Default)]
+pub struct Repeat {
+    timing: Option<(Duration, Duration)>,
+    held: Option<(KeyCode, Instant)>,
+}
+
+impl Repeat {
+    pub fn configure(&mut self, rate: u32, delay: u32) {
+        self.timing = (rate > 0).then(|| {
+            (
+                Duration::from_millis(u64::from(delay)),
+                Duration::from_secs(1) / rate,
+            )
+        });
+        self.clear();
+    }
+
+    pub fn press(&mut self, code: KeyCode, now: Instant) {
+        self.held = self.timing.map(|(delay, _)| (code, now + delay));
+    }
+
+    pub fn release(&mut self, code: KeyCode) {
+        if self.held.is_some_and(|(held, _)| held == code) {
+            self.clear();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.held = None;
+    }
+
+    pub fn next(&self) -> Option<Instant> {
+        self.held.map(|(_, next)| next)
+    }
+
+    /// Emit at most one repeat after a slow scan, avoiding a burst of text.
+    pub fn due(&mut self, now: Instant) -> Option<KeyCode> {
+        let (code, next) = self.held.as_mut()?;
+        if *next > now {
+            return None;
+        }
+        *next = now + self.timing?.1;
+        Some(*code)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Holds {
@@ -93,6 +140,42 @@ impl Holds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_repeat_uses_the_seat_timing_and_stops_on_release() {
+        let start = Instant::now();
+        let a = KeyCode::from_evdev(30);
+        let mut repeat = Repeat::default();
+        repeat.configure(20, 300);
+        repeat.press(a, start);
+        assert_eq!(repeat.due(start + Duration::from_millis(299)), None);
+        assert_eq!(repeat.due(start + Duration::from_millis(300)), Some(a));
+        assert_eq!(repeat.next(), Some(start + Duration::from_millis(350)));
+        repeat.release(KeyCode::BACKSPACE);
+        assert_eq!(repeat.due(start + Duration::from_millis(900)), Some(a));
+        assert_eq!(repeat.next(), Some(start + Duration::from_millis(950)));
+        repeat.release(a);
+        assert_eq!(repeat.next(), None);
+        assert_eq!(repeat.due(start + Duration::from_secs(2)), None);
+    }
+
+    #[test]
+    fn latest_text_key_replaces_repeat_and_clear_or_disable_cancels_it() {
+        let start = Instant::now();
+        let mut repeat = Repeat::default();
+        repeat.configure(40, 250);
+        repeat.press(KeyCode::SPACE, start);
+        repeat.press(KeyCode::BACKSPACE, start + EVERY);
+        repeat.release(KeyCode::SPACE);
+        assert_eq!(repeat.due(start + DELAY), None);
+        assert_eq!(repeat.due(start + DELAY + EVERY), Some(KeyCode::BACKSPACE));
+        repeat.clear();
+        assert_eq!(repeat.next(), None);
+        repeat.press(KeyCode::SPACE, start);
+        repeat.configure(0, 250);
+        repeat.press(KeyCode::SPACE, start);
+        assert_eq!(repeat.next(), None);
+    }
 
     #[test]
     fn staggered_arrows_repeat_together_for_a_straight_diagonal() {

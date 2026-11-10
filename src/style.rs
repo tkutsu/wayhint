@@ -258,6 +258,10 @@ pub struct Style {
     pub border: Color,
     /// A soft shadow below the box; zero alpha disables it.
     pub shadow: Color,
+    /// Shadow displacement, right then down, in logical pixels.
+    pub shadow_offset: [i32; 2],
+    /// Outward fade distance in logical pixels; zero gives a hard edge.
+    pub shadow_size: f32,
     pub border_width: f32,
     pub radius: f32,
     /// Vertical, then horizontal, in px.
@@ -330,6 +334,8 @@ pub struct Look {
     pub background: Option<Color>,
     pub border: Option<Color>,
     pub shadow: Option<Color>,
+    pub shadow_offset: Option<[i32; 2]>,
+    pub shadow_size: Option<f32>,
     pub border_width: Option<f32>,
     pub radius: Option<f32>,
     pub padding: Option<[f32; 2]>,
@@ -357,6 +363,16 @@ impl Look {
             ),
             ("border", self.border.is_some(), color(now.border)),
             ("shadow", self.shadow.is_some(), color(now.shadow)),
+            (
+                "shadow_offset",
+                self.shadow_offset.is_some(),
+                format!("[{}, {}]", now.shadow_offset[0], now.shadow_offset[1]),
+            ),
+            (
+                "shadow_size",
+                self.shadow_size.is_some(),
+                now.shadow_size.to_string(),
+            ),
             (
                 "border_width",
                 self.border_width.is_some(),
@@ -450,7 +466,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             font: "sans-serif:bold".into(),
-            size: 13.0,
+            size: 11.0,
             gradient: Gradient::Hint,
             text: Color::rgba(0, 0, 0, 0xff),
             text_end: None,
@@ -462,9 +478,11 @@ impl Default for Style {
             background_direction: Direction::Bottom,
             border: Color::rgba(0x85, 0x86, 0x5b, 0xff),
             shadow: Color::rgba(0, 0, 0, 0x40),
+            shadow_offset: [0, 2],
+            shadow_size: 3.0,
             border_width: 1.0,
             radius: 3.0,
-            padding: [1.0, 4.0],
+            padding: [1.0, 3.0],
             position: Position::default(),
             max_cover: 50,
             offset: [0, 0],
@@ -513,6 +531,8 @@ impl Style {
             background_end: self.background_end.filter(|_| p.background.is_none()),
             border: p.border.unwrap_or(self.border),
             shadow: p.shadow.unwrap_or(self.shadow),
+            shadow_offset: p.shadow_offset.unwrap_or(self.shadow_offset),
+            shadow_size: p.shadow_size.unwrap_or(self.shadow_size),
             border_width: p.border_width.unwrap_or(self.border_width),
             radius: p.radius.unwrap_or(self.radius),
             padding: p.padding.unwrap_or(self.padding),
@@ -528,6 +548,7 @@ impl Style {
         let lengths = [
             ("border_width", self.border_width),
             ("radius", self.radius),
+            ("shadow_size", self.shadow_size),
             ("padding", self.padding[0]),
             ("padding", self.padding[1]),
         ];
@@ -536,9 +557,14 @@ impl Style {
                 bail!("[{table}] {name}: {value} px is outside 0-100");
             }
         }
-        for value in self.offset {
-            if !(-OFFSET..=OFFSET).contains(&value) {
-                bail!("[{table}] offset: {value} px is outside -{OFFSET} to {OFFSET}");
+        for (name, offset) in [
+            ("offset", self.offset),
+            ("shadow_offset", self.shadow_offset),
+        ] {
+            for value in offset {
+                if !(-OFFSET..=OFFSET).contains(&value) {
+                    bail!("[{table}] {name}: {value} px is outside -{OFFSET} to {OFFSET}");
+                }
             }
         }
         if self.font.trim().is_empty() {
@@ -622,6 +648,16 @@ impl Style {
             let _ = writeln!(out, "{name} = \"{color}\"{what}");
         }
         let _ = writeln!(out, "border_width = {}", self.border_width);
+        let _ = writeln!(
+            out,
+            "shadow_offset = [{}, {}]   # right, down in logical pixels",
+            self.shadow_offset[0], self.shadow_offset[1]
+        );
+        let _ = writeln!(
+            out,
+            "shadow_size = {}   # outward fade distance; 0 gives a hard edge",
+            self.shadow_size
+        );
         let _ = writeln!(out, "radius = {}", self.radius);
         let _ = writeln!(
             out,
@@ -651,6 +687,8 @@ pub struct Input {
     /// Whether the overlay draws the box's first line. Hidden, it's still
     /// sent to a listener (`feed.rs`).
     pub visible: bool,
+    /// Hide the first line after this much inactivity; zero keeps it visible.
+    pub autohide: Duration,
     /// Whether typed tag letters show here, and leave the tags.
     pub hints: bool,
     pub prefix: String,
@@ -661,17 +699,26 @@ pub struct Input {
 }
 
 impl Input {
-    /// Keep the tags' colours and font, centred near the screen's bottom.
+    /// A dark input box near the top, with the hints' font.
     pub fn new(tags: &Style) -> Self {
         Self {
             visible: true,
             hints: true,
+            autohide: Duration::from_secs(3),
             prefix: String::new(),
             suffix: String::new(),
-            placeholder: "text".into(),
+            placeholder: String::new(),
             style: Style {
-                position: Position::Bottom,
-                offset: [0, -48],
+                size: 13.0,
+                text: Color::rgba(0xe8, 0xdc, 0xc4, 0xff),
+                dimmed: Color::rgba(0xe8, 0xdc, 0xc4, 0x66),
+                verb: Color::rgba(0xfa, 0xb3, 0x87, 0xff),
+                background: Color::rgba(0x1e, 0x1e, 0x2e, 0xa8),
+                border: Color::rgba(0xd0, 0xd0, 0xd0, 0xff),
+                border_width: 0.0,
+                padding: [5.0, 8.0],
+                position: Position::Top,
+                offset: [0, 40],
                 ..tags.clone()
             },
         }
@@ -685,11 +732,13 @@ impl Input {
         format!(
             "\n{header}   # what's typed, and [messages]'s messages under it\n\
              visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
+             autohide = {}   # seconds without typing; 0 disables hiding\n\
              show_typed_hints = {}   # typed tag letters show here, and leave the tags\n\
              placeholder = {}   # shown while nothing is typed in text mode\n\
              prefix = {}   # before the query, as \"find: \"\n\
              suffix = {}   # after the query, before the match count\n{fields}",
             self.visible,
+            self.autohide.as_secs(),
             self.hints,
             quote(&self.placeholder),
             quote(&self.prefix),
@@ -703,6 +752,8 @@ impl Input {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Notice {
+    /// The current match and total count, or a pending search.
+    Info,
     /// The windows are being read, and it's taking a while.
     Scanning,
     /// Nothing on the monitor has a tag.
@@ -713,14 +764,15 @@ pub enum Notice {
     Help,
 }
 
-/// `[messages]`: which messages the input box's second line shows, for how
-/// long, and in which colours.
+/// `[messages]`: which messages the input box's second line shows and in which colours.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // independent switches, as the file has them
 pub struct Info {
     /// Whether the overlay draws the messages. Hidden, they're still
     /// sent to a listener (`feed.rs`).
     pub visible: bool,
+    /// Message text and icon size, independent of the typed input.
+    pub size: f32,
     /// `scanning`, once a scan takes long enough to notice.
     pub scanning: bool,
     /// `no targets`, while nothing on the monitor has a tag.
@@ -728,7 +780,7 @@ pub struct Info {
     /// A key that matches no tag, or a character no text: the key is
     /// dropped, and the box says so.
     pub no_match: bool,
-    /// How long a message stays.
+    /// Legacy timeout, kept for configuration compatibility; errors follow their condition.
     pub duration: Duration,
     /// A fontconfig pattern for the icons: a Nerd Font's symbols.
     pub icon_font: String,
@@ -746,6 +798,7 @@ pub struct Badge {
 /// Each message's badge.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Badges {
+    pub info: Badge,
     pub scanning: Badge,
     pub no_targets: Badge,
     pub no_match: Badge,
@@ -753,7 +806,7 @@ pub struct Badges {
 }
 
 impl Default for Info {
-    /// Every message on, for two seconds, with Font Awesome's search, ban,
+    /// Every message on, with Font Awesome's search, ban,
     /// times-circle and keyboard glyphs in blue, yellow, red and lavender.
     fn default() -> Self {
         let badge = |icon: char, r, g, b| Badge {
@@ -762,12 +815,14 @@ impl Default for Info {
         };
         Self {
             visible: true,
+            size: 13.0,
             scanning: true,
             no_targets: true,
             no_match: true,
             duration: Duration::from_millis(2000),
             icon_font: "Symbols Nerd Font".into(),
             badges: Badges {
+                info: badge('\u{f05a}', 0x89, 0xb4, 0xfa),
                 scanning: badge('\u{f002}', 0x89, 0xb4, 0xfa),
                 no_targets: badge('\u{f05e}', 0xf9, 0xe2, 0xaf),
                 no_match: badge('\u{f057}', 0xf3, 0x8b, 0xa8),
@@ -780,6 +835,7 @@ impl Default for Info {
 impl Info {
     pub const fn badge(&self, notice: Notice) -> &Badge {
         match notice {
+            Notice::Info => &self.badges.info,
             Notice::Scanning => &self.badges.scanning,
             Notice::NoTargets => &self.badges.no_targets,
             Notice::NoMatch => &self.badges.no_match,
@@ -793,12 +849,14 @@ impl Info {
         let mut out = format!(
             "\n[messages]   # the input box's second line: what wayhint has to say\n\
              visible = {}   # false: not drawn, still sent to a listener such as a bar\n\
+             size = {}   # message text and icon size in logical pixels\n\
              scanning = {}   # once a scan takes over half a second\n\
              no_targets = {}   # while nothing on the monitor has a tag\n\
              no_match = {}   # report a tag key or query that matches nothing\n\
-             duration_ms = {}   # message lifetime\n\
+             duration_ms = {}   # legacy setting; errors remain until resolved\n\
              icon_font = {}   # a fontconfig pattern for the icons: a Nerd Font's symbols\n",
             self.visible,
+            self.size,
             self.scanning,
             self.no_targets,
             self.no_match,
@@ -807,6 +865,7 @@ impl Info {
         );
         let b = &self.badges;
         for (name, badge) in [
+            ("info", &b.info),
             ("scanning", &b.scanning),
             ("no_targets", &b.no_targets),
             ("no_match", &b.no_match),
@@ -888,18 +947,18 @@ pub enum StartMark {
 }
 
 impl Starts {
-    /// Off; when enabled, blue with a 2 px underline height or dot diameter.
+    /// Off; when enabled, teal with a 1 px underline height or dot diameter.
     pub const fn new() -> Self {
         Self {
             mark: StartMark::Off,
-            thickness: 2.0,
+            thickness: 1.0,
             look: Mark {
-                background: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
+                background: Color::rgba(0x94, 0xe2, 0xd5, 0xff),
                 background_end: None,
                 background_direction: Direction::Right,
                 border: Color::rgba(0x89, 0xb4, 0xfa, 0xff),
-                border_width: 0.0,
-                radius: 2.0,
+                border_width: 1.0,
+                radius: 3.0,
                 padding: [0.0, 1.0],
             },
         }
@@ -948,25 +1007,24 @@ impl Starts {
 }
 
 impl Mark {
-    /// The default for every match: neon yellow, half see-through, with no
-    /// border, and the tags' radius and padding.
+    /// A faint teal fill and outline, close to the matched text.
     pub const fn new(style: &Style) -> Self {
         Self {
-            background: Color::rgba(0xff, 0xff, 0x00, 0x80),
+            background: Color::rgba(0x94, 0xe2, 0xd5, 0x22),
             background_end: None,
             background_direction: Direction::Right,
-            border: style.border,
-            border_width: 0.0,
+            border: Color::rgba(0x94, 0xe2, 0xd5, 0x88),
+            border_width: 1.0,
             radius: style.radius,
-            padding: style.padding,
+            padding: [0.0, 2.0],
         }
     }
 
-    /// The default for the current match, from every match's: the same in
-    /// orange, as browsers mark the current match of a search.
+    /// The current match has a stronger teal fill and outline.
     pub const fn for_current(self) -> Self {
         Self {
-            background: Color::rgba(0xff, 0x96, 0x32, 0x80),
+            background: Color::rgba(0x94, 0xe2, 0xd5, 0x88),
+            border: Color::rgba(0x94, 0xe2, 0xd5, 0xcc),
             ..self
         }
     }
@@ -1057,16 +1115,20 @@ mod tests {
     }
 
     #[test]
-    fn matches_are_yellow_and_the_current_one_orange_by_default() {
+    fn matches_are_teal_and_the_current_one_has_a_stronger_fill_and_border() {
         let all = Mark::new(&Style::default());
-        assert_eq!(all.background, Color::rgba(0xff, 0xff, 0x00, 0x80));
-        assert!(all.border_width.abs() < f32::EPSILON, "no border");
+        assert_eq!(all.background, Color::rgba(0x94, 0xe2, 0xd5, 0x22));
+        assert_eq!(all.border, Color::rgba(0x94, 0xe2, 0xd5, 0x88));
+        assert!((all.border_width - 1.0).abs() < f32::EPSILON);
+        assert_eq!(all.padding, [0.0, 2.0]);
         let current = all.for_current();
-        assert_eq!(current.background, Color::rgba(0xff, 0x96, 0x32, 0x80));
+        assert_eq!(current.background, Color::rgba(0x94, 0xe2, 0xd5, 0x88));
+        assert_eq!(current.border, Color::rgba(0x94, 0xe2, 0xd5, 0xcc));
         assert_eq!(
             current,
             Mark {
                 background: current.background,
+                border: current.border,
                 ..all
             }
         );

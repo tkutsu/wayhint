@@ -1,6 +1,223 @@
 use super::*;
 
 #[test]
+#[ignore = "briefly shows the live overlay and grabs the keyboard; run alone"]
+fn scroll_keys_act_on_press_and_remain_held_until_release() -> Result<()> {
+    let monitors = desktop::monitors()?;
+    let monitor = monitors
+        .iter()
+        .find(|m| m.focused)
+        .context("no focused monitor")?;
+    let conn = Connection::connect_to_env()?;
+    let style = Style::default();
+    let mut overlay = Overlay::new(
+        &conn,
+        &style,
+        &Marks::new(&style),
+        &Input::new(&style),
+        &Info::default(),
+        monitor,
+    )?;
+    let generation = overlay.state.gate.redrawn();
+    overlay.state.gate.synced(generation);
+    let code = KeyCode::PAGE_DOWN;
+    overlay.state.key(code.evdev(), true);
+    let event = overlay.next_event(Some(Instant::now() + Duration::from_millis(30)))?;
+    anyhow::ensure!(
+        matches!(event, Some(Event::Key(key, _)) if key.code == code),
+        "a held scroll key must act before release; got {event:?}"
+    );
+    overlay.state.key(code.evdev(), false);
+    Ok(())
+}
+
+#[test]
+#[ignore = "briefly shows the live overlay and grabs the keyboard; run alone"]
+fn holding_a_typed_key_repeats_until_release() -> Result<()> {
+    check_typed_key_repeat(false)
+}
+
+#[test]
+#[ignore = "briefly takes live keyboard focus; run alone"]
+fn holding_a_typed_key_repeats_with_keyboard_focus() -> Result<()> {
+    check_typed_key_repeat(true)
+}
+
+/// Exercise the real key dispatcher and event-loop timer in both keyboard modes.
+fn check_typed_key_repeat(fallback: bool) -> Result<()> {
+    let monitors = desktop::monitors()?;
+    let monitor = monitors
+        .iter()
+        .find(|m| m.focused)
+        .context("no focused monitor")?;
+    let conn = Connection::connect_to_env()?;
+    let style = Style::default();
+    let mut overlay = Overlay::new(
+        &conn,
+        &style,
+        &Marks::new(&style),
+        &Input::new(&style),
+        &Info::default(),
+        monitor,
+    )?;
+    if fallback {
+        overlay.release_keyboard()?;
+        overlay.state.input_methods = None;
+        overlay.grab_keyboard()?;
+    }
+    anyhow::ensure!(
+        matches!(&overlay.state.grab, Grab::Exclusive) == fallback,
+        "the test must use its requested keyboard route"
+    );
+    overlay.start_typing()?;
+    let generation = overlay.state.gate.redrawn();
+    overlay.state.gate.synced(generation);
+    let code = KeyCode::from_evdev(30);
+    overlay.state.key(code.evdev(), true);
+    let deadline = Instant::now() + Duration::from_millis(800);
+    let mut typed = String::new();
+    while let Some(event) = overlay.next_event(Some(deadline))? {
+        if let Event::Typed(key, _, Some(ch)) = event
+            && key.code == code
+        {
+            typed.push(ch);
+            if typed.chars().count() >= 3 {
+                break;
+            }
+        }
+    }
+    overlay.state.key(code.evdev(), false);
+    anyhow::ensure!(
+        typed.chars().count() >= 3,
+        "holding a typed key produced only {typed:?}"
+    );
+    let after_release = overlay.next_event(Some(Instant::now() + Duration::from_millis(100)))?;
+    anyhow::ensure!(
+        !matches!(after_release, Some(Event::Typed(..))),
+        "release must stop repeat"
+    );
+
+    let later = Instant::now() + Duration::from_secs(1);
+    overlay.state.key(KeyCode::BACKSPACE.evdev(), true);
+    anyhow::ensure!(
+        matches!(overlay.state.repeat_due(later), Some(Event::Typed(key, _, None)) if key.code == KeyCode::BACKSPACE),
+        "held Backspace must repeat too"
+    );
+    overlay.state.key(KeyCode::BACKSPACE.evdev(), false);
+    anyhow::ensure!(
+        overlay.state.repeat_due(later).is_none(),
+        "Backspace release stops repeat"
+    );
+
+    overlay.state.events.clear();
+    overlay.state.key(code.evdev(), true);
+    overlay.state.pressed = 1;
+    anyhow::ensure!(
+        matches!(overlay.state.repeat_due(later), Some(Event::Typed(key, _, Some('A'))) if key.shift),
+        "repeat must use the current Shift state"
+    );
+    overlay.state.key(code.evdev(), false);
+    overlay.state.pressed = 0;
+
+    overlay.state.key(KeyCode::ENTER.evdev(), true);
+    anyhow::ensure!(
+        overlay.state.repeat.next().is_none(),
+        "Enter must never repeat"
+    );
+    overlay.state.key(KeyCode::ENTER.evdev(), false);
+
+    overlay.state.key(code.evdev(), true);
+    overlay.new_tags();
+    anyhow::ensure!(
+        overlay.state.repeat_due(later).is_none(),
+        "new tags cancel repeat"
+    );
+    overlay.state.key(code.evdev(), false);
+    let generation = overlay.state.gate.redrawn();
+    overlay.state.gate.synced(generation);
+    overlay.state.key(code.evdev(), true);
+    overlay.stop_typing();
+    anyhow::ensure!(
+        overlay.state.repeat.next().is_none(),
+        "leaving text mode cancels repeat"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "briefly shows the live overlay and grabs the keyboard; run alone"]
+fn input_autohide_redraws_without_an_event_and_preserves_messages() -> Result<()> {
+    let monitors = desktop::monitors()?;
+    let monitor = monitors
+        .iter()
+        .find(|m| m.focused)
+        .context("no focused monitor")?;
+    let conn = Connection::connect_to_env()?;
+    let style = Style::default();
+    let mut input = Input::new(&style);
+    input.autohide = Duration::from_millis(30);
+    let mut overlay = Overlay::new(
+        &conn,
+        &style,
+        &Marks::new(&style),
+        &input,
+        &Info::default(),
+        monitor,
+    )?;
+    overlay.release_keyboard()?;
+    let frame = Frame {
+        status: Status {
+            input: "typed query".into(),
+            info: Status::saying(crate::style::Notice::NoMatch, "small error").info,
+            ..Status::plain("typed query")
+        },
+        ..Frame::default()
+    };
+    overlay.update(&frame)?;
+    let shown = overlay.pixmap.clone();
+    let deadline = Instant::now() + Duration::from_millis(80);
+    while Instant::now() < deadline {
+        overlay.next_event(Some(deadline))?;
+    }
+    anyhow::ensure!(
+        overlay.autohide.hidden,
+        "the idle wait must expire the timer"
+    );
+    anyhow::ensure!(
+        overlay.frame.status.input == "typed query",
+        "the query stays active"
+    );
+    anyhow::ensure!(shown.data() != overlay.pixmap.data(), "timeout must redraw");
+    let mut expected = overlay.pixmap.clone();
+    overlay.painter.paint(
+        &mut expected,
+        &Frame {
+            status: frame.status.visible(false, true),
+            ..Frame::default()
+        },
+    );
+    anyhow::ensure!(
+        expected.data() == overlay.pixmap.data(),
+        "the message remains drawn"
+    );
+    overlay.state.events.push_back(Event::Typed(
+        Key {
+            code: KeyCode::BACKSPACE,
+            shift: false,
+        },
+        Mods::NONE,
+        None,
+    ));
+    overlay.next_event(Some(Instant::now() + Duration::from_millis(10)))?;
+    anyhow::ensure!(!overlay.autohide.hidden, "typing reveals the input");
+    anyhow::ensure!(
+        shown.data() == overlay.pixmap.data(),
+        "the full input is restored"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "briefly grabs the keyboard and moves the live pointer without clicking; run alone"]
 fn releasing_an_arrow_interrupts_an_active_nudge() -> Result<()> {
     use crate::pointer::Pointer;

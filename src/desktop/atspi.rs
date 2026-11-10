@@ -751,14 +751,7 @@ impl<'c> Walk<'c> {
     /// every app: GTK4 has no screen coordinates for text.
     async fn text_frame(&self, object: &ObjectId) -> (CoordType, Point) {
         let window = (CoordType::Window, Point::default());
-        let root = ObjectId {
-            bus: object.bus.clone(),
-            path: "/org/a11y/atspi/accessible/root".into(),
-        };
-        let Ok(app) = self.proxy::<ApplicationProxy>(&root).await else {
-            return window;
-        };
-        if self.call(app.toolkit_name()).await.ok().as_deref() != Some("Chromium") {
+        if self.toolkit_name(object).await.as_deref() != Some("Chromium") {
             return window;
         }
         let (on_window, on_screen) = tokio::join!(
@@ -769,6 +762,16 @@ impl<'c> Walk<'c> {
             (Ok(w), Ok(s)) => (CoordType::Screen, Point::new(w.x - s.x, w.y - s.y)),
             _ => window,
         }
+    }
+
+    /// The app's toolkit, to keep its coordinate and range quirks local.
+    async fn toolkit_name(&self, object: &ObjectId) -> Option<String> {
+        let root = ObjectId {
+            bus: object.bus.clone(),
+            path: "/org/a11y/atspi/accessible/root".into(),
+        };
+        let app = self.proxy::<ApplicationProxy>(&root).await.ok()?;
+        self.call(app.toolkit_name()).await.ok()
     }
 
     /// Name, box and action names of one candidate.
@@ -930,12 +933,23 @@ impl<'c> Walk<'c> {
         };
         let text = &text;
         let (coords, shift) = self.text_frame(object).await;
+        let (mut from, end) = (offset(start), offset(end));
+        // GTK 4.24 subtracts one from an exclusive endpoint and reports an
+        // empty character box. Probe the single-character range so corrected
+        // GTK versions and other toolkits keep their normal endpoints.
+        let single = self
+            .call(text.get_range_extents(from, from.saturating_add(1), coords))
+            .await
+            .ok();
+        let extra = i32::from(
+            matches!(single, Some((_, _, 0, 0)))
+                && self.toolkit_name(object).await.as_deref() == Some("GTK"),
+        );
         let range = move |from: i32, to: i32| async move {
-            let request = text.get_range_extents(from, to, coords);
+            let request = text.get_range_extents(from, to.saturating_add(extra), coords);
             let (x, y, w, h) = self.call(request).await.ok()?;
             Some(Rect::new(x, y, w, h).offset(shift)).filter(|r| !r.is_empty())
         };
-        let (mut from, end) = (offset(start), offset(end));
         let mut parts = Vec::new();
         for _ in 0..MAX_LINES {
             let (whole, first) = tokio::join!(
@@ -944,6 +958,11 @@ impl<'c> Walk<'c> {
             );
             let Some(whole) = whole else { break };
             let line = first.map_or(0, |(_, _, _, h)| h);
+            let line = if line <= 0 && extra != 0 {
+                range(from, from.saturating_add(1)).await.map_or(0, |r| r.h)
+            } else {
+                line
+            };
             let wrapped = line > 0 && whole.h * 2 > line * 3;
             let line_end = if wrapped {
                 self.call(text.get_string_at_offset(from, Granularity::Line))
@@ -1110,6 +1129,113 @@ fn start_time(stat: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RangeApp(&'static str);
+
+    #[zbus::interface(name = "org.a11y.atspi.Application")]
+    impl RangeApp {
+        #[zbus(property)]
+        fn toolkit_name(&self) -> &str {
+            self.0
+        }
+    }
+
+    struct RangeText {
+        missing_last: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Text")]
+    impl RangeText {
+        fn get_range_extents(&self, start: i32, end: i32, coords: u32) -> (i32, i32, i32, i32) {
+            assert_eq!(coords, CoordType::Window as u32);
+            let end = (end - i32::from(self.missing_last)).max(start);
+            if start == end {
+                return (0, 0, 0, 0);
+            }
+            if start / 5 == (end - 1) / 5 {
+                (start % 5 * 8, start / 5 * 20, (end - start) * 8, 20)
+            } else {
+                (0, start / 5 * 20, 40, ((end - 1) / 5 - start / 5 + 1) * 20)
+            }
+        }
+
+        fn get_character_extents(&self, at: i32, coords: u32) -> (i32, i32, i32, i32) {
+            assert_eq!(coords, CoordType::Window as u32);
+            if self.missing_last {
+                (0, 0, 0, 0)
+            } else {
+                (at % 5 * 8, at / 5 * 20, 8, 20)
+            }
+        }
+
+        #[allow(clippy::unused_self)] // D-Bus interface methods require a receiver.
+        fn get_string_at_offset(&self, at: i32, granularity: u32) -> (String, i32, i32) {
+            assert_eq!(granularity, Granularity::Line as u32);
+            ("abcde".into(), at / 5 * 5, (at / 5 + 1) * 5)
+        }
+    }
+
+    /// Exercise the real AT-SPI calls against GTK's broken and corrected endpoints.
+    #[test]
+    #[ignore = "requires a session bus: dbus-run-session -- cargo test text_range_endpoints -- --ignored"]
+    fn text_range_endpoints() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for (toolkit, missing_last) in [
+                    ("GTK", true),
+                    ("GTK", false),
+                    ("Other", true),
+                    ("Other", false),
+                ] {
+                    let service = zbus::connection::Builder::session()
+                        .unwrap()
+                        .serve_at("/org/a11y/atspi/accessible/root", RangeApp(toolkit))
+                        .unwrap()
+                        .serve_at("/text", RangeText { missing_last })
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    let client = zbus::Connection::session().await.unwrap();
+                    let known = RefCell::default();
+                    let pids = RefCell::default();
+                    let walk = Walk::new(
+                        &client,
+                        &known,
+                        &pids,
+                        Instant::now() + Duration::from_secs(5),
+                    );
+                    let object = ObjectId {
+                        bus: service.unique_name().unwrap().to_string(),
+                        path: "/text".into(),
+                    };
+                    if toolkit == "Other" && missing_last {
+                        assert_eq!(walk.locate(&object, 0, 1).await, Vec::<Rect>::new());
+                        assert_eq!(walk.locate(&object, 0, 3).await, [Rect::new(0, 0, 16, 20)]);
+                        continue;
+                    }
+                    for (start, end, expected) in [
+                        (0, 1, vec![Rect::new(0, 0, 8, 20)]),
+                        (0, 3, vec![Rect::new(0, 0, 24, 20)]),
+                        (7, 10, vec![Rect::new(16, 20, 24, 20)]),
+                        (
+                            3,
+                            8,
+                            vec![Rect::new(24, 0, 16, 20), Rect::new(0, 20, 24, 20)],
+                        ),
+                    ] {
+                        assert_eq!(
+                            walk.locate(&object, start, end).await,
+                            expected,
+                            "{toolkit}, missing_last={missing_last}, {start}..{end}"
+                        );
+                    }
+                }
+            });
+    }
 
     #[test]
     fn start_time_is_field_22_even_with_spaces_in_the_name() {

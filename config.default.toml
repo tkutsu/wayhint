@@ -34,7 +34,7 @@
 # window_hint = true  # Add a window-focus tag without an arrow; hide it while a verb is armed. Default: true.
 # hide_hidden = true  # Omit fully transparent controls when the app reports opacity; keep unknowns. Default: true.
 # font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: "sans-serif:bold".
-# size = 13  # Font size in logical pixels. Default: 13.
+# size = 11  # Font size in logical pixels. Default: 11.
 # gradient = "hint"  # Use hint for gradients inside each tag, or global across each monitor. Default: "hint".
 # text = "#000000ff"  # Text color. Default: "#000000ff".
 # text_end = "#000000ff"  # Text gradient end color; omit for solid text. Default: unset (solid hints.text).
@@ -48,9 +48,11 @@
 # Directions: left, right, top, bottom, or a corner.
 # border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: "#85865bff".
 # shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: "#00000040".
+# shadow_offset = [0, 2]  # Shadow displacement: [right, down] logical pixels. Default: [0, 2].
+# shadow_size = 3  # Outward fade distance in logical pixels; 0 gives a hard edge. Default: 3.
 # border_width = 1  # Border width in logical pixels; 0 removes the border. Default: 1.
 # radius = 3  # Corner radius in logical pixels. Default: 3.
-# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: [1, 4].
+# padding = [1, 3]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: [1, 3].
 # position = "auto"  # Place tags beside targets with auto, or at center, an edge or a corner. Default: "auto".
 # max_cover = 50  # Maximum percent of a neighboring target or hint covered by a tag, from 0 to 100. Default: 50.
 # Other positions: center, top, bottom, left, right, or a corner such as top-left.
@@ -66,16 +68,18 @@
 [hints.pixels]
 # Pixel hints inherit [hints], with dark teal text unless a text gradient is set.
 # font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: inherit hints.font.
-# size = 13  # Font size in logical pixels. Default: inherit hints.size.
+# size = 11  # Font size in logical pixels. Default: inherit hints.size.
 # text = "#155e63ff"  # Text color; setting it replaces the inherited gradient with a solid color. Default: dark teal (#155e63ff), or inherit hints.text when a text gradient is set.
 # dimmed = "#00000066"  # Color of typed tag letters. Default: inherit hints.dimmed.
 # verb = "#9a3412ff"  # Color of the armed verb or drop action. Default: inherit hints.verb.
 # background = "#ffffc2ff"  # Background color; setting it replaces the inherited gradient with a solid color. Default: inherit hints.background.
 # border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: inherit hints.border.
 # shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: inherit hints.shadow.
+# shadow_offset = [0, 2]  # Shadow displacement: [right, down] logical pixels. Default: inherit hints.shadow_offset.
+# shadow_size = 3  # Outward fade distance; 0 gives a hard edge. Default: inherit hints.shadow_size.
 # border_width = 1  # Border width in logical pixels; 0 removes the border. Default: inherit hints.border_width.
 # radius = 3  # Corner radius in logical pixels. Default: inherit hints.radius.
-# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
+# padding = [1, 3]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
 
 [words]
 # scripts = ["Latin"]  # Unicode writing systems that need no fallback hint. Default: ["Latin"].
@@ -87,68 +91,74 @@
 # icon_names = false  # Search icon buttons by their accessibility names. Default: false.
 
 [words.matches]
-# Match boxes inherit radius and padding from [hints].
-# background = "#ffff0080"  # Text-match background fill color. Default: "#ffff0080".
-# background_end = "#ffff0080"  # Match background gradient end color; omit for a solid fill. Default: unset (solid words.matches.background).
+# Match boxes inherit radius from [hints], with their own teal colors and padding.
+# background = "#94e2d522"  # Text-match background fill color. Default: "#94e2d522".
+# background_end = "#94e2d522"  # Match background gradient end color; omit for a solid fill. Default: unset (solid words.matches.background).
 # background_direction = "right"  # Match background gradient direction across each monitor. Default: "right".
-# border = "#85865bff"  # Match outline color; border_width controls whether it is drawn. Default: inherit hints.border.
-# border_width = 0  # Match outline width in logical pixels; 0 removes the outline. Default: 0.
+# border = "#94e2d588"  # Match outline color; border_width controls whether it is drawn. Default: "#94e2d588".
+# border_width = 1  # Match outline width in logical pixels; 0 removes the outline. Default: 1.
 # radius = 3  # Match corner radius in logical pixels. Default: inherit hints.radius.
-# padding = [1, 4]  # Match padding in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
+# padding = [0, 2]  # Match padding in logical pixels: [vertical, horizontal]. Default: [0, 2].
 
 [words.matches.current]
-# Inherits [words.matches], with an orange starting color.
+# Inherits [words.matches], with a stronger teal fill and outline.
 # An explicit background replaces the inherited gradient unless background_end is set.
-# background = "#ff963280"  # Selected text-match background fill color. Default: "#ff963280".
-# background_end = "#ff963280"  # Selected match background gradient end color; omit for a solid fill. Default: inherit words.matches.background_end unless current.background is set.
+# background = "#94e2d588"  # Selected text-match background fill color. Default: "#94e2d588".
+# background_end = "#94e2d588"  # Selected match background gradient end color; omit for a solid fill. Default: inherit words.matches.background_end unless current.background is set.
 # background_direction = "right"  # Selected match background gradient direction across each monitor. Default: inherit words.matches.background_direction.
-# border = "#85865bff"  # Selected match outline color; border_width controls whether it is drawn. Default: inherit words.matches.border.
-# border_width = 0  # Selected match outline width in logical pixels; 0 removes the outline. Default: inherit words.matches.border_width.
+# border = "#94e2d5cc"  # Selected match outline color; border_width controls whether it is drawn. Default: "#94e2d5cc", or an explicit words.matches.border.
+# border_width = 1  # Selected match outline width in logical pixels; 0 removes the outline. Default: inherit words.matches.border_width.
 # radius = 3  # Selected match corner radius in logical pixels. Default: inherit words.matches.radius.
-# padding = [1, 4]  # Selected match padding in logical pixels: [vertical, horizontal]. Default: inherit words.matches.padding.
+# padding = [0, 2]  # Selected match padding in logical pixels: [vertical, horizontal]. Default: inherit words.matches.padding.
 
 [words.first_character]
 # First letters at match_start boundaries are marked while no query is typed.
 # mark = "off"  # Mark word initials while the query is empty: off, underline, box or dot. Default: "off".
-# color = "#89b4faff"  # Fill color shared by underline, box and dot marks. Default: "#89b4faff".
-# color_end = "#89b4faff"  # Fill gradient end color; omit for a solid fill. Default: unset (solid words.first_character.color).
+# color = "#94e2d5ff"  # Fill color shared by underline, box and dot marks. Default: "#94e2d5ff".
+# color_end = "#94e2d5ff"  # Fill gradient end color; omit for a solid fill. Default: unset (solid words.first_character.color).
 # direction = "right"  # Fill gradient direction across each monitor. Default: "right".
-# thickness = 2  # Underline height or dot diameter in logical pixels; dots sit 1 px below. Default: 2.
+# thickness = 1  # Underline height or dot diameter in logical pixels; dots sit 1 px below. Default: 1.
 # These fields apply only to boxes:
 # border = "#89b4faff"  # Box outline color; applies only when mark is box. Default: "#89b4faff".
-# border_width = 0  # Box outline width in logical pixels; 0 removes it. Default: 0.
-# radius = 2  # Box corner radius in logical pixels. Default: 2.
+# border_width = 1  # Box outline width in logical pixels; 0 removes it. Default: 1.
+# radius = 3  # Box corner radius in logical pixels. Default: 3.
 # padding = [0, 1]  # Box padding in logical pixels: [vertical, horizontal]. Default: [0, 1].
 
 [input]
-# The input box inherits its appearance from [hints], with its own screen position.
+# The input box has a dark theme at the top; font, radius and shadow inherit [hints].
 # visible = true  # Draw the input box; false still sends updates to a listening bar. Default: true.
+# autohide = 3  # Hide typed input after this many seconds without typing; 0 disables hiding. Default: 3.
 # show_typed_hints = true  # Show typed tag letters here and remove them from the tags. Default: true.
-# placeholder = "text"  # Text shown while the query is empty; an empty string hides the idle input. Default: "text".
+# placeholder = ""  # Text shown while the query is empty; an empty string hides the idle input. Default: "".
 # prefix = ""  # Text before the query, such as "find: ". Default: "".
 # suffix = ""  # Text after the query and before the match count. Default: "".
 # font = "sans-serif:bold"  # Fontconfig pattern used to draw text. Default: inherit hints.font.
-# size = 13  # Font size in logical pixels. Default: inherit hints.size.
-# text = "#000000ff"  # Text color. Default: inherit hints.text.
-# dimmed = "#00000066"  # Placeholder and dimmed-text color. Default: inherit hints.dimmed.
-# verb = "#9a3412ff"  # Color of the armed verb or drop action. Default: inherit hints.verb.
-# background = "#ffffc2ff"  # Background fill color. Default: inherit hints.background.
-# border = "#85865bff"  # Border color; border_width controls whether it is drawn. Default: inherit hints.border.
+# size = 13  # Font size in logical pixels. Default: 13.
+# text = "#e8dcc4ff"  # Text color. Default: "#e8dcc4ff".
+# dimmed = "#e8dcc466"  # Placeholder and dimmed-text color. Default: "#e8dcc466".
+# verb = "#fab387ff"  # Color of the armed verb or drop action. Default: "#fab387ff".
+# background = "#1e1e2ea8"  # Background fill color. Default: "#1e1e2ea8".
+# border = "#d0d0d0ff"  # Border color; border_width controls whether it is drawn. Default: "#d0d0d0ff".
 # shadow = "#00000040"  # Soft shadow color; zero alpha disables the shadow. Default: inherit hints.shadow.
-# border_width = 1  # Border width in logical pixels; 0 removes the border. Default: inherit hints.border_width.
+# shadow_offset = [0, 2]  # Shadow displacement: [right, down] logical pixels. Default: inherit hints.shadow_offset.
+# shadow_size = 3  # Outward fade distance; 0 gives a hard edge. Default: inherit hints.shadow_size.
+# border_width = 0  # Border width in logical pixels; 0 removes the border. Default: 0.
 # radius = 3  # Corner radius in logical pixels. Default: inherit hints.radius.
-# padding = [1, 4]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: inherit hints.padding.
-# position = "bottom"  # Screen anchor: center, an edge or a corner; auto is unavailable. Default: "bottom".
-# offset = [0, -48]  # Move the input from its anchor by [right, down] logical pixels. Default: [0, -48].
+# padding = [5, 8]  # Inside spacing in logical pixels: [vertical, horizontal]. Default: [5, 8].
+# position = "top"  # Screen anchor: center, an edge or a corner; auto is unavailable. Default: "top".
+# offset = [0, 40]  # Move the input from its anchor by [right, down] logical pixels. Default: [0, 40].
 
 [messages]
 # Status messages appear below the input. Visibility is independent of [input].
 # visible = true  # Draw status messages; false still sends updates to a listening bar. Default: true.
+# size = 13  # Message text and icon size in logical pixels, independent of input.size. Default: 13.
 # scanning = true  # Show a scanning message when a scan takes over half a second. Default: true.
 # no_targets = true  # Show a message when no targets are available on the monitor. Default: true.
 # no_match = true  # Show a message when a tag key or query matches nothing. Default: true.
-# duration_ms = 2000  # Status-message lifetime in milliseconds. Default: 2000.
+# duration_ms = 2000  # Legacy setting, accepted for compatibility; errors remain until resolved.
 # icon_font = "Symbols Nerd Font"  # Fontconfig pattern used for message icons. Default: "Symbols Nerd Font".
+# info_icon = "\uF05A"  # Match-count info icon; use an empty string for no icon. Default: "\uF05A".
+# info_color = "#89b4faff"  # Match-count info color. Default: "#89b4faff".
 # scanning_icon = "\uF002"  # Scanning icon; use an empty string for no icon. Default: "\uF002".
 # scanning_color = "#89b4faff"  # Scanning-message color. Default: "#89b4faff".
 # no_targets_icon = "\uF05E"  # No-targets icon; use an empty string for no icon. Default: "\uF05E".

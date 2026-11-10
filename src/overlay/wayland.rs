@@ -32,7 +32,9 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keymap, Keysym, Modifiers, RawModifiers},
+        keyboard::{
+            KeyEvent, KeyboardHandler, Keymap, Keysym, Modifiers, RawModifiers, RepeatInfo,
+        },
     },
     shell::{
         WaylandSurface,
@@ -56,7 +58,7 @@ use crate::{
     overlay::{
         Event, draw,
         gate::{KeyGate, Seen},
-        hold::Holds,
+        hold::{Holds, Repeat},
         typing::Typist,
     },
 };
@@ -103,6 +105,8 @@ pub struct State {
     pub seen: Seen,
     /// The arrows held down, for their repeats.
     pub holds: Holds,
+    /// Text entry's repeat clock, shared by both keyboard routes.
+    pub repeat: Repeat,
     /// Passes the app what the input-method grab takes from it and wayhint
     /// doesn't use (see `keyboard.rs`). Made before the first grab, so a
     /// key let go the moment the grab starts still reaches the app.
@@ -169,6 +173,7 @@ impl State {
     /// that would never answer it.
     pub fn release_keys(&mut self) {
         self.holds.clear();
+        self.repeat.clear();
         match std::mem::replace(&mut self.grab, Grab::Released) {
             Grab::InputMethod { method, grab } => {
                 grab.release();
@@ -261,6 +266,15 @@ impl State {
                 let typed = typist.press(code, self.pressed, self.locks);
                 self.gate.forget(code);
                 self.events.push_back(Event::Typed(key, self.held, typed));
+                if typist.repeats(code) {
+                    self.repeat.clear();
+                    if (typed.is_some() || code == KeyCode::BACKSPACE)
+                        && !self.held.ctrl
+                        && !self.held.alt
+                    {
+                        self.repeat.press(code, Instant::now());
+                    }
+                }
                 // Held, an arrow moves the pointer in text mode too.
                 if code.is_arrow() {
                     self.holds.press(code, Instant::now());
@@ -270,8 +284,12 @@ impl State {
                 self.events.push_back(Event::Key(key, self.held));
                 self.holds.press(code, Instant::now());
             }
+            if code == KeyCode::ENTER || code.is_arrow() {
+                self.repeat.clear();
+            }
             return;
         }
+        self.repeat.release(code);
         if self.seen.release(code)
             && let Some(passthrough) = &self.passthrough
         {
@@ -296,6 +314,23 @@ impl State {
             };
             self.events.push_back(event);
         }
+    }
+
+    /// Decode repeats with the current layout and modifiers, after pending releases.
+    pub fn repeat_due(&mut self, now: Instant) -> Option<Event> {
+        let code = self.repeat.due(now)?;
+        if self.held.ctrl || self.held.alt {
+            return None;
+        }
+        let typed = self.typist.as_mut()?.press(code, self.pressed, self.locks);
+        Some(Event::Typed(
+            Key {
+                code,
+                shift: shifted(self.pressed),
+            },
+            self.held,
+            typed,
+        ))
     }
 
     /// The compositor's word on the modifiers held (depressed and latched)
@@ -403,6 +438,11 @@ impl Dispatch2<ZwpInputMethodKeyboardGrabV2, State> for ImeEvents {
             } => state.key(key, key_state == wl_keyboard::KeyState::Pressed),
             zwp_input_method_keyboard_grab_v2::Event::Keymap { fd, size, .. } => {
                 state.keymap = read_keymap(fd, size);
+            }
+            zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
+                if let (Ok(rate), Ok(delay)) = (u32::try_from(rate), u32::try_from(delay)) {
+                    state.repeat.configure(rate, delay);
+                }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
                 mods_depressed,
@@ -538,6 +578,8 @@ impl KeyboardHandler for State {
         _: u32,
     ) {
         if matches!(self.grab, Grab::Exclusive) {
+            self.holds.clear();
+            self.repeat.clear();
             self.events.push_back(Event::KeyboardLost);
         }
     }
@@ -553,6 +595,7 @@ impl KeyboardHandler for State {
         _: &[Keysym],
     ) {
     }
+    // Our event-loop clock repeats text; `holds` repeats arrows in both routes.
     fn repeat_key(
         &mut self,
         _: &Connection,
@@ -561,6 +604,20 @@ impl KeyboardHandler for State {
         _: u32,
         _: KeyEvent,
     ) {
+    }
+
+    fn update_repeat_info(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        info: RepeatInfo,
+    ) {
+        let (rate, delay) = match info {
+            RepeatInfo::Repeat { rate, delay } => (rate.get(), delay),
+            RepeatInfo::Disable => (0, 0),
+        };
+        self.repeat.configure(rate, delay);
     }
     /// The fallback's keymap and lock state, kept as the grab's are.
     fn update_keymap(

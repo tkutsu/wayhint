@@ -17,6 +17,27 @@ from their pixels. These use teal letters because they are guesses.
 Early development, Hyprland only. The author's daily setup is one monitor
 at scale 1; other monitor arrangements are untested.
 
+## In action
+
+Real Wayhint overlays across Chromium, Dolphin, Neovim and Qalculate!.
+The workspace uses a fresh browser profile, system files and sample
+documentation, with Wayhint's default styling.
+
+Type `doc` to find matching text across the browser, file manager and
+editor. Teal boxes mark matches, with a stronger fill on the current one.
+Use `Tab` to choose one, then `Enter` to click.
+
+![Wayhint typing doc and cycling through matches across Chromium, Dolphin and Neovim, with Calculator alongside](docs/images/text-search.gif)
+
+[Full-resolution screenshot](docs/images/text-search.png)
+
+Launch `wayhint --hints` to label every control, including icon buttons.
+Type a label to click its target.
+
+![Wayhint narrowing keyboard hints as letters are typed, then restoring them with Backspace](docs/images/keyboard-hints.gif)
+
+[Full-resolution screenshot](docs/images/keyboard-hints.png)
+
 ## Requirements
 
 - Hyprland, with a working Wayland session and session D-Bus.
@@ -166,7 +187,7 @@ French and Spanish text count as `"Latin"` too. Text in every script remains
 searchable if you type it. These hints follow `[words] fallback_hints`;
 `--hints` still tags every control.
 
-Matches get yellow boxes, with the current match in orange, and the
+Matches get teal boxes, with a stronger fill on the current match, and the
 pointer moves onto the current match. Text is read when a round starts,
 and again whenever the windows change while nothing is typed. Once you type, it stays as read until the
 next round. Before acting, wayhint reads the selected text again and
@@ -289,11 +310,12 @@ Set `[hints] window_hint = false` to disable it. Terminal cursor hints are off
 by default; enable `[pixels] terminal_hint = true` to show them as well
 (with a bottom-left fallback when the cursor cannot be read).
 
-Keep only your overrides. Omitted settings use defaults; input appearance
-inherits from `[hints]`, with its own screen position. Match boxes inherit
-the hints' radius and padding. `[words.matches.current]` inherits the other
-match settings, with an orange starting color. An explicit `background` makes
-the current match solid unless `background_end` is also set.
+Keep only your overrides. Omitted settings use defaults. The input uses a
+dark box at the top, inheriting the hints' font, radius and shadow.
+Match boxes inherit the hints' radius, with their own colors and padding.
+`[words.matches.current]` uses a stronger teal fill and outline. Other match
+settings and an explicitly set match border are inherited. An explicit
+`background` makes the current match solid unless `background_end` is also set.
 
 Under `[keys]`, `default_action = "left"` chooses what a bare tag or Enter
 with nothing typed does. Set a shortcut to a key, or `false` to disable it; empty strings are
@@ -304,8 +326,18 @@ Set `[hints] auto_accept = false` to confirm completed hints with
 `Enter`, in either mode. Set `[words] fallback_hints = false` to show only text
 matches. `[input] show_typed_hints` controls whether typed tag letters move
 into the input box. `[messages]` controls the status messages below it;
-their visibility is independent of `[input] visible`. Durations use `_ms`,
-and pointer distances and merge distance use `_px`.
+their visibility is independent of `[input] visible`. `[input] autohide = 3`
+hides the typed line after three seconds without typing, keeping the query active;
+use `0` to keep it visible. `[messages] size = 13` keeps messages small even with
+larger input text. Other durations use `_ms`, and pointer distances and merge
+distance use `_px`.
+
+No-match messages remain visible until corrected: a text query must match text
+or a fallback hint, or be cleared. A rejected tag message stays until the next
+meaningful input. `duration_ms` is accepted for compatibility but no longer
+expires these messages. Message visibility still follows `[messages] visible`.
+The current match and total appear on the message line, for example `match 1 of 3`,
+using `info_icon` and `info_color`. Warnings and help take priority over the count.
 
 Appearance is configured under `[hints]`, `[words.matches]`,
 `[words.first_character]`, `[input]` and `[messages]`; colors accept hex RGB or RGBA.
@@ -313,8 +345,13 @@ Appearance is configured under `[hints]`, `[words.matches]`,
 Invalid settings are reported before wayhint takes the keyboard.
 
 Hints default to bold black letters on a pale yellow vertical gradient, with
-rounded gray borders and soft shadows. Pixel hints use dark teal letters.
+an 11 px font, rounded gray borders and soft shadows. Pixel hints use dark teal letters.
 Set `shadow = "#00000000"` under `[hints]` to hide the shadow.
+Use `shadow_offset = [0, 2]` for its displacement in logical pixels (right, down)
+and `shadow_size = 3` for its outward fade distance. A size of `0` gives a hard
+edge. `[hints.pixels]` and `[input]` can override these settings. To keep the
+shadow below the input's top edge, make its downward offset at least its size.
+Shadows stay outside the rounded box so translucent backgrounds keep an even fill.
 
 Hint backgrounds and letters can each use a gradient. `gradient = "hint"`
 (the default) repeats it inside each tag. Use `gradient = "global"` to span
