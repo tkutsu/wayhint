@@ -1,4 +1,4 @@
-# wayhint
+# <img src="docs/icon.svg" alt="" width="40" align="center"> wayhint
 
 [![CI](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml/badge.svg)](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
