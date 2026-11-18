@@ -3,57 +3,48 @@
 [![CI](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml/badge.svg)](https://github.com/tkutsu/wayhint/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Use your keyboard to click what you see on a Hyprland desktop.
+Click things on your Hyprland desktop without reaching for the mouse.
 
-Launch `wayhint`, type a word on screen, and press `Enter` to click it.
-Icons and controls without searchable text keep short letter hints: type a
-hint to reach those too. Text and hints work together across the visible
-windows on the focused monitor.
+Run `wayhint`, type a word you can see on screen, and press `Enter` to click
+it. Icons and buttons with no text get short letter hints instead, so you
+type the hint. Both work at once, across every visible window on the focused
+monitor.
 
-wayhint reads the accessibility tree used by screen readers, plus Kitty's
-remote control. Windows without accessible controls get hints estimated
-from their pixels. These use teal letters because they are guesses.
+To find what's clickable, wayhint reads the accessibility tree that screen
+readers use, plus Kitty's remote control. Windows that expose nothing get
+hints guessed from their pixels, drawn in teal so you know they're guesses.
 
-Early development, Hyprland only. The author's daily setup is one monitor
-at scale 1; other monitor arrangements are untested.
+It's early, and it only runs on Hyprland. I use it on one monitor at scale 1,
+so other setups haven't been tested.
 
-## In action
+## What it looks like
 
-Real Wayhint overlays across Chromium, Dolphin, Neovim and Qalculate!.
-The workspace uses a fresh browser profile, system files and sample
-documentation, with Wayhint's default styling: yellow gradient hints with
-borders and soft shadows. Click either preview to watch the WebM.
+Type `doc` and every match lights up in teal across the browser, the file
+manager and the editor, with the current one filled in a little stronger.
+`Tab` moves between them and `Enter` clicks.
 
-Type `doc` to find matching text across the browser, file manager and
-editor. Teal boxes mark matches, with a stronger fill on the current one.
-Use `Tab` to choose one, then `Enter` to click.
+![Wayhint finding doc across Chromium, Dolphin and Neovim, with Calculator alongside](docs/images/text-search.png)
 
-[![Wayhint finding doc across Chromium, Dolphin and Neovim, with Calculator alongside](docs/images/text-search.png)](docs/images/text-search.webm)
+`wayhint --hints` puts a label on every control, icon buttons included. Type
+a label to click what it points at.
 
-[Watch text search (WebM)](docs/images/text-search.webm) | [Full-resolution screenshot](docs/images/text-search.png)
-
-Launch `wayhint --hints` to label every control, including icon buttons.
-Type a label to click its target.
-
-[![Wayhint showing yellow keyboard hints across four apps](docs/images/keyboard-hints.png)](docs/images/keyboard-hints.webm)
-
-[Watch keyboard hints (WebM)](docs/images/keyboard-hints.webm) | [Full-resolution screenshot](docs/images/keyboard-hints.png)
+![Wayhint showing yellow keyboard hints across four apps](docs/images/keyboard-hints.png)
 
 ## Requirements
 
 - Hyprland, with a working Wayland session and session D-Bus.
 - Rust 1.88 or newer to build, plus libxkbcommon and fontconfig (`fc-match`).
 - `at-spi2-core` for the accessibility bus, and apps with accessibility
-  enabled. Setup instructions are below.
+  turned on. Setup is covered below.
 - Kitty and its `kitten` command if you want to search terminal text.
-  Other terminals have no text source unless they expose it through AT-SPI.
+  Other terminals have no text to offer unless they expose it through AT-SPI.
 
-The overlay and clicks require layer-shell, xdg-shell and the virtual
-pointer protocol. Hyprland normally provides these. The input-method
-protocol lets wayhint read keys without closing an app's menus; if it is
-unavailable or already held by fcitx or IBus, wayhint takes keyboard focus
-instead. Modifier clicks need the virtual keyboard protocol. Pixel hints
-use Hyprland's window-export protocol; fractional scaling uses viewporter.
+The overlay and the clicks need layer-shell, xdg-shell and the virtual
+pointer protocol, which Hyprland provides. With the input-method protocol,
+wayhint can read keys without closing an app's open menu. If that protocol
+is missing, or fcitx or IBus already holds it, wayhint takes keyboard focus
+instead. Modifier clicks need the virtual keyboard protocol, pixel hints use
+Hyprland's window-export protocol, and fractional scaling uses viewporter.
 
 ## Install and launch
 
@@ -78,19 +69,20 @@ For a Lua config:
 hl.bind("SUPER + W", hl.dsp.exec_cmd("wayhint"))
 ```
 
-Press the binding again to close wayhint. `Esc` closes it too. Clicking a
-text field ends the run so you can type into the app; other verified
-controls usually start another round. `--once` exits after one action.
+Press the binding again, or `Esc`, to close it. Clicking a text field ends
+the run so you can type into the app. Clicking most other things starts
+another round, so you can keep going. `--once` exits after one click.
 
-For a separate hints-only binding, launch `wayhint --hints`. Each launch
-stays in its chosen mode; launching the other mode switches to it. An
-empty workspace keeps listening for controls to appear.
+If you want a separate key for hints only, bind `wayhint --hints` too. Each
+launch stays in its own mode, and launching the other one switches over. On
+an empty workspace, wayhint waits for something clickable to show up.
 
-## Enable accessibility
+## Turn on accessibility
 
-Apps must publish their controls on the AT-SPI bus for accurate hints and
-searchable text. Start with `wayhint dump --surfaces`: it lists windows
-and their hint counts, which helps identify apps missing from the tree.
+wayhint can only see what apps publish on the AT-SPI bus, so good hints and
+searchable text depend on it. `wayhint dump --surfaces` lists each window
+with its hint count, which is the quickest way to spot an app that isn't
+showing up.
 
 | App | Setup |
 |---|---|
@@ -112,21 +104,20 @@ For Qt apps, you can put this in `hyprland.conf` before starting them:
 env = QT_LINUX_ACCESSIBILITY_ALWAYS_ON,1
 ```
 
-Fully quit and reopen affected apps after changing flags or environment
-variables. Chromium's existing background processes and PWAs must exit
-too: opening another window can reuse a process without the new flag.
-Apps started before the accessibility bus, or left running through a bus
-restart, may also need reopening. There is no need to restart the bus to
-apply these settings.
+After changing a flag or an environment variable, quit the app completely
+and open it again. With Chromium that includes its background processes and
+PWAs, because a new window can reuse an old process that never got the
+flag. Apps started before the accessibility bus, or left running while it
+restarted, may need reopening too. You don't need to restart the bus itself.
 
-See the upstream [Chromium accessibility guide](https://www.chromium.org/developers/design-documents/accessibility/)
-and [Qt accessibility documentation](https://doc.qt.io/qt-6/qaccessible.html)
-for their activation rules.
+The [Chromium accessibility guide](https://www.chromium.org/developers/design-documents/accessibility/)
+and [Qt's accessibility docs](https://doc.qt.io/qt-6/qaccessible.html) have
+the details on when each turns accessibility on.
 
-## Enable Kitty remote control
+## Turn on Kitty remote control
 
-Kitty has no accessibility tree. wayhint reads its pane text and cursor
-position through a local socket, using `kitten`. Add these lines to
+Kitty has no accessibility tree, so wayhint asks it directly: `kitten` reads
+the pane text and cursor position over a local socket. Add these lines to
 `~/.config/kitty/kitty.conf`:
 
 ```conf
@@ -134,22 +125,20 @@ allow_remote_control socket-only
 listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}.sock
 ```
 
-Save your terminal work, fully quit Kitty, then launch it again. Reloading
-its config does not create the socket. Each Kitty process gets its own
-socket; programs it starts inherit the address in `KITTY_LISTEN_ON`.
+Then quit Kitty completely and start it again (save your work first).
+Reloading the config doesn't create the socket. Each Kitty process gets its
+own socket, and programs it starts find the address in `KITTY_LISTEN_ON`.
 
-Run `wayhint doctor` again to check the connection. Remote control enables
-text searches and, with `[pixels] terminal_hint = true`, a hint at the
-active pane's cursor. Without a usable
-connection, or when the cursor is hidden, the focus hint sits 10 px from
-the window's left and bottom edges. This fallback uses the pixel hint
-color; a reported cursor uses the normal hint color. Remote control is
-still required for searchable text. Its quick-access panel is a layer
-surface and is not searched.
+Run `wayhint doctor` again to check the connection. With remote control,
+terminal text becomes searchable, and `[pixels] terminal_hint = true` adds a
+hint at the active pane's cursor. If wayhint can't connect, or the cursor is
+hidden, that hint falls back to 10 px from the window's bottom-left corner
+and takes the pixel hint colour; a cursor Kitty reported gets the normal
+colour. Kitty's quick-access panel is a layer surface and isn't searched.
 
-`socket-only` accepts control through the socket and rejects requests
-through the terminal. Programs able to connect to that socket can read
-and control Kitty. See [Kitty's remote-control settings](https://sw.kovidgoyal.net/kitty/conf/#opt-kitty.listen_on).
+`socket-only` takes commands through the socket and refuses them from inside
+the terminal. Anything that can connect to the socket can read and control
+Kitty, so keep that in mind. See [Kitty's remote-control settings](https://sw.kovidgoyal.net/kitty/conf/#opt-kitty.listen_on).
 
 ## Text and hints
 
@@ -267,17 +256,17 @@ when confirmation is on. Shift is never held through a click.
 
 ## Configuration
 
-Settings live in `~/.config/wayhint/config.toml`. Create the directory first
-if needed. Print a commented starting file with:
+Settings go in `~/.config/wayhint/config.toml`. To start from a commented
+copy of the defaults (this overwrites the file, so only do it once):
 
 ```sh
+mkdir -p ~/.config/wayhint
 wayhint config --default > ~/.config/wayhint/config.toml
 ```
 
-This replaces that file, so use it only when starting a new config.
-`wayhint config` validates your existing settings and prints the resolved
-values. The [default config](config.default.toml) documents every option.
-A small example:
+`wayhint config` checks your settings and prints what they resolve to. Every
+option is explained in the [default config](config.default.toml). A small
+example:
 
 ```toml
 [keys]
@@ -297,24 +286,23 @@ auto_accept = true     # act on a unique match after 3 characters
 scroll_steps = 2
 ```
 
-Wayhint leaves the cursor where it ended up. Set
-`[pointer] restore_on_exit = true` to return it to its launch position when
-the session ends. Set `[pointer] restore_on_action = true` to return it to its
-pre-command position after each action while the session is running.
-This leaves hover in place and defers restoration during a hold until
-release. The default is `false`. The old `after = "restore"` and
-`after = "leave"` values are still accepted as `true` and `false`, respectively.
+By default the cursor stays wherever wayhint left it. Set
+`[pointer] restore_on_exit = true` to put it back where it was when wayhint
+started, or `[pointer] restore_on_action = true` to put it back after every
+click. A hover stays put, and during a hold the cursor comes back on
+release. Both default to `false`. The old `after = "restore"` and
+`after = "leave"` still work and mean `true` and `false`.
 
-Each window has a hint near its top right, moved clear of other hints and
-small controls where space permits. It focuses the window without clicking
-and has no arrow. It is hidden whenever a verb is armed or a drag is active.
-Set `[hints] window_hint = false` to disable it. Terminal cursor hints are off
-by default; enable `[pixels] terminal_hint = true` to show them as well
-(with a bottom-left fallback when the cursor cannot be read).
+Each window gets a hint near its top right corner, nudged clear of other
+hints and small controls when there's room. It focuses the window without
+clicking, has no arrow, and hides while a verb is armed or a drag is going.
+`[hints] window_hint = false` turns it off. Terminal cursor hints are off by
+default; `[pixels] terminal_hint = true` turns them on, falling back to the
+bottom-left corner when the cursor can't be read.
 
-Keep only your overrides. Omitted settings use defaults. The input uses a
-centered, translucent dark box with 18 px text and rounded corners,
-inheriting the hints' font and shadow.
+Your config only needs the settings you want to change; everything else
+uses the default. The input is a centred, translucent dark box with 18 px
+text and rounded corners, and takes the hints' font and shadow.
 Match boxes inherit the hints' radius, with their own colors and padding.
 `[words.matches.current]` uses a stronger teal fill and outline. Other match
 settings and an explicitly set match border are inherited. An explicit
@@ -335,10 +323,10 @@ use `0` to keep it visible. `[messages] size = 13` keeps messages small even wit
 larger input text. Other durations use `_ms`, and pointer distances and merge
 distance use `_px`.
 
-No-match messages remain visible until corrected: a text query must match text
-or a fallback hint, or be cleared. A rejected tag message stays until the next
-meaningful input. `duration_ms` is accepted for compatibility but no longer
-expires these messages. Message visibility still follows `[messages] visible`.
+A no-match message stays up until you fix the query, either so it matches
+text or a fallback hint, or by clearing it. A rejected tag message stays until
+your next real keypress. `duration_ms` is still accepted but no longer makes
+these messages go away. Message visibility still follows `[messages] visible`.
 The current match and total appear on the message line, for example `match 1 of 3`,
 using `info_icon` and `info_color`. Warnings and help take priority over the count.
 
