@@ -244,6 +244,7 @@ impl Around<'_> {
 }
 
 /// Keep targets in line order, tolerating small overlaps in adjacent hit boxes.
+/// Neighbours further apart than twice the larger one's longer side are no line.
 fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, BoxRect)> {
     let along = |r: BoxRect| {
         if vertical {
@@ -252,6 +253,7 @@ fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, 
             (r.x, r.right())
         }
     };
+    let size = |r: BoxRect| r.w.max(r.h);
     let mut line: Vec<_> = candidates
         .iter()
         .copied()
@@ -262,10 +264,11 @@ fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, 
         })
         .collect();
     line.sort_unstable_by_key(|&(i, r)| (along(r), i));
-    if line
-        .windows(2)
-        .any(|pair| along(pair[0].1).1 - along(pair[1].1).0 > 4)
-    {
+    if line.windows(2).any(|pair| {
+        let (a, b) = (pair[0].1, pair[1].1);
+        let gap = along(b).0 - along(a).1;
+        gap < -4 || gap > 2 * size(a).max(size(b))
+    }) {
         line.clear();
     }
     line
@@ -418,8 +421,10 @@ impl Painter {
                 }
             }
         }
-        // Where a grid has both axes, the line nearer a screen edge wins.
-        lines.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.len().cmp(&a.1.len())));
+        // Longer lines claim their members first, so a chance pair of
+        // aligned targets can't split a row; between equals, as in a grid,
+        // the line nearer a screen edge wins.
+        lines.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.total_cmp(&b.0)));
         let mut sides = vec![None; frame.tags.len()];
         let mut occupied = Vec::new();
         for (_, line, preferred) in lines {
@@ -4043,6 +4048,50 @@ mod collision_tests {
                     whole_px(place(at, position, painter.tags.size("EA"), (400.0, 300.0)).unwrap());
                 assert_eq!(tag.at, expected.origin());
             }
+        }
+    }
+
+    #[test]
+    fn auto_rows_are_not_split_by_chance_columns() {
+        // Vial's tab words and layer digits, as the pixel detector found
+        // them, and a speck far below that ends where "Matrix tester" does.
+        let tabs = [
+            BoxRect::new(20, 104, 48, 16),
+            BoxRect::new(91, 104, 40, 16),
+            BoxRect::new(154, 103, 44, 14),
+            BoxRect::new(221, 103, 48, 18),
+            BoxRect::new(291, 103, 62, 14),
+            BoxRect::new(376, 103, 49, 13),
+            BoxRect::new(448, 104, 82, 16),
+            BoxRect::new(552, 104, 86, 16),
+            BoxRect::new(660, 104, 79, 16),
+            BoxRect::new(762, 103, 73, 14),
+        ];
+        let digits = [
+            BoxRect::new(61, 140, 9, 14),
+            BoxRect::new(93, 140, 9, 13),
+            BoxRect::new(125, 140, 9, 13),
+            BoxRect::new(157, 139, 9, 14),
+            BoxRect::new(189, 140, 9, 13),
+            BoxRect::new(221, 139, 9, 14),
+        ];
+        let speck = BoxRect::new(820, 991, 12, 13);
+        let area = BoxRect::new(0, 0, 2560, 1440);
+        let controls = [tabs.as_slice(), &digits, &[speck]].concat();
+        let mut painter = among(&controls);
+        painter.set_space(area, &[], vec![(area, area)], controls.clone());
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        painter.arrange(&frame, (2560.0, 1440.0));
+        let side = |i: usize| painter.sides[&frame.tags[i].placement_key().unwrap()];
+        for (row, members) in [
+            ("tabs", 0..tabs.len()),
+            ("digits", tabs.len()..tabs.len() + digits.len()),
+        ] {
+            let first = side(members.start);
+            assert!(members.clone().all(|i| side(i) == first), "{row} split");
         }
     }
 
