@@ -243,16 +243,21 @@ impl Around<'_> {
     }
 }
 
-/// Keep targets in line order, tolerating small overlaps in adjacent hit boxes.
-/// Neighbours further apart than twice the larger one's longer side are no line.
-fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, BoxRect)> {
-    let along = |r: BoxRect| {
-        if vertical {
-            (r.y, r.bottom())
-        } else {
-            (r.x, r.right())
-        }
-    };
+/// The space between `a` and the later `b` along a row, or a column if
+/// `vertical`; negative where they overlap.
+const fn gap(a: BoxRect, b: BoxRect, vertical: bool) -> i32 {
+    if vertical {
+        b.y - a.bottom()
+    } else {
+        b.x - a.right()
+    }
+}
+
+/// Aligned targets in line order, cut into runs of two or more where
+/// neighbours overlap by more than a few pixels or sit further apart than
+/// twice the larger one's longer side. Enclosing targets are containers,
+/// not members.
+fn line_runs(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<Vec<(usize, BoxRect)>> {
     let size = |r: BoxRect| r.w.max(r.h);
     let mut line: Vec<_> = candidates
         .iter()
@@ -263,15 +268,43 @@ fn line_members(candidates: &[(usize, BoxRect)], vertical: bool) -> Vec<(usize, 
                 .any(|&(j, other)| i != j && r != other && r.intersect(other) == Some(other))
         })
         .collect();
-    line.sort_unstable_by_key(|&(i, r)| (along(r), i));
-    if line.windows(2).any(|pair| {
-        let (a, b) = (pair[0].1, pair[1].1);
-        let gap = along(b).0 - along(a).1;
-        gap < -4 || gap > 2 * size(a).max(size(b))
-    }) {
-        line.clear();
+    line.sort_unstable_by_key(|&(i, r)| {
+        if vertical {
+            (r.y, r.bottom(), i)
+        } else {
+            (r.x, r.right(), i)
+        }
+    });
+    let mut runs = vec![Vec::new()];
+    for member in line {
+        if let Some(&(_, last)) = runs.last().unwrap().last() {
+            let between = gap(last, member.1, vertical);
+            if between < -4 || between > 2 * size(last).max(size(member.1)) {
+                runs.push(Vec::new());
+            }
+        }
+        runs.last_mut().unwrap().push(member);
     }
-    line
+    runs.retain(|run| run.len() >= 2);
+    runs
+}
+
+/// How close each member of `line` is to its nearest neighbour in it.
+fn nearest_gaps(line: &[(usize, BoxRect)], vertical: bool) -> Vec<i32> {
+    let between: Vec<_> = line
+        .windows(2)
+        .map(|pair| gap(pair[0].1, pair[1].1, vertical).max(0))
+        .collect();
+    (0..line.len())
+        .map(|k| {
+            let before = k.checked_sub(1).map(|k| between[k]);
+            before
+                .into_iter()
+                .chain(between.get(k).copied())
+                .min()
+                .unwrap()
+        })
+        .collect()
 }
 
 /// Layer surfaces can be thinner than a label; their labels may use the monitor.
@@ -374,7 +407,7 @@ impl Painter {
         }) {
             return vec![None; frame.tags.len()];
         }
-        let mut lines = Vec::new();
+        let mut runs = Vec::new();
         // Match starts, centres or ends, allowing four logical pixels of jitter.
         for vertical in [true, false] {
             for alignment in 0..3 {
@@ -395,30 +428,56 @@ impl Painter {
                     let end = remaining.partition_point(|&(i, r)| {
                         bounds[i] == bounds[first] && cross(r) - cross(anchor) <= 4
                     });
-                    let line = line_members(&remaining[..end], vertical);
+                    runs.extend(
+                        line_runs(&remaining[..end], vertical)
+                            .into_iter()
+                            .map(|run| (vertical, run)),
+                    );
                     remaining = &remaining[end..];
-                    if line.len() < 2 {
-                        continue;
-                    }
-                    let centre = line
-                        .iter()
-                        .map(|&(_, r)| {
-                            if vertical {
-                                r.center().x as f32 / area.0
-                            } else {
-                                r.center().y as f32 / area.1
-                            }
-                        })
-                        .sum::<f32>()
-                        / line.len() as f32;
-                    let preferred = match (vertical, centre <= 0.5) {
-                        (true, true) => Side::Left,
-                        (true, false) => Side::Right,
-                        (false, true) => Side::Above,
-                        (false, false) => Side::Below,
-                    };
-                    lines.push((centre.min(1.0 - centre), line, preferred));
                 }
+            }
+        }
+        // A target aligned both ways leaves a line where it sits more than
+        // twice as far from a neighbour as in another (with four pixels of
+        // jitter): an icon touching its row stays out of a list it merely
+        // lines up with. Similar gaps leave the choice to line length.
+        let mut tightest = vec![i32::MAX; frame.tags.len()];
+        let gaps: Vec<_> = runs
+            .iter()
+            .map(|(vertical, run)| nearest_gaps(run, *vertical))
+            .collect();
+        for ((_, run), gaps) in runs.iter().zip(&gaps) {
+            for (&(i, _), &gap) in run.iter().zip(gaps) {
+                tightest[i] = tightest[i].min(gap);
+            }
+        }
+        let mut lines = Vec::new();
+        for ((vertical, run), gaps) in runs.into_iter().zip(gaps) {
+            let kept: Vec<_> = run
+                .into_iter()
+                .zip(gaps)
+                .filter(|&((i, _), gap)| gap <= 2 * tightest[i] + 4)
+                .map(|(member, _)| member)
+                .collect();
+            for line in line_runs(&kept, vertical) {
+                let centre = line
+                    .iter()
+                    .map(|&(_, r)| {
+                        if vertical {
+                            r.center().x as f32 / area.0
+                        } else {
+                            r.center().y as f32 / area.1
+                        }
+                    })
+                    .sum::<f32>()
+                    / line.len() as f32;
+                let preferred = match (vertical, centre <= 0.5) {
+                    (true, true) => Side::Left,
+                    (true, false) => Side::Right,
+                    (false, true) => Side::Above,
+                    (false, false) => Side::Below,
+                };
+                lines.push((centre.min(1.0 - centre), line, preferred));
             }
         }
         // Longer lines claim their members first, so a chance pair of
@@ -4092,6 +4151,64 @@ mod collision_tests {
         ] {
             let first = side(members.start);
             assert!(members.clone().all(|i| side(i) == first), "{row} split");
+        }
+    }
+
+    #[test]
+    fn auto_rows_keep_members_that_also_line_up_with_a_long_column() {
+        // Firefox: workspace icons over the vertical tabs, the first icon's
+        // left edge 4 px from theirs; Google's search bar over its results,
+        // the search box 1 px from their left edge.
+        let icons: Vec<_> = (0..6)
+            .map(|k| BoxRect::new(20 + 29 * k, 79, 28, 28))
+            .collect();
+        let tabs: Vec<_> = (0..8)
+            .map(|k| BoxRect::new(24, 121 + 29 * k, 270, 29))
+            .collect();
+        let header = [
+            BoxRect::new(635, 101, 20, 50),
+            BoxRect::new(655, 101, 658, 50),
+            BoxRect::new(1313, 101, 48, 50),
+            BoxRect::new(1366, 101, 40, 50),
+            BoxRect::new(1406, 101, 40, 50),
+            BoxRect::new(1450, 101, 44, 50),
+        ];
+        let results = [
+            BoxRect::new(654, 394, 652, 28),
+            BoxRect::new(654, 548, 124, 20),
+            BoxRect::new(654, 679, 196, 22),
+            BoxRect::new(654, 755, 652, 50),
+            BoxRect::new(654, 874, 579, 46),
+            BoxRect::new(654, 980, 70, 22),
+            BoxRect::new(654, 1009, 342, 18),
+            BoxRect::new(654, 1031, 321, 18),
+        ];
+        let area = BoxRect::new(0, 0, 2560, 1440);
+        let controls = [icons.as_slice(), &tabs, &header, &results].concat();
+        let mut painter = among(&controls);
+        painter.set_space(area, &[], vec![(area, area)], controls.clone());
+        let frame = Frame {
+            tags: controls.iter().map(|&r| auto_tag(r, "EA")).collect(),
+            ..Frame::default()
+        };
+        painter.arrange(&frame, (2560.0, 1440.0));
+        let key = |i: usize| frame.tags[i].placement_key().unwrap();
+        let mut start = 0;
+        for (line, len) in [
+            ("icons", icons.len()),
+            ("tabs", tabs.len()),
+            ("header", header.len()),
+            ("results", results.len()),
+        ] {
+            let members = start..start + len;
+            start += len;
+            let first = painter.sides[&key(members.start)];
+            assert!(
+                members
+                    .clone()
+                    .all(|i| painter.shared.contains(&key(i)) && painter.sides[&key(i)] == first),
+                "{line} split"
+            );
         }
     }
 
